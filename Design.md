@@ -26,7 +26,8 @@
 |---|---|---|---|---|
 | Permanent (:11435) | Autocomplete | `qwen2.5-coder:1.5b` | Q8_0 | ~1.5 GB |
 | Swappable (:11434) | Brain (coding) | `qwen3.5:35b-a3b` | UD-IQ4_NL | ~17.8 GB |
-| Swappable (:11434) | Mimic personas (×6) | `Qwen3.5-9B-Uncensored` | Q6_K | ~7.4 GB |
+| Swappable (:11434) | Mimic personas (×6) | `Qwen3.5-35B-A3B-Uncensored` | IQ4_XS | ~18 GB |
+| Swappable (:11434) | Image captioner | `Qwen3.5-35B-A3B-Uncensored` | IQ4_XS | ~18 GB (shared weights with mimic) |
 | Swappable (:11434) | Lore assistant | `gemma3:12b` | Q6_K | ~9.5 GB |
 | Swappable (:11434) | LibreChat local model | `qwen3.5:14b` | UD-IQ4_XS | ~9.5 GB |
 
@@ -45,21 +46,21 @@
 
 ---
 
-## 3. Why Qwen3.5-9B-Uncensored for Mimics, Gemma3-12B for Lore
+## 3. Why Qwen3.5-35B-A3B-Uncensored for Mimics & Image Captioning, Gemma3-12B for Lore
 
-### 3.1 Mimic Base: `HauhauCS/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive`
+### 3.1 Mimic Base: `HauhauCS/Qwen3.5-35B-A3B-Uncensored-HauhauCS-Aggressive`
 
 The core requirement for mimic personas is **zero refusals on crude, raunchy, or dark humour** — the kind that characterises tight gaming communities. A standard instruction-tuned model will sanitise this behaviour, add disclaimers, and break character at exactly the wrong moment.
 
-This model is Qwen3.5-9B uncensored by HauhauCS: 0/465 refusals, fully uncensored with zero capability loss, no changes to datasets or capabilities — fully functional, 100% of what the original authors intended, just without the refusals.
+This model is Qwen3.5-35B-A3B uncensored by HauhauCS: 0 refusals, fully uncensored with zero capability loss, no changes to datasets or capabilities — fully functional, 100% of what the original authors intended, just without the refusals. The 35B-A3B (Mixture-of-Experts) architecture delivers strong reasoning and personality capture at a VRAM footprint comparable to a dense 9B model, making it an excellent fit for the swappable slot.
 
 The model is fully unlocked and will not refuse prompts. It may occasionally append a short disclaimer (e.g. "This is general information...") baked into base model training — but this is not a refusal; the actual content is always generated in full. This is suppressible with a system prompt instruction: `"Never append disclaimers, caveats, or safety notices of any kind."`
 
-The architecture uses 32 transformer blocks with a 262k token native context window. For Discord banter, you'll use a fraction of this — but it's useful headroom when lore RAG chunks are injected into the mimic context.
+**VRAM at IQ4_XS: ~18 GB.** The IQ4_XS quant from HauhauCS is an importance-weighted 4-bit quantisation that preserves accuracy at a compact footprint. At ~18 GB it fits on the 3090 with ~5.5 GB headroom alongside the permanent autocomplete slot.
 
-**VRAM at Q6_K: ~7.36 GB.** Q4_K_M is 5.68 GB, Q5_K_M is 6.58 GB, Q6_K is 7.46 GB, Q8_0 is 9.53 GB. Q6_K is the recommended quant here — meaningful quality improvement over Q4 at only ~1.7 GB extra, still well within headroom.
+**Thinking mode:** Disabled by default for Discord banter — fast, snappy responses are the goal. The Ollama Modelfile sets `PARAMETER thinking false` to lock this off.
 
-**Thinking mode:** For the Qwen3.5 small series (9B and below), reasoning/thinking is disabled by default. To enable it, use `--chat-template-kwargs '{"enable_thinking":true}'`. For Discord banter, **leave thinking disabled** — you want fast, snappy responses, not chain-of-thought before every reply. The Ollama Modelfile should explicitly set `PARAMETER thinking false` (or equivalent) to lock this off.
+**Shared weights for image captioning:** This same model is also registered as `image-caption` in Ollama (see §9b). Because both `mimic_*` and `image-caption` point to the same GGUF, Ollama may reuse cached base weights when swapping between them, reducing swap overhead. The `image-caption` registration uses a different system prompt tuned for concise, factual image description rather than persona mimicry.
 
 ### 3.2 Lore Assistant Base: `gemma3:12b` (sterile, unchanged)
 
@@ -112,25 +113,7 @@ If you have an Anthropic API key, routing LibreChat to Claude (Sonnet or Haiku) 
 
 ### 3a.3 LibreChat Modelfile
 
-```dockerfile
-# librechat_chat.Modelfile
-FROM hf.co/unsloth/Qwen3.5-14B-GGUF:UD-IQ4_XS
-
-PARAMETER temperature 0.7
-PARAMETER top_k 40
-PARAMETER top_p 0.9
-PARAMETER num_ctx 16384
-PARAMETER num_predict -1
-PARAMETER num_parallel 1
-PARAMETER thinking false        # Disabled — fast conversational responses, no CoT overhead
-PARAMETER keep_alive 600        # 10-min idle timeout — LibreChat sessions can be bursty
-
-SYSTEM """
-You are a helpful, knowledgeable, and thoughtful personal assistant.
-Answer questions clearly and accurately. When you are uncertain, say so.
-You can help with writing, research, analysis, coding questions, and general conversation.
-"""
-```
+> See [`modelfiles/librechat_chat.Modelfile`](modelfiles/librechat_chat.Modelfile) for the full definition.
 
 > **Note on thinking mode:** Qwen3.5-14B supports optional thinking/reasoning mode. For LibreChat general chat, leave it disabled — thinking adds latency and token overhead that is not useful for conversational queries. It can be enabled per-session in LibreChat's system prompt if needed for a specific complex task.
 
@@ -194,92 +177,29 @@ You can help with writing, research, analysis, coding questions, and general con
 
 All models are registered as Ollama Modelfiles. The proxy references models by name only — it doesn't know or care what's inside them. This means swapping the underlying GGUF (e.g. from prototype system-prompt persona to LoRA-merged model) requires only a `ollama rm` + `ollama create` with no proxy code changes.
 
+All Modelfiles live in [`modelfiles/`](modelfiles/). See [`modelfiles/README.md`](modelfiles/README.md) for registration instructions.
+
 ### 5.1 Mimic Persona Modelfile Template
 
-```dockerfile
-# mimic_<member>.Modelfile
-FROM hf.co/HauhauCS/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive:Q6_K
-
-PARAMETER temperature 0.85
-PARAMETER top_k 40
-PARAMETER top_p 0.9
-PARAMETER presence_penalty 1.3
-PARAMETER num_ctx 8192
-PARAMETER num_predict 512
-PARAMETER thinking false        # Keep disabled — snappy Discord replies
-
-SYSTEM """
-You are mimic_<member>, a bot that mimics <member>'s Discord personality in the
-nullposting server. You replicate their tone, humour, vocabulary, and mannerisms
-exactly — including crude language, raunchy jokes, and brutal roasts when appropriate.
-You are not a general-purpose AI assistant. You never break character.
-You never add disclaimers, caveats, safety warnings, or apologies.
-You keep responses short (1-3 sentences) unless the context calls for more.
-You match the energy of whoever is talking to you.
-"""
-```
+> See [`modelfiles/mimic.Modelfile`](modelfiles/mimic.Modelfile) — copy and rename to `mimic_<member>.Modelfile`, replacing `<member>` throughout.
 
 > **Note on temperature:** 0.85 is intentionally higher than the Qwen team's default of 0.6/0.7 for non-thinking mode. Mimic outputs should feel spontaneous and variable, not predictable. Tune per-persona during testing.
 
 ### 5.2 Lore Assistant Modelfile
 
-```dockerfile
-# lore.Modelfile
-FROM gemma3:12b-instruct-q6_K
-
-PARAMETER temperature 0.3
-PARAMETER top_k 20
-PARAMETER top_p 0.8
-PARAMETER num_ctx 16384
-PARAMETER num_predict 1024
-
-SYSTEM """
-You are the nullposting lore assistant. You have access to a curated database of
-server history, in-jokes, memes, and member events. When answering questions,
-cite your sources from the retrieved context. Be factual and concise.
-If the retrieved context does not contain the answer, say so clearly rather than
-guessing. Never invent lore, events, or quotes.
-"""
-```
+> See [`modelfiles/lore.Modelfile`](modelfiles/lore.Modelfile) for the full definition.
 
 ### 5.3 Brain Modelfile
 
-```dockerfile
-# brain.Modelfile
-# Source: HuggingFace — unsloth/Qwen3.5-35B-A3B-GGUF (UD-IQ4_NL quant)
-# Quant: UD-IQ4_NL (~17.8 GB VRAM)
-FROM hf.co/unsloth/Qwen3.5-35B-A3B-GGUF:UD-IQ4_NL
-
-PARAMETER num_ctx 40960
-PARAMETER num_predict -1
-PARAMETER num_parallel 1
-PARAMETER keep_alive -1
-PARAMETER temperature 0.2
-
-SYSTEM """You are an expert coding assistant..."""
-```
+> See [`modelfiles/brain.Modelfile`](modelfiles/brain.Modelfile) for the full definition.
 
 ### 5.4 LibreChat Local Chat Modelfile
 
-```dockerfile
-# librechat_chat.Modelfile
-FROM hf.co/unsloth/Qwen3.5-14B-GGUF:UD-IQ4_XS
+> See [`modelfiles/librechat_chat.Modelfile`](modelfiles/librechat_chat.Modelfile) for the full definition.
 
-PARAMETER temperature 0.7
-PARAMETER top_k 40
-PARAMETER top_p 0.9
-PARAMETER num_ctx 16384
-PARAMETER num_predict -1
-PARAMETER num_parallel 1
-PARAMETER thinking false
-PARAMETER keep_alive 600
+### 5.5 Image Caption Modelfile
 
-SYSTEM """
-You are a helpful, knowledgeable, and thoughtful personal assistant.
-Answer questions clearly and accurately. When you are uncertain, say so.
-You can help with writing, research, analysis, coding questions, and general conversation.
-"""
-```
+> See [`modelfiles/image-caption.Modelfile`](modelfiles/image-caption.Modelfile) for the full definition. This model shares base weights with `mimic_*` — only the system prompt differs. Used exclusively by the `history-service` image captioner during off-hours batch processing.
 
 ---
 
@@ -325,133 +245,19 @@ LibreChat requests queue behind any in-progress Discord or Brain generation unde
 
 ## 7. Docker Compose Layout
 
-```yaml
-services:
-  ollama-permanent:
-    image: ollama/ollama:latest
-    runtime: nvidia
-    environment:
-      - NVIDIA_VISIBLE_DEVICES=0
-      - OLLAMA_NUM_PARALLEL=4
-      - OLLAMA_KEEP_ALIVE=-1
-    ports:
-      - "11435:11434"
-    volumes:
-      - ollama_permanent:/root/.ollama
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - capabilities: [gpu]
-
-  ollama-swappable:
-    image: ollama/ollama:latest
-    runtime: nvidia
-    environment:
-      - NVIDIA_VISIBLE_DEVICES=0
-      - OLLAMA_NUM_PARALLEL=1
-      - OLLAMA_KEEP_ALIVE=300        # 5-min idle timeout for swappable slot
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama_swappable:/root/.ollama
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - capabilities: [gpu]
-
-  proxy:
-    build: ./proxy
-    ports:
-      - "11436:11436"
-    depends_on:
-      - ollama-permanent
-      - ollama-swappable
-    environment:
-      - OLLAMA_PERMANENT=http://ollama-permanent:11434
-      - OLLAMA_SWAPPABLE=http://ollama-swappable:11434
-
-  discord-bot:
-    build: ./discord-bot
-    depends_on:
-      - proxy
-    environment:
-      - OLLAMA_PROXY=http://proxy:11436
-      - DISCORD_TOKEN=${DISCORD_TOKEN}
-
-  librechat:
-    image: ghcr.io/danny-avila/librechat:latest
-    ports:
-      - "3080:3080"
-    depends_on:
-      - proxy
-      - librechat-mongodb
-    volumes:
-      - ./librechat/librechat.yaml:/app/librechat.yaml:ro
-      - librechat_uploads:/app/client/public/images
-    environment:
-      - MONGO_URI=mongodb://librechat-mongodb:27017/LibreChat
-      # Anthropic API key — leave blank to disable Claude backend
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-      # Local Ollama endpoint via proxy
-      - OLLAMA_BASE_URL=http://proxy:11436
-
-  librechat-mongodb:
-    image: mongo:7
-    volumes:
-      - librechat_mongo:/data/db
-
-  rag-service:
-    build: ./rag
-    environment:
-      - CHROMA_HOST=chromadb
-    depends_on:
-      - chromadb
-
-  chromadb:
-    image: chromadb/chroma:latest
-    volumes:
-      - chroma_data:/chroma/chroma
-
-  # ──────────────────────────────────────────────────────────
-  # History Service
-  # Background service: Discord message history collection
-  # (JSONL per user) + LoRA retraining trigger.
-  # Not in the inference hot path — runs on a schedule.
-  # ──────────────────────────────────────────────────────────
-  history-service:
-    build: ./history-service
-    restart: unless-stopped
-    depends_on:
-      proxy:
-        condition: service_healthy
-    environment:
-      - DISCORD_TOKEN=${DISCORD_TOKEN}
-      - DISCORD_GUILD_ID=${DISCORD_GUILD_ID}
-      - PROXY_URL=http://proxy:11436
-      - OLLAMA_SWAPPABLE=http://ollama-swappable:11434
-      - RETRAIN_THRESHOLD=${RETRAIN_THRESHOLD:-200}
-      - INCREMENTAL_PULL_INTERVAL=${INCREMENTAL_PULL_INTERVAL:-15}
-      - FULL_PULL_CRON=${FULL_PULL_CRON:-"0 3 1 * *"}
-      - TRAINING_WINDOW_START=${TRAINING_WINDOW_START:-3}
-      - TRAINING_WINDOW_END=${TRAINING_WINDOW_END:-6}
-      - TRAINING_TRIGGER_ENABLED=${TRAINING_TRIGGER_ENABLED:-false}  # enable in Phase 3
-    volumes:
-      - history_data:/app/data
-      - lora_outputs:/app/lora-outputs
-      - ./modelfiles:/modelfiles
-      - ./lora-training:/lora-training:ro   # training scripts (read-only)
-
-volumes:
-  ollama_permanent:
-  ollama_swappable:
-  librechat_uploads:
-  librechat_mongo:
-  chroma_data:
-  history_data:       # Per-user JSONL message history + training state
-  lora_outputs:       # Merged GGUF outputs from LoRA training
-```
+> See [`docker-compose.yml`](docker-compose.yml) for the full service definitions. The key services are:
+>
+> | Service | Image / Build | Port | Notes |
+> |---|---|---|---|
+> | `ollama-permanent` | `ollama/ollama:latest` | `:11435` | Autocomplete model, `OLLAMA_NUM_PARALLEL=4`, `OLLAMA_KEEP_ALIVE=-1` |
+> | `ollama-swappable` | `ollama/ollama:latest` | `:11434` | All other models, `OLLAMA_NUM_PARALLEL=1`, `OLLAMA_KEEP_ALIVE=300` |
+> | `proxy` | `./proxy` | `:11436` | FastAPI orchestration proxy |
+> | `discord-bot` | `./discord-bot` | — | Depends on proxy + chromadb |
+> | `librechat` | `ghcr.io/danny-avila/librechat:latest` | `:3080` | Mounts `librechat/librechat.yaml` |
+> | `librechat-mongodb` | `mongo:7` | — | Conversation history + settings |
+> | `rag-service` | `./rag` | — | Depends on chromadb |
+> | `chromadb` | `chromadb/chroma:latest` | — | Vector store |
+> | `history-service` | `./history-service` | — | Background; set `TRAINING_TRIGGER_ENABLED=true` in Phase 3 |
 
 > **Why two separate Ollama instances share the same `NVIDIA_VISIBLE_DEVICES=0`?** Ollama manages its own VRAM allocation. Both instances can reference the same GPU — the proxy enforces that only one swappable model is loaded at a time. The permanent instance holds exactly one model forever. Docker resource constraints don't need GPU isolation here since we're self-policing via the proxy lock.
 
@@ -625,12 +431,86 @@ The incremental pull path stays fast and simple — it only updates counters and
 |---|---|
 | Collecting raw Discord messages (JSONL) | `history-service` |
 | Filtering and maintaining per-user message files | `history-service` |
+| Captioning image attachments in JSONL records | `history-service` |
 | Triggering LoRA retraining | `history-service` |
 | Chunking messages for lore retrieval | `rag-service` |
 | Embedding chunks into ChromaDB | `rag-service` |
 | Serving retrieval queries at inference time | `rag-service` |
 
 The RAG service reads from the JSONL files produced by the history service for its lore ingestion pipeline. The two services are decoupled — the RAG service does not depend on the history service being running.
+
+---
+
+## 9b. Image Captioning Pipeline (`history-service`)
+
+The `history-service` includes a background image captioning step that enriches JSONL records with natural-language descriptions of Discord image attachments. This is an extension of the history collection pipeline — it runs as a separate scheduled job during the same off-hours window as training.
+
+### Purpose
+
+Discord messages frequently contain images (memes, screenshots, reaction images). Without captioning, this content is invisible to the lore RAG pipeline — the vector store can only index text. Captions make image content searchable and contextually meaningful for lore retrieval.
+
+### Model: `image-caption`
+
+The captioner uses the `image-caption` Ollama model, defined in [`modelfiles/image-caption.Modelfile`](modelfiles/image-caption.Modelfile). This model uses the **same base weights as the mimic personas** (`HauhauCS/Qwen3.5-35B-A3B-Uncensored-HauhauCS-Aggressive:IQ4_XS`) — an `image-text-to-text` capable model with zero refusals. This is critical: Discord content includes crude memes and adult humour that a standard censored vision model would refuse to describe.
+
+Because `image-caption` and `mimic_*` share the same GGUF, Ollama may reuse cached base weights when swapping between them, reducing swap overhead. The `image-caption` registration uses a different system prompt tuned for concise, factual description rather than persona mimicry.
+
+**VRAM:** ~18 GB — same as the mimic slot. The captioner only runs during the configured caption window when no live inference is active.
+
+### Scheduling
+
+Image captioning runs as a dedicated APScheduler job in `main.py`. By default it shares the training window (3–6 AM) and runs **before** training dispatch:
+
+```
+Caption window (3–6 AM):
+  1. image_captioner.process_pending_batch()   ← runs first
+  2. training_trigger.dispatch_queued()        ← runs after captions complete
+```
+
+The captioner checks proxy queue depth before starting each batch. If the proxy is busy, it defers to the next scheduler tick (every 5 minutes).
+
+### JSONL Schema Extension
+
+The existing JSONL record gains an optional `attachments` array. Messages without image attachments have no `attachments` field (fully backward compatible):
+
+```json
+{
+  "message_id": "...",
+  "content": "check this out",
+  "clean": true,
+  "attachments": [
+    {
+      "url": "https://cdn.discordapp.com/attachments/.../meme.png",
+      "content_type": "image/png",
+      "filename": "meme.png",
+      "file_size_bytes": 204800,
+      "caption": "A man in a suit pointing at a whiteboard that reads 'dying slower'.",
+      "caption_status": "done",
+      "caption_excluded_from_training": true
+    }
+  ]
+}
+```
+
+### Training Exclusion
+
+The `caption_excluded_from_training: true` flag signals the LoRA dataset exporter to treat caption text as **read-only context**, not training data:
+
+- **RAG ingestion:** The caption is appended to the message's effective content string when chunking for ChromaDB: `"check this out [image: A man in a suit pointing at a whiteboard...]"`. This makes image content searchable via lore retrieval.
+- **LoRA training dataset:** Caption text is **never** included in training samples. Only the original `content` field (the user's actual words) is used. Synthetic image descriptions are not the user's voice and would degrade persona quality if included.
+
+### New Environment Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `IMAGE_CAPTION_ENABLED` | `false` | Enable/disable image captioning. Set `true` once `image-caption` model is registered. |
+| `IMAGE_CAPTION_MODEL` | `image-caption` | Ollama model name for captioning |
+| `IMAGE_CAPTION_BATCH_SIZE` | `10` | Images processed per captioning run |
+| `IMAGE_CAPTION_WINDOW_START` | `3` | Hour (0–23) when captioning may run |
+| `IMAGE_CAPTION_WINDOW_END` | `6` | Hour (0–23) when captioning window closes |
+| `IMAGE_CAPTION_MAX_FILE_SIZE_MB` | `10` | Skip images larger than this (avoids downloading huge files) |
+
+See `history-service/README.md` §Image Captioning Pipeline for full implementation details.
 
 ---
 
@@ -788,7 +668,7 @@ LoRA Training Pipeline       │         │           │ ███████
 
 ## 11. Key Configuration Parameters
 
-| Parameter | Mimic (Qwen3.5-9B) | Lore (Gemma3-12B) | Brain (Qwen3.5-35B) | LibreChat (Qwen3.5-14B) |
+| Parameter | Mimic (Qwen3.5-35B-A3B) | Lore (Gemma3-12B) | Brain (Qwen3.5-35B) | LibreChat (Qwen3.5-14B) |
 |---|---|---|---|---|
 | temperature | 0.85 | 0.3 | 0.2 | 0.7 |
 | top_k | 40 | 20 | 10 | 40 |
@@ -810,10 +690,12 @@ LoRA Training Pipeline       │         │           │ ███████
 
 | Risk | Likelihood | Mitigation |
 |---|---|---|
-| Qwen3.5-9B-Uncensored generates something actually harmful | Low (private server, no bad actors) | System prompt boundaries; Discord server admin controls membership |
+| Qwen3.5-35B-A3B-Uncensored generates something actually harmful | Low (private server, no bad actors) | System prompt boundaries; Discord server admin controls membership |
 | Baked-in disclaimer appears in mimic output | Medium | Post-process: strip any string matching `"This is (general\|not legal\|..."` regex |
 | Brain + Discord requests contend heavily | Medium (single GPU) | Queue; typing indicator masks wait; Phase 4 priority config |
-| LoRA training degrades base model personality | Low | Always train from fresh Qwen3.5-9B-Uncensored checkpoint; keep original Modelfiles |
+| Image captioner monopolises swappable slot overnight | Low | Batch size cap + proxy queue depth check before each batch; training dispatches after captions complete |
+| Image caption quality poor for low-res or non-standard images | Medium | `caption_status: "skipped"` for unsupported formats; `IMAGE_CAPTION_MAX_FILE_SIZE_MB` filters oversized files |
+| LoRA training degrades base model personality | Low | Always train from fresh Qwen3.5-35B-A3B-Uncensored checkpoint; keep original Modelfiles |
 | Ollama Qwen3.5 regression in future update | Low | Pin Ollama version in Docker Compose; test updates in staging first |
 | ChromaDB retrieves wrong lore (hallucinated context) | Medium | Lore assistant system prompt: "say I don't know if context is insufficient"; `top_k` tuning |
 | Swap latency annoys Discord users | Medium | Typing indicator; warm-up keep_alive (swap on first mention, keep alive 10 min) |

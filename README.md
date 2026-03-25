@@ -40,6 +40,7 @@ Local-AI-Server/
 │
 ├── proxy/                  # FastAPI orchestration middleware (:11436)
 ├── discord-bot/            # discord.py bot
+├── history-service/        # Background message collection + LoRA retraining trigger
 ├── rag/                    # ChromaDB + embedding pipeline (CPU-only)
 ├── lora-training/          # Phase 3: Unsloth QLoRA fine-tuning scripts
 └── librechat/              # LibreChat config (librechat.yaml)
@@ -84,6 +85,7 @@ make status
 | `make pull` | `git pull` + rebuild changed images + restart |
 | `make logs` | Tail all logs |
 | `make logs-bot` | Tail Discord bot logs |
+| `make logs-history` | Tail history-service logs (LoRA training progress) |
 | `make logs-proxy` | Tail proxy logs |
 | `make status` | Show container health |
 | `make check-gpu` | Verify GPU visible in Ollama containers |
@@ -107,6 +109,8 @@ make models-init
 
 This registers all core models. Ollama will pull the GGUF weights from HuggingFace or the Ollama registry as defined in each Modelfile. Large models (Brain ~17.8 GB, LibreChat ~9.5 GB) will take time on first download.
 
+After registering the mimic base model, `models-init` automatically queues a full LoRA retraining cycle for all users via the history-service. On a fresh stack with no message history this is a no-op; on a partial reset it ensures any existing per-user adapters are rebuilt against the current base. Training dispatches during the next training window (default: 3–6 AM) — monitor with `make logs-history`.
+
 ### Re-register a model (uses cached weights)
 
 ```bash
@@ -115,12 +119,16 @@ make model-create MODEL=librechat_chat SLOT=swappable
 
 Use this after editing a Modelfile's parameters or system prompt — the GGUF is already cached so it's fast.
 
+If `MODEL=mimic`, retraining is automatically queued for all users — no separate step needed.
+
 ### Switch to a different model or quant
 
 1. Edit the `FROM` line in `modelfiles/<name>.Modelfile`
 2. Run `make model-redownload MODEL=<name> SLOT=<permanent|swappable>`
 
 Ollama fetches the new GGUF from the updated source. The proxy references models by name only — no proxy changes needed.
+
+If `MODEL=mimic`, retraining is automatically queued for all users after the re-download completes.
 
 ### Force a clean re-fetch (corrupt blob, sanity check)
 
@@ -137,7 +145,7 @@ make up
 make models-init
 ```
 
-`make nuke` wipes all volumes including model weights. After bringing services back up, `models-init` re-downloads everything from scratch.
+`make nuke` wipes all volumes including model weights. After bringing services back up, `models-init` re-downloads everything from scratch and queues LoRA retraining.
 
 ### Adding a mimic persona
 
@@ -159,6 +167,7 @@ See [`modelfiles/README.md`](modelfiles/README.md) for full details.
 | `discord-bot` | — | Discord bot (no exposed port) |
 | `librechat` | `:3080` | LibreChat web UI |
 | `librechat-mongodb` | — | MongoDB sidecar for LibreChat |
+| `history-service` | — | Background message collection + LoRA retraining trigger |
 | `rag-service` | — | RAG ingestion service |
 | `chromadb` | — | ChromaDB vector store |
 
