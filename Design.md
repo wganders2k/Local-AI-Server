@@ -1,9 +1,3 @@
-Great news to lead with — the blocker is **gone**. And yes, this is absolutely the right call. Let me confirm the facts and deliver the updated design document.
-
-**Ollama status update:** The Qwen 3.5 small model series is now available in Ollama — `ollama run qwen3.5:9b`, supporting native tool calling, thinking, and multimodal capabilities. Ollama has also already shipped fixes including a crash fix when the model is split over GPU & CPU, and a fix for Qwen 3.5 models repeating themselves due to missing presence penalty. The Unsloth docs warning about the mmproj incompatibility is now outdated. The HauhauCS 9B Aggressive variant is fully viable.
-
-**Confirmed VRAM numbers for the Qwen3.5-9B-Uncensored-HauhauCS-Aggressive:** Q4_K_M is **5.63 GB**, Q6_K is **7.36 GB**, Q8_0 is **9.53 GB**. This is a meaningful upgrade from Mistral NeMo (~10.5 GB) — much more headroom.
-
 ---
 
 # Deepleffen Bot + Coding Assistant — Revised Design Document v2.1
@@ -42,7 +36,7 @@ Great news to lead with — the blocker is **gone**. And yes, this is absolutely
 | Lore active (+ Autocomplete) | ~11.0 GB | ~13.3 GB |
 | Coding KV cache at 32k ctx | ~21.0 GB | ~3.3 GB |
 
-> **KV Cache:** q8_0 for all models. Brain: `num_parallel 1`, context 32k–40k. Mimic: `num_parallel 2`, context 8k (Discord messages are short). Lore: `num_parallel 1`, context 16k (RAG chunks need room).
+> **KV Cache:** q8_0 for coding model. Brain: `num_parallel 1`, context 32k–40k. Mimic: `num_parallel 2`, context 8k (Discord messages are short). Lore: `num_parallel 1`, context 16k (RAG chunks need room).
 
 ---
 
@@ -432,19 +426,3 @@ This context is prepended to the lore assistant's user message before forwarding
 | Ollama Qwen3.5 regression in future update | Low | Pin Ollama version in Docker Compose; test updates in staging first |
 | ChromaDB retrieves wrong lore (hallucinated context) | Medium | Lore assistant system prompt: "say I don't know if context is insufficient"; `top_k` tuning |
 | Swap latency annoys Discord users | Medium | Typing indicator; warm-up keep_alive (swap on first mention, keep alive 10 min) |
-
----
-
-## 13. What Changed from v2.0
-
-| Item | v2.0 | v2.1 |
-|---|---|---|
-| Mimic base model | `mistral-nemo:12b` Q6_K (~10.5 GB) | `Qwen3.5-9B-Uncensored-HauhauCS-Aggressive` Q6_K (~7.4 GB) |
-| Mimic VRAM | ~10.5 GB | ~7.4 GB |
-| Mimic context window | 128k | 262k (capped to 8k in Modelfile) |
-| Content filtering | Standard instruction-tuned (soft refusals) | Fully abliterated (0/465 refusals) |
-| Ollama compatibility | ✅ | ✅ (confirmed as of recent Ollama release) |
-| Mimic swap time (est.) | ~4–6s | ~3–5s |
-| Lore assistant | `gemma3:12b` Q6_K (~9.5 GB) | Unchanged |
-| Brain | `qwen3.5:35b-a3b` Q4_K_M (~17.8 GB) | Unchanged |
-| Autocomplete | `qwen2.5-coder:1.5b` Q8_0 (~1.5 GB) | Unchanged |
