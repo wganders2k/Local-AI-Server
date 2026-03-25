@@ -95,6 +95,60 @@ make status
 
 Run `make help` for the full list.
 
+## Model Management
+
+Ollama model definitions live in [`modelfiles/`](modelfiles/). Each `.Modelfile` defines the GGUF source (`FROM` line), inference parameters, and system prompt for one named model. These are version-controlled — changing a model means editing its Modelfile and re-registering.
+
+### First-time setup (after `make up`)
+
+```bash
+make models-init
+```
+
+This registers all core models. Ollama will pull the GGUF weights from HuggingFace or the Ollama registry as defined in each Modelfile. Large models (Brain ~17.8 GB, LibreChat ~9.5 GB) will take time on first download.
+
+### Re-register a model (uses cached weights)
+
+```bash
+make model-create MODEL=librechat_chat SLOT=swappable
+```
+
+Use this after editing a Modelfile's parameters or system prompt — the GGUF is already cached so it's fast.
+
+### Switch to a different model or quant
+
+1. Edit the `FROM` line in `modelfiles/<name>.Modelfile`
+2. Run `make model-redownload MODEL=<name> SLOT=<permanent|swappable>`
+
+Ollama fetches the new GGUF from the updated source. The proxy references models by name only — no proxy changes needed.
+
+### Force a clean re-fetch (corrupt blob, sanity check)
+
+```bash
+make model-redownload MODEL=brain SLOT=swappable
+```
+
+Removes the registered model and re-creates it with `--no-cache`, forcing Ollama to re-fetch the GGUF even if a blob is cached.
+
+### Post-nuke recovery
+
+```bash
+make up
+make models-init
+```
+
+`make nuke` wipes all volumes including model weights. After bringing services back up, `models-init` re-downloads everything from scratch.
+
+### Adding a mimic persona
+
+```bash
+cp modelfiles/mimic.Modelfile modelfiles/mimic_alice.Modelfile
+# Edit mimic_alice.Modelfile — replace <member> with alice in the SYSTEM block
+make model-create MODEL=mimic_alice SLOT=swappable
+```
+
+See [`modelfiles/README.md`](modelfiles/README.md) for full details.
+
 ## Services
 
 | Service | Port | Description |

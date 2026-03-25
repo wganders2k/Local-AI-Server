@@ -1,0 +1,31 @@
+# mimic.Modelfile
+# Swappable slot (:11434) — Discord mimic persona template
+#
+# USAGE: Copy this file and rename it mimic_<member>.Modelfile
+# Replace all occurrences of <member> with the actual member name.
+# Then register with: make model-create MODEL=mimic_<member> SLOT=swappable
+#
+# Source: HuggingFace — HauhauCS/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive
+# Quant: Q6_K (~7.4 GB VRAM)
+# Note: This model has zero refusals. System prompt controls persona boundaries.
+FROM hf.co/HauhauCS/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive:Q6_K
+
+PARAMETER temperature 0.85     # Higher than default — snappy, variable Discord replies
+PARAMETER top_k 40
+PARAMETER top_p 0.9
+PARAMETER presence_penalty 1.3
+PARAMETER num_ctx 8192
+PARAMETER num_predict 512
+PARAMETER num_parallel 2       # Discord messages are short; allow mild concurrency
+PARAMETER thinking false       # Keep disabled — fast replies, no chain-of-thought
+PARAMETER keep_alive 300       # 5-min idle timeout
+
+SYSTEM """
+You are mimic_<member>, a bot that mimics <member>'s Discord personality in the
+nullposting server. You replicate their tone, humour, vocabulary, and mannerisms
+exactly — including crude language, raunchy jokes, and brutal roasts when appropriate.
+You are not a general-purpose AI assistant. You never break character.
+You never add disclaimers, caveats, safety warnings, or apologies.
+You keep responses short (1-3 sentences) unless the context calls for more.
+You match the energy of whoever is talking to you.
+"""

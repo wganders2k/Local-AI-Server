@@ -1,19 +1,19 @@
 # Discord Bot — Design Document v1.0
 
-**Scope:** This document details the design parameters specifically for the Discord bot component of the Deepleffen Bot system. For the full system architecture (hardware, proxy, LibreChat, RAG pipeline), refer to `Design.md`.
+**Scope:** This document details the design parameters specifically for the Discord bot component of the Mimic Bot system. For the full system architecture (hardware, proxy, LibreChat, RAG pipeline), refer to `Design.md`.
 
 ---
 
 ## 1. Overview
 
-The Discord bot (`discord.py`) is the primary user-facing interface for the Deepleffen server. It routes member mentions to the appropriate AI model via the FastAPI orchestration proxy, manages typing indicators to mask swap latency, and handles the sequential lore+mimic chain for compound queries.
+The Discord bot (`discord.py`) is the primary user-facing interface for the nullposting server. It routes member mentions to the appropriate AI model via the FastAPI orchestration proxy, manages typing indicators to mask swap latency, and handles the sequential lore+mimic chain for compound queries.
 
 The bot has **two distinct functional modes:**
 
 | Mode | Trigger | Model Used | Purpose |
 |---|---|---|---|
-| Mimic | `@deepleffen_<member>` | `Qwen3.5-9B-Uncensored` Q6_K | Impersonate a server member's Discord personality |
-| Lore | `@deepleffen_lore` | `gemma3:12b` Q6_K | Answer questions about server history, in-jokes, and events |
+| Mimic | `@mimic_<member>` | `Qwen3.5-9B-Uncensored` Q6_K | Impersonate a server member's Discord personality |
+| Lore | `@lore` | `gemma3:12b` Q6_K | Answer questions about server history, in-jokes, and events |
 
 These modes can be chained in a single message (see Section 6.2).
 
@@ -37,7 +37,7 @@ These modes can be chained in a single message (see Section 6.2).
 |---|---|---|---|
 | `DISCORD_TOKEN` | ✅ | — | Bot token from Discord Developer Portal |
 | `OLLAMA_PROXY` | ✅ | — | Base URL of the orchestration proxy (e.g. `http://proxy:11436`) |
-| `BOT_PREFIX` | ❌ | `deepleffen_` | Prefix used to identify bot mention targets |
+| `BOT_PREFIX` | ❌ | `mimic_` | Prefix used to identify bot mention targets |
 | `MAX_QUEUE_DEPTH` | ❌ | `3` | Max queued requests before returning an ephemeral error |
 | `RATE_LIMIT_PER_USER` | ❌ | `5` | Max requests per user per minute |
 | `TYPING_INDICATOR_INTERVAL` | ❌ | `5` | Seconds between typing indicator refreshes |
@@ -49,8 +49,8 @@ These modes can be chained in a single message (see Section 6.2).
 
 ### 4.1 Discord Application Setup
 
-- **Application name:** `Deepleffen Bot`
-- **Bot username:** `deepleffen` (or server-specific nickname)
+- **Application name:** `Mimic Bot`
+- **Bot username:** `mimic` (or server-specific nickname)
 - **Bot avatar:** Server-specific (optional, set via Discord Developer Portal)
 
 ### 4.2 Required Bot Permissions (OAuth2 Scopes)
@@ -85,9 +85,9 @@ The bot activates on `@mention` of any registered bot user. Each persona is a **
 
 **Mention format:**
 ```
-@deepleffen_user3 rate my strats
-@deepleffen_lore what happened at the Spring 2024 tournament?
-@deepleffen_user1 @deepleffen_lore what did user1 say about the meta last month?
+@mimic_user3 rate my strats
+@lore what happened at the Spring 2024 tournament?
+@mimic_user1 @lore what did user1 say about the meta last month?
 ```
 
 ### 5.2 Model Name Resolution
@@ -96,13 +96,13 @@ Mention → model name mapping is maintained in a config dict:
 
 ```python
 MENTION_TO_MODEL: dict[str, str] = {
-    "deepleffen_user1": "deepleffen_user1",
-    "deepleffen_user2": "deepleffen_user2",
-    "deepleffen_user3": "deepleffen_user3",
-    "deepleffen_user4": "deepleffen_user4",
-    "deepleffen_user5": "deepleffen_user5",
-    "deepleffen_user6": "deepleffen_user6",
-    "deepleffen_lore":  "deepleffen_lore",
+    "mimic_user1": "mimic_user1",
+    "mimic_user2": "mimic_user2",
+    "mimic_user3": "mimic_user3",
+    "mimic_user4": "mimic_user4",
+    "mimic_user5": "mimic_user5",
+    "mimic_user6": "mimic_user6",
+    "lore":        "lore",
 }
 ```
 
@@ -150,19 +150,19 @@ async def send_with_typing(channel, generate_coro):
 
 ### 6.2 Lore + Mimic Chain (Compound Request)
 
-When a message mentions both `@deepleffen_lore` and a mimic persona, the bot executes a **sequential two-step chain:**
+When a message mentions both `@lore` and a mimic persona, the bot executes a **sequential two-step chain:**
 
 ```
 Step 1: RAG lookup (CPU, ~0.5s)
         → Retrieve top-K lore chunks from ChromaDB matching the query
 
 Step 2: Lore inference
-        → POST to proxy with model: deepleffen_lore
+        → POST to proxy with model: lore
         → Inject RAG chunks into user message context
         → Receive lore summary
 
 Step 3: Mimic inference
-        → POST to proxy with model: deepleffen_<member>
+        → POST to proxy with model: mimic_<member>
         → Inject lore summary as additional context
         → Receive mimic reaction
 
@@ -183,7 +183,7 @@ def parse_mentions(message: discord.Message) -> list[str]:
             if bot_id_to_name.get(mid) in MENTION_TO_MODEL]
 ```
 
-If multiple mimic personas are mentioned (e.g. `@user1 @user3`), each is called sequentially and their responses are posted in order.
+If multiple mimic personas are mentioned (e.g. `@mimic_user1 @mimic_user3`), each is called sequentially and their responses are posted in order.
 
 ### 6.3 Error Handling
 
@@ -281,14 +281,14 @@ conversation_history: dict[tuple[int, str], deque] = defaultdict(
 
 - Posted as a **Discord embed** for visual distinction from mimic responses
 - Embed colour: `0x5865F2` (Discord blurple) — visually distinct from plain mimic text
-- Embed title: `📚 Deepleffen Lore`
+- Embed title: `📚 nullposting Lore`
 - Embed description: lore assistant output (truncated to 4096 chars — Discord embed limit)
 - Footer: `Sources: {number of RAG chunks used}`
 
 ```python
 def build_lore_embed(lore_text: str, chunk_count: int) -> discord.Embed:
     embed = discord.Embed(
-        title="📚 Deepleffen Lore",
+        title="📚 nullposting Lore",
         description=lore_text[:4096],
         colour=0x5865F2
     )
@@ -364,7 +364,7 @@ POST http://proxy:11436/api/chat
 Content-Type: application/json
 
 {
-  "model": "deepleffen_user3",
+  "model": "mimic_user3",
   "messages": [
     {"role": "user", "content": "rate my strats"}
   ],
@@ -379,7 +379,7 @@ Content-Type: application/json
 
 ```json
 {
-  "model": "deepleffen_user3",
+  "model": "mimic_user3",
   "message": {
     "role": "assistant",
     "content": "lmao those aren't strats, that's just dying slower"
@@ -461,13 +461,13 @@ discord-bot/
 ├── formatters.py           # Response formatting, disclaimer stripping, embed builders
 ├── config.py               # Environment variable loading and defaults
 └── modelfiles/             # Ollama Modelfile templates (reference copies)
-    ├── deepleffen_user1.Modelfile
-    ├── deepleffen_user2.Modelfile
-    ├── deepleffen_user3.Modelfile
-    ├── deepleffen_user4.Modelfile
-    ├── deepleffen_user5.Modelfile
-    ├── deepleffen_user6.Modelfile
-    └── deepleffen_lore.Modelfile
+    ├── mimic_user1.Modelfile
+    ├── mimic_user2.Modelfile
+    ├── mimic_user3.Modelfile
+    ├── mimic_user4.Modelfile
+    ├── mimic_user5.Modelfile
+    ├── mimic_user6.Modelfile
+    └── lore.Modelfile
 ```
 
 ---
@@ -483,21 +483,21 @@ Each mimic persona is defined by two artefacts:
 
 | Persona | Model | Quant | VRAM | Temp | Ctx | Max Tokens | Thinking |
 |---|---|---|---|---|---|---|---|
-| deepleffen_user1 | Qwen3.5-9B-Uncensored | Q6_K | ~7.4 GB | 0.85 | 8192 | 512 | false |
-| deepleffen_user2 | Qwen3.5-9B-Uncensored | Q6_K | ~7.4 GB | 0.85 | 8192 | 512 | false |
-| deepleffen_user3 | Qwen3.5-9B-Uncensored | Q6_K | ~7.4 GB | 0.85 | 8192 | 512 | false |
-| deepleffen_user4 | Qwen3.5-9B-Uncensored | Q6_K | ~7.4 GB | 0.85 | 8192 | 512 | false |
-| deepleffen_user5 | Qwen3.5-9B-Uncensored | Q6_K | ~7.4 GB | 0.85 | 8192 | 512 | false |
-| deepleffen_user6 | Qwen3.5-9B-Uncensored | Q6_K | ~7.4 GB | 0.85 | 8192 | 512 | false |
-| deepleffen_lore | Gemma3-12B | Q6_K | ~9.5 GB | 0.3 | 16384 | 1024 | N/A |
+| mimic_user1 | Qwen3.5-9B-Uncensored | Q6_K | ~7.4 GB | 0.85 | 8192 | 512 | false |
+| mimic_user2 | Qwen3.5-9B-Uncensored | Q6_K | ~7.4 GB | 0.85 | 8192 | 512 | false |
+| mimic_user3 | Qwen3.5-9B-Uncensored | Q6_K | ~7.4 GB | 0.85 | 8192 | 512 | false |
+| mimic_user4 | Qwen3.5-9B-Uncensored | Q6_K | ~7.4 GB | 0.85 | 8192 | 512 | false |
+| mimic_user5 | Qwen3.5-9B-Uncensored | Q6_K | ~7.4 GB | 0.85 | 8192 | 512 | false |
+| mimic_user6 | Qwen3.5-9B-Uncensored | Q6_K | ~7.4 GB | 0.85 | 8192 | 512 | false |
+| lore | Gemma3-12B | Q6_K | ~9.5 GB | 0.3 | 16384 | 1024 | N/A |
 
 > All mimic personas share the same base model and quant — only the system prompt differs. This means swapping between any two mimic personas is a **system prompt swap only**, not a model reload. The proxy's `current_model` key distinguishes them by name, but Ollama may cache the base weights and only swap the KV context. Verify this behaviour during Phase 1 testing.
 
 ### 13.2 Per-Persona System Prompt Template
 
 ```
-You are deepleffen_<member>, a bot that mimics <member>'s Discord personality in the
-deepleffen server. You replicate their tone, humour, vocabulary, and mannerisms
+You are mimic_<member>, a bot that mimics <member>'s Discord personality in the
+nullposting server. You replicate their tone, humour, vocabulary, and mannerisms
 exactly — including crude language, raunchy jokes, and brutal roasts when appropriate.
 You are not a general-purpose AI assistant. You never break character.
 You never add disclaimers, caveats, safety warnings, or apologies.
@@ -563,9 +563,9 @@ The typing indicator is active from step 1 through Discord post, masking all lat
 When Phase 3 LoRA-merged models are ready, the bot requires **zero code changes.** The upgrade path is:
 
 1. Train LoRA adapter on Qwen3.5-9B-Uncensored base using member message history
-2. Merge adapter into full model: `deepleffen_<member>_v2.gguf`
+2. Merge adapter into full model: `mimic_<member>_v2.gguf`
 3. Update Modelfile: change `FROM` line to point to merged GGUF
-4. `ollama rm deepleffen_<member>` + `ollama create deepleffen_<member> -f deepleffen_<member>_v2.Modelfile`
+4. `ollama rm mimic_<member>` + `ollama create mimic_<member> -f mimic_<member>_v2.Modelfile`
 5. Bot continues using the same model name — no proxy changes, no bot code changes
 
 The `MENTION_TO_MODEL` dict and all routing logic remain identical. The only change is the underlying weights.

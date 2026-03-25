@@ -1,7 +1,7 @@
 
 ---
 
-# Deepleffen Bot + Coding Assistant — Revised Design Document v2.3
+# Mimic Bot + Coding Assistant — Revised Design Document v2.3
 
 **Revision:** LibreChat local model upgraded from `qwen2.5:14b` to `qwen3.5:14b` (UD-IQ4_XS, ~9.5 GB). Qwen3.5-14B is the current-generation successor to Qwen2.5-14B, offering significantly improved reasoning and instruction following at the same parameter count. The UD-IQ4_XS quant from Unsloth is used — a high-quality importance-weighted 4-bit quant that preserves more accuracy than standard Q4_K_M at a smaller footprint. VRAM budget updated accordingly.
 
@@ -161,7 +161,7 @@ You can help with writing, research, analysis, coding questions, and general con
 │  │                  │       │                            │      │
 │  │ qwen2.5-coder    │       │ ← Brain (17.8 GB)          │      │
 │  │ 1.5b Q8_0        │       │   OR                       │      │
-│  │ ~1.5 GB VRAM     │       │ ← Mimic deepleffen_X       │      │
+│  │ ~1.5 GB VRAM     │       │ ← Mimic persona            │      │
 │  │ num_parallel 4   │       │   (Qwen3.5-9B-Uncensored   │      │
 │  │ keep_alive -1    │       │    Q6_K ~7.4 GB)           │      │
 │  │                  │       │   OR                       │      │
@@ -197,7 +197,7 @@ All models are registered as Ollama Modelfiles. The proxy references models by n
 ### 5.1 Mimic Persona Modelfile Template
 
 ```dockerfile
-# deepleffen_<member>.Modelfile
+# mimic_<member>.Modelfile
 FROM hf.co/HauhauCS/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive:Q6_K
 
 PARAMETER temperature 0.85
@@ -209,8 +209,8 @@ PARAMETER num_predict 512
 PARAMETER thinking false        # Keep disabled — snappy Discord replies
 
 SYSTEM """
-You are deepleffen_<member>, a bot that mimics <member>'s Discord personality in the
-deepleffen server. You replicate their tone, humour, vocabulary, and mannerisms
+You are mimic_<member>, a bot that mimics <member>'s Discord personality in the
+nullposting server. You replicate their tone, humour, vocabulary, and mannerisms
 exactly — including crude language, raunchy jokes, and brutal roasts when appropriate.
 You are not a general-purpose AI assistant. You never break character.
 You never add disclaimers, caveats, safety warnings, or apologies.
@@ -224,7 +224,7 @@ You match the energy of whoever is talking to you.
 ### 5.2 Lore Assistant Modelfile
 
 ```dockerfile
-# deepleffen_lore.Modelfile
+# lore.Modelfile
 FROM gemma3:12b-instruct-q6_K
 
 PARAMETER temperature 0.3
@@ -234,7 +234,7 @@ PARAMETER num_ctx 16384
 PARAMETER num_predict 1024
 
 SYSTEM """
-You are the deepleffen lore assistant. You have access to a curated database of
+You are the nullposting lore assistant. You have access to a curated database of
 server history, in-jokes, memes, and member events. When answering questions,
 cite your sources from the retrieved context. Be factual and concise.
 If the retrieved context does not contain the answer, say so clearly rather than
@@ -293,9 +293,9 @@ class OrchestratorState:
 AUTOCOMPLETE_MODELS = {"qwen2.5-coder:1.5b"}  # always routed to :11435, never swapped
 SWAPPABLE_MODELS = {
     "brain",
-    "deepleffen_user1", "deepleffen_user2", "deepleffen_user3",
-    "deepleffen_user4", "deepleffen_user5", "deepleffen_user6",
-    "deepleffen_lore",
+    "mimic_user1", "mimic_user2", "mimic_user3",
+    "mimic_user4", "mimic_user5", "mimic_user6",
+    "lore",
     "librechat_chat",   # local general-purpose chat model for LibreChat
 }
 
@@ -412,12 +412,43 @@ services:
     volumes:
       - chroma_data:/chroma/chroma
 
+  # ──────────────────────────────────────────────────────────
+  # History Service
+  # Background service: Discord message history collection
+  # (JSONL per user) + LoRA retraining trigger.
+  # Not in the inference hot path — runs on a schedule.
+  # ──────────────────────────────────────────────────────────
+  history-service:
+    build: ./history-service
+    restart: unless-stopped
+    depends_on:
+      proxy:
+        condition: service_healthy
+    environment:
+      - DISCORD_TOKEN=${DISCORD_TOKEN}
+      - DISCORD_GUILD_ID=${DISCORD_GUILD_ID}
+      - PROXY_URL=http://proxy:11436
+      - OLLAMA_SWAPPABLE=http://ollama-swappable:11434
+      - RETRAIN_THRESHOLD=${RETRAIN_THRESHOLD:-200}
+      - INCREMENTAL_PULL_INTERVAL=${INCREMENTAL_PULL_INTERVAL:-15}
+      - FULL_PULL_CRON=${FULL_PULL_CRON:-"0 3 1 * *"}
+      - TRAINING_WINDOW_START=${TRAINING_WINDOW_START:-3}
+      - TRAINING_WINDOW_END=${TRAINING_WINDOW_END:-6}
+      - TRAINING_TRIGGER_ENABLED=${TRAINING_TRIGGER_ENABLED:-false}  # enable in Phase 3
+    volumes:
+      - history_data:/app/data
+      - lora_outputs:/app/lora-outputs
+      - ./modelfiles:/modelfiles
+      - ./lora-training:/lora-training:ro   # training scripts (read-only)
+
 volumes:
   ollama_permanent:
   ollama_swappable:
   librechat_uploads:
   librechat_mongo:
   chroma_data:
+  history_data:       # Per-user JSONL message history + training state
+  lora_outputs:       # Merged GGUF outputs from LoRA training
 ```
 
 > **Why two separate Ollama instances share the same `NVIDIA_VISIBLE_DEVICES=0`?** Ollama manages its own VRAM allocation. Both instances can reference the same GPU — the proxy enforces that only one swappable model is loaded at a time. The permanent instance holds exactly one model forever. Docker resource constraints don't need GPU isolation here since we're self-policing via the proxy lock.
@@ -432,9 +463,9 @@ volumes:
 
 ### 8.1 Simple Mimic Request
 ```
-User: @deepleffen_user3 rate my strats
+User: @mimic_user3 rate my strats
 Bot:  [acquires proxy lock]
-      [swap to deepleffen_user3 if not current: ~4s]
+      [swap to mimic_user3 if not current: ~4s]
       [typing indicator active throughout]
       [inference: ~1–2s at ~40 tok/s on 3090]
       [releases lock]
@@ -443,21 +474,21 @@ Bot:  [acquires proxy lock]
 
 ### 8.2 Lore + Mimic Chain (Sequential)
 ```
-User: @deepleffen_lore what did user3 say at the tournament last year?
-                        + @deepleffen_user3 react to this
+User: @lore what did user3 say at the tournament last year?
+                        + @mimic_user3 react to this
 
 Step 1: RAG lookup (CPU/RAM, ~0.5s, no GPU needed)
         → Retrieved: [lore chunk about tournament incident]
 
 Step 2: [acquires proxy lock]
-        [swap to deepleffen_lore: ~5s]
+        [swap to lore: ~5s]
         [typing indicator active]
         [lore inference with RAG context: ~3s]
         [releases lock]
         Lore output: "At the Spring 2024 tourney, user3 SD'd three times..."
 
 Step 3: [acquires proxy lock]
-        [swap to deepleffen_user3: ~4s]
+        [swap to mimic_user3: ~4s]
         [inject lore output as context]
         [mimic inference: ~1.5s]
         [releases lock]
@@ -498,7 +529,7 @@ Note: If Claude API backend is selected in LibreChat, this entire flow is bypass
 
 **Ingestion:**
 ```
-Discord history export → chunker → embedding → ChromaDB collection: "deepleffen_lore"
+Discord history export → chunker → embedding → ChromaDB collection: "lore"
 ```
 
 **Chunk strategy:**
@@ -515,6 +546,81 @@ def build_lore_context(query: str, top_k: int = 5) -> str:
 
 This context is prepended to the lore assistant's user message before forwarding to the proxy. Zero VRAM overhead — all CPU-side.
 
+> **Note:** Raw Discord message history (JSONL per user) is managed by the `history-service`, not the RAG service. The RAG service consumes the JSONL data for lore ingestion into ChromaDB, but the collection and maintenance of that history is a separate concern. See §9a.
+
+---
+
+## 9a. History & Training Pipeline (`history-service`)
+
+The `history-service` is a background maintenance process — it is **not** in the inference hot path. It runs on a schedule alongside the RAG service and handles two distinct jobs:
+
+### 9a.1 Message History Collection
+
+Per-user message history is stored as JSONL files (`data/history/<user_id>.jsonl`), one record per message. The service uses two pull modes:
+
+| Mode | Frequency | Method |
+|---|---|---|
+| **Incremental pull** | Every 15 min | Fetch new messages from recently active channels since last pull timestamp |
+| **Full rebuild** | Monthly / manual | Fetch entire server history, rebuild all JSONL files from scratch |
+
+The incremental pull uses Discord's `GET /channels/{id}/messages?after={snowflake}` endpoint, paginating until no new messages remain. "Recently active" is defined as any channel with a message in the last 24 hours (configurable).
+
+**Message filtering (applied at ingest):**
+
+Messages are stored with a `clean` flag. Only clean messages are used for LoRA training. Unclean messages are retained for lore RAG context.
+
+| Rule | Condition |
+|---|---|
+| Minimum length | Fewer than 5 words → not clean |
+| Bot commands | Starts with `/`, `!`, `.`, `?` → not clean |
+| Pure emoji | Only emoji characters → not clean |
+| URL-only | Only a URL with no surrounding text → not clean |
+| Empty | Empty after whitespace strip → not clean |
+
+**Why use all history (with filtering)?**
+Using the full message history maximises style capture for LoRA training. The key insight is that *quality* matters more than *quantity* — aggressive filtering removes noise (commands, one-word replies, emoji spam) while retaining the messages that actually reflect a user's writing style. QLoRA on the 9B model handles large datasets efficiently; diminishing returns set in around 2,000–5,000 high-quality messages, but there is no hard upper limit.
+
+### 9a.2 LoRA Retraining Trigger
+
+After each incremental pull, the service checks whether any user has accumulated ≥ `RETRAIN_THRESHOLD` (default: 200) new clean messages since their last training run. If so, a training job is queued.
+
+**Training coordination:**
+- Training is only dispatched during the configured training window (default: 3–6 AM) to avoid inference contention
+- Before starting, the service checks that the proxy queue depth is zero
+- The swappable Ollama slot is explicitly unloaded before training begins (QLoRA requires ~14–16 GB VRAM)
+- Training runs as a subprocess calling `lora-training/train.py` then `lora-training/merge.py`
+- After the GGUF merge, the service re-registers the Ollama Modelfile automatically — zero bot or proxy changes required
+
+**Training state** is tracked in `data/training_state.json` per user:
+
+```json
+{
+  "user3": {
+    "user_id": "987654321098765432",
+    "total_clean_messages": 1247,
+    "messages_since_last_train": 43,
+    "last_trained_at": "2026-03-01T03:00:00Z",
+    "model_version": 2,
+    "training_status": "idle"
+  }
+}
+```
+
+`training_status` progresses through: `idle` → `queued` → `training` → `merging` → `registering` → `idle`. On failure, status is set to `error` and requires manual intervention.
+
+### 9a.3 Relationship to RAG Service
+
+| Concern | Owner |
+|---|---|
+| Collecting raw Discord messages (JSONL) | `history-service` |
+| Filtering and maintaining per-user message files | `history-service` |
+| Triggering LoRA retraining | `history-service` |
+| Chunking messages for lore retrieval | `rag-service` |
+| Embedding chunks into ChromaDB | `rag-service` |
+| Serving retrieval queries at inference time | `rag-service` |
+
+The RAG service reads from the JSONL files produced by the history service for its lore ingestion pipeline. The two services are decoupled — the RAG service does not depend on the history service being running.
+
 ---
 
 ## 10. Development Phases
@@ -527,11 +633,12 @@ The following software components are built and evolved across the four phases:
 |---|---|
 | **Ollama Instances** | Two Docker containers: permanent (`:11435`, autocomplete) and swappable (`:11434`, all other models) |
 | **Orchestration Middleware** | FastAPI proxy on `:11436` — swap logic, async lock, request queue, source tagging |
-| **Ollama Modelfiles** | Registered model definitions: `brain`, `deepleffen_*`, `deepleffen_lore`, `librechat_chat` |
+| **Ollama Modelfiles** | Registered model definitions: `brain`, `mimic_*`, `lore`, `librechat_chat` |
 | **Discord Bot** | `discord.py` bot — mention routing, typing indicators, lore+mimic chain dispatch |
 | **LibreChat** | Self-hosted chat UI container + MongoDB sidecar — local model and Claude API backends |
 | **Discord Data Preprocessor** | Export parser + chunker that feeds raw Discord history into ChromaDB |
 | **RAG Service** | ChromaDB + `all-MiniLM-L6-v2` embedding pipeline — CPU-only, no VRAM impact |
+| **History Service** | Background service — per-user JSONL message history collection (Discord API) + LoRA retraining trigger |
 | **LoRA Training Pipeline** | Unsloth QLoRA fine-tuning on Qwen3.5-9B-Uncensored + GGUF merge and re-registration |
 
 ---
@@ -549,6 +656,7 @@ Discord Bot                  │ ████████│           │      
 LibreChat + MongoDB          │ ████████│           │               │ ░░░ auth  │
 Discord Data Preprocessor    │         │ ██████████│               │           │
 RAG Service (ChromaDB)       │         │ ██████████│               │           │
+History Service              │         │ ██████████│ ░░░ train trig│           │
 LoRA Training Pipeline       │         │           │ ██████████████│           │
 ─────────────────────────────┴─────────┴───────────┴───────────────┴───────────┘
 
@@ -567,7 +675,7 @@ LoRA Training Pipeline       │         │           │ ███████
 |---|---|---|
 | Ollama Instances | 🔨 Build | Stand up both permanent and swappable containers via Docker Compose |
 | Orchestration Middleware | 🔨 Build | FastAPI proxy with swap logic, async lock, and source tagging |
-| Ollama Modelfiles | 🔨 Build | Register all models: `brain`, `deepleffen_*` (system-prompt only), `deepleffen_lore`, `librechat_chat` |
+| Ollama Modelfiles | 🔨 Build | Register all models: `brain`, `mimic_*` (system-prompt only), `lore`, `librechat_chat` |
 | Discord Bot | 🔨 Build | Mention routing, typing indicators, basic mimic + lore dispatch |
 | LibreChat + MongoDB | 🔨 Build | Container + sidecar, both Claude API and local Ollama endpoints configured |
 | Discord Data Preprocessor | ⏳ Not started | Needed in Phase 2 |
@@ -597,11 +705,12 @@ LoRA Training Pipeline       │         │           │ ███████
 |---|---|---|
 | Ollama Instances | ✅ Stable | No changes — already running |
 | Orchestration Middleware | ✅ Stable | No changes — proxy handles lore requests identically |
-| Ollama Modelfiles | ✅ Stable | `deepleffen_lore` Modelfile already registered in Phase 1 |
+| Ollama Modelfiles | ✅ Stable | `lore` Modelfile already registered in Phase 1 |
 | Discord Bot | ✅ Stable | Lore+mimic chain dispatch already wired in Phase 1; RAG context injection is the only addition |
 | LibreChat + MongoDB | ✅ Stable | No changes |
 | Discord Data Preprocessor | 🔨 Build | Parse Discord history export, chunk by conversation thread, embed and load into ChromaDB |
 | RAG Service (ChromaDB) | 🔨 Build | Stand up ChromaDB container, wire retrieval into lore assistant context at inference time |
+| History Service | 🔨 Build | Stand up history-service; begin incremental Discord API pulls; training trigger disabled until Phase 3 |
 | LoRA Training Pipeline | ⏳ Not started | Needed in Phase 3 |
 
 **Tasks:**
@@ -609,6 +718,8 @@ LoRA Training Pipeline       │         │           │ ███████
 - [ ] Wire RAG retrieval into lore assistant context (prepend retrieved chunks to user message)
 - [ ] Test lore+mimic sequential chain (Step 8.2 flow)
 - [ ] Tune lore assistant temperature and retrieval `top_k`
+- [ ] Stand up history-service; verify incremental pull collects messages correctly
+- [ ] Confirm per-user JSONL files are populated and clean/unclean flags are correct
 
 ---
 
@@ -620,19 +731,20 @@ LoRA Training Pipeline       │         │           │ ███████
 |---|---|---|
 | Ollama Instances | ✅ Stable | No changes |
 | Orchestration Middleware | ✅ Stable | No changes — proxy is model-name-agnostic by design |
-| Ollama Modelfiles | 🔄 Extend | Re-register `deepleffen_*` Modelfiles pointing to LoRA-merged GGUFs; zero proxy changes |
+| Ollama Modelfiles | 🔄 Extend | Re-register `mimic_*` Modelfiles pointing to LoRA-merged GGUFs; zero proxy changes |
 | Discord Bot | ✅ Stable | No changes — bot references model names, not weights |
 | LibreChat + MongoDB | ✅ Stable | No changes |
 | Discord Data Preprocessor | ✅ Stable | Re-run ingestion as new lore accumulates (manual or cron) |
 | RAG Service (ChromaDB) | ✅ Stable | Re-embed on new significant events; no structural changes |
+| History Service | 🔄 Extend | Enable training trigger; wire to lora-training scripts; automated retraining now active |
 | LoRA Training Pipeline | 🔨 Build | Unsloth QLoRA fine-tuning on Qwen3.5-9B-Uncensored per member; GGUF merge and re-registration |
 
 **Tasks:**
-- [ ] Collect 500–1000 messages per member from Discord history
-- [ ] Fine-tune LoRA adapters on Qwen3.5-9B base using Unsloth (QLoRA, RTX 3090)
-- [ ] Merge adapters into full models: `deepleffen_<member>_v2.gguf`
-- [ ] Re-register Modelfiles pointing to merged GGUFs — **zero proxy changes required**
+- [ ] Build `lora-training/train.py` and `merge.py` scripts (Unsloth QLoRA)
+- [ ] Enable training trigger in history-service (set `TRAINING_TRIGGER_ENABLED=true`)
+- [ ] Verify end-to-end automated flow: threshold hit → training queued → train → merge → Modelfile re-registered
 - [ ] A/B test merged vs. system-prompt personas
+- [ ] Tune `RETRAIN_THRESHOLD` and training window based on observed training times
 
 > **LoRA training note:** Unsloth supports Qwen3.5 fine-tuning natively as of March 2026. The uncensored base weights are the correct starting point for LoRA — you're training style on top of an already-unlocked model, which means the adapter doesn't need to fight the base model's refusal tendencies.
 
@@ -651,6 +763,7 @@ LoRA Training Pipeline       │         │           │ ███████
 | LibreChat + MongoDB | 🔄 Extend | Enable built-in user authentication if exposing beyond localhost |
 | Discord Data Preprocessor | ✅ Stable | No changes |
 | RAG Service (ChromaDB) | ✅ Stable | No changes |
+| History Service | ✅ Stable | No changes |
 | LoRA Training Pipeline | ✅ Stable | Ongoing as needed; no structural changes to pipeline |
 
 **Tasks:**
