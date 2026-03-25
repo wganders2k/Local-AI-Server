@@ -10,7 +10,7 @@
 # ============================================================
 
 .PHONY: help up down restart build pull \
-        logs logs-proxy logs-bot logs-ollama logs-librechat logs-rag \
+        logs logs-proxy logs-bot logs-ollama logs-librechat logs-rag logs-history \
         status \
         restart-bot restart-proxy restart-librechat restart-rag \
         shell-bot shell-proxy shell-rag \
@@ -38,6 +38,7 @@ help:
 	@echo "  logs-ollama         Tail both Ollama instance logs"
 	@echo "  logs-librechat      Tail LibreChat logs only"
 	@echo "  logs-rag            Tail RAG service logs only"
+	@echo "  logs-history        Tail history-service logs only"
 	@echo ""
 	@echo "  ── Status ─────────────────────────────────────────────"
 	@echo "  status              Show running containers and health"
@@ -60,11 +61,13 @@ help:
 	@echo "  models-init         Register all models (first-time setup or post-nuke)"
 	@echo "  model-create        Register/re-register a model from its Modelfile"
 	@echo "                        Usage: make model-create MODEL=<name> SLOT=<permanent|swappable>"
+	@echo "                        If MODEL=mimic, automatically triggers full LoRA retraining via history-service."
 	@echo "  model-remove        Remove a registered model (GGUF blob stays cached)"
 	@echo "                        Usage: make model-remove MODEL=<name> SLOT=<permanent|swappable>"
 	@echo "  model-redownload    Force full re-fetch: remove + re-create from Modelfile"
 	@echo "                        Usage: make model-redownload MODEL=<name> SLOT=<permanent|swappable>"
 	@echo "                        Edit the FROM line in modelfiles/<name>.Modelfile first to switch models."
+	@echo "                        If MODEL=mimic, automatically triggers full LoRA retraining via history-service."
 	@echo ""
 	@echo "  ── Destructive ────────────────────────────────────────"
 	@echo "  nuke                ⚠️  Stop everything AND remove all volumes"
@@ -118,6 +121,10 @@ logs-librechat:
 ## Tail RAG service logs only
 logs-rag:
 	docker compose logs -f rag-service
+
+## Tail history-service logs only (useful for monitoring LoRA training progress)
+logs-history:
+	docker compose logs -f history-service
 
 # ── Status ─────────────────────────────────────────────────
 
@@ -186,16 +193,28 @@ shell-rag:
 ## Register all models from scratch.
 ## Use this after first `make up` or after `make nuke` to restore all models.
 ## Models are pulled from HuggingFace or the Ollama registry as defined in each Modelfile.
+## Note: This registers the mimic base template only. Per-user mimic personas (mimic_<member>)
+## must be created individually.
+## After registering mimic, a full LoRA retraining cycle is automatically queued for all users
+## via history-service. On a fresh stack this is a no-op; on a partial reset it ensures any
+## existing per-user adapters are rebuilt against the current base.
 models-init:
 	@echo "=== Registering permanent models (ollama-permanent :11435) ==="
 	docker compose exec ollama-permanent ollama create autocomplete -f /modelfiles/autocomplete.Modelfile
 	@echo ""
 	@echo "=== Registering swappable models (ollama-swappable :11434) ==="
 	docker compose exec ollama-swappable ollama create brain -f /modelfiles/brain.Modelfile
+	docker compose exec ollama-swappable ollama create mimic -f /modelfiles/mimic.Modelfile
 	docker compose exec ollama-swappable ollama create lore -f /modelfiles/lore.Modelfile
 	docker compose exec ollama-swappable ollama create librechat_chat -f /modelfiles/librechat_chat.Modelfile
 	@echo ""
 	@echo "✓ Core models registered. Run 'make ollama-list' to verify."
+	@echo ""
+	@echo "=== Queuing full LoRA retraining cycle via history-service ==="
+	docker compose exec history-service python training_trigger.py --force-all
+	@echo "✓ Retraining queued for all users. Training will begin during the next training window."
+	@echo "  Monitor progress: make logs-history"
+	@echo ""
 	@echo "  Note: Mimic personas (mimic_<member>) must be created individually."
 	@echo "  Copy modelfiles/mimic.Modelfile, fill in the member name, then:"
 	@echo "  make model-create MODEL=mimic_<member> SLOT=swappable"
@@ -204,6 +223,9 @@ models-init:
 ## Uses the cached GGUF blob if already downloaded — no re-fetch.
 ## Usage: make model-create MODEL=librechat_chat SLOT=swappable
 ##        make model-create MODEL=autocomplete SLOT=permanent
+##
+## If MODEL=mimic (the base template), this automatically queues a full LoRA
+## retraining cycle for all users via history-service — no separate step needed.
 model-create:
 	@test -n "$(MODEL)" || (echo "Error: MODEL is required. Usage: make model-create MODEL=<name> SLOT=<permanent|swappable>"; exit 1)
 	@test -n "$(SLOT)" || (echo "Error: SLOT is required. Usage: make model-create MODEL=<name> SLOT=<permanent|swappable>"; exit 1)
@@ -211,6 +233,13 @@ model-create:
 	@echo "=== Creating model '$(MODEL)' on ollama-$(SLOT) ==="
 	docker compose exec ollama-$(SLOT) ollama create $(MODEL) -f /modelfiles/$(MODEL).Modelfile
 	@echo "✓ Model '$(MODEL)' registered on ollama-$(SLOT)."
+	@if [ "$(MODEL)" = "mimic" ]; then \
+		echo ""; \
+		echo "=== Queuing full LoRA retraining cycle via history-service ==="; \
+		docker compose exec history-service python training_trigger.py --force-all; \
+		echo "✓ Retraining queued for all users. Training will begin during the next training window."; \
+		echo "  Monitor progress: make logs-history"; \
+	fi
 
 ## Remove a registered model from an Ollama instance.
 ## The underlying GGUF blob stays cached in the volume — no disk space freed.
@@ -228,6 +257,9 @@ model-remove:
 ##   - Force a clean re-fetch if the cached blob is corrupt or incomplete
 ##   - Test a new model without nuking the entire stack
 ## Usage: make model-redownload MODEL=librechat_chat SLOT=swappable
+##
+## If MODEL=mimic (the base template), this automatically queues a full LoRA
+## retraining cycle for all users via history-service — no separate step needed.
 model-redownload:
 	@test -n "$(MODEL)" || (echo "Error: MODEL is required. Usage: make model-redownload MODEL=<name> SLOT=<permanent|swappable>"; exit 1)
 	@test -n "$(SLOT)" || (echo "Error: SLOT is required. Usage: make model-redownload MODEL=<name> SLOT=<permanent|swappable>"; exit 1)
@@ -237,6 +269,13 @@ model-redownload:
 	-docker compose exec ollama-$(SLOT) ollama rm $(MODEL) 2>/dev/null
 	docker compose exec ollama-$(SLOT) ollama create --no-cache $(MODEL) -f /modelfiles/$(MODEL).Modelfile
 	@echo "✓ Model '$(MODEL)' re-downloaded and registered on ollama-$(SLOT)."
+	@if [ "$(MODEL)" = "mimic" ]; then \
+		echo ""; \
+		echo "=== Queuing full LoRA retraining cycle via history-service ==="; \
+		docker compose exec history-service python training_trigger.py --force-all; \
+		echo "✓ Retraining queued for all users. Training will begin during the next training window."; \
+		echo "  Monitor progress: make logs-history"; \
+	fi
 
 # ── Destructive ────────────────────────────────────────────
 

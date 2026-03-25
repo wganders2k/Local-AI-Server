@@ -26,12 +26,25 @@ See `Design.md` §9a (History & Training Pipeline) and §10 Phase 3 (LoRA Person
 history-service/
 ├── Dockerfile
 ├── requirements.txt
-├── main.py                  # Entry point: APScheduler loop, HTTP endpoints
+├── main.py                  # Entry point: registers two APScheduler jobs —
+│                            #   (1) incremental pull job (every 15 min)
+│                            #   (2) training window dispatch job (every 5 min, 3–6 AM only)
+│                            # Also exposes internal HTTP endpoints.
 ├── discord_fetcher.py       # Discord API client — full pull + incremental pull
 ├── message_filter.py        # Filtering logic (min words, command detection, etc.)
 ├── jsonl_store.py           # JSONL read/write, per-user file management
 ├── training_state.py        # Tracks last_trained_at, clean_msg_count per user
-├── training_trigger.py      # Threshold check + training job dispatch
+├── training_trigger.py      # Three entry points:
+│                            #   check_thresholds() — called after each pull; increments
+│                            #     messages_since_last_train and sets status="queued" for
+│                            #     users who hit RETRAIN_THRESHOLD. Does NOT dispatch.
+│                            #   dispatch_queued() — called by training window scheduler;
+│                            #     scans for queued users and dispatches training if proxy
+│                            #     queue depth is zero. Retries at next tick if busy.
+│                            #   CLI --force-all — invoked by `make mimic-source-refresh`;
+│                            #     sets ALL users to queued regardless of threshold (used
+│                            #     when the mimic base model changes and all adapters must
+│                            #     be retrained from scratch).
 ├── ollama_registrar.py      # Post-training: ollama rm + ollama create
 ├── config.py                # Environment variable loading and defaults
 └── data/
@@ -155,20 +168,48 @@ Paginate with `after` until no more results. Respects Discord rate limits (50 re
 
 ## Training Trigger Flow
 
-```
-After each incremental pull:
-  for each user with new clean messages:
-    update messages_since_last_train += new_clean_count
-    if messages_since_last_train >= RETRAIN_THRESHOLD:
-      if current_hour in [TRAINING_WINDOW_START, TRAINING_WINDOW_END):
-        if proxy queue depth == 0:
-          dispatch_training_job(user)
-        else:
-          set status = "queued"  # retry at next scheduler tick
-      else:
-        set status = "queued"    # retry when training window opens
+Retraining is triggered via three distinct paths, all routed through `training_trigger.py`:
 
-Training job (runs sequentially, one user at a time):
+### Path 1 — Threshold check (after each incremental pull)
+
+`main.py` calls `training_trigger.check_thresholds()` after every pull:
+
+```
+for each user with new clean messages:
+  messages_since_last_train += new_clean_count
+  if messages_since_last_train >= RETRAIN_THRESHOLD:
+    set status = "queued"   ← that's it; no dispatch here
+```
+
+This path only updates state. It never dispatches training directly.
+
+### Path 2 — Training window scheduler (every 5 min, 3–6 AM only)
+
+`main.py` registers a second APScheduler job that runs every 5 minutes but only executes within the training window. It calls `training_trigger.dispatch_queued()`:
+
+```
+for each user with status == "queued":
+  if proxy queue depth == 0:
+    dispatch_training_job(user)
+  # else: do nothing — scheduler retries at next tick
+```
+
+Retry logic is implicit: if the proxy is busy at 3:05 AM, the job runs again at 3:10 AM. No special retry code needed. If the service restarts while jobs are `queued`, the scheduler picks them up naturally at the next tick during the training window.
+
+### Path 3 — Force-all (manual, via Makefile)
+
+`make mimic-source-refresh` calls `python training_trigger.py --force-all` directly inside the container. This sets **all** users to `queued` regardless of their `messages_since_last_train` count:
+
+```
+for each user in training_state.json:
+  set status = "queued"
+```
+
+Used when the mimic base model changes (new base or quant in `mimic.Modelfile`) — all existing LoRA adapters are trained against the old base and must be retrained from scratch. The `--force-all` flag only updates state; actual training still dispatches via the training window scheduler (Path 2).
+
+### Training job (dispatched by Path 2, one user at a time)
+
+```
   1. Export user's clean JSONL messages → formatted training dataset (JSONL chat format)
   2. Run lora-training/train.py (Unsloth QLoRA, 1–2 epochs)
      → checkpoint saved to LORA_OUTPUTS_DIR/<user_id>/checkpoint/
@@ -195,8 +236,10 @@ Training job (runs sequentially, one user at a time):
 | `GET /health` | — | Health check |
 | `GET /status` | — | Training state for all users (JSON) |
 | `POST /full-pull` | — | Trigger a full history rebuild immediately |
-| `POST /train/{username}` | — | Manually trigger training for a specific user |
+| `POST /train/{username}` | — | Manually trigger training for a specific user (single-user equivalent of `--force-all`; sets that user to `queued` and dispatches immediately if proxy is idle, regardless of training window) |
 | `GET /history/{user_id}/count` | — | Clean message count for a user |
+
+> **Force-all vs per-user manual trigger:** `POST /train/{username}` is for ad-hoc single-user retraining (e.g. testing a new persona or recovering from an `error` state). `make mimic-source-refresh` → `training_trigger.py --force-all` is for bulk retraining after a base model change — it queues all users and lets the training window scheduler dispatch them in sequence overnight.
 
 ---
 

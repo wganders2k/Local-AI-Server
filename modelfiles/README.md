@@ -7,7 +7,7 @@ Ollama Modelfile definitions for all models in the stack. These files are the so
 | File | Ollama Name | Slot | Source |
 |---|---|---|---|
 | `autocomplete.Modelfile` | `autocomplete` | permanent (`:11435`) | Ollama registry |
-| `brain.Modelfile` | `brain` | swappable (`:11434`) | Ollama registry |
+| `brain.Modelfile` | `brain` | swappable (`:11434`) | HuggingFace |
 | `mimic.Modelfile` | `mimic_<member>` | swappable (`:11434`) | HuggingFace |
 | `lore.Modelfile` | `lore` | swappable (`:11434`) | Ollama registry |
 | `librechat_chat.Modelfile` | `librechat_chat` | swappable (`:11434`) | HuggingFace |
