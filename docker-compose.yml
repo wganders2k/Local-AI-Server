@@ -1,0 +1,179 @@
+services:
+
+  # ──────────────────────────────────────────────────────────
+  # Ollama — Permanent slot (:11435)
+  # Hosts the autocomplete model (qwen2.5-coder:1.5b) forever.
+  # Never swapped. num_parallel 4 for fast autocomplete bursts.
+  # ──────────────────────────────────────────────────────────
+  ollama-permanent:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=0
+      - OLLAMA_NUM_PARALLEL=4
+      - OLLAMA_KEEP_ALIVE=-1
+    ports:
+      - "11435:11434"
+    volumes:
+      - ollama_permanent:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # ──────────────────────────────────────────────────────────
+  # Ollama — Swappable slot (:11434)
+  # Hosts one model at a time: brain, mimic personas, lore
+  # assistant, or LibreChat local model. The proxy enforces
+  # that only one model is loaded here at any time.
+  # ──────────────────────────────────────────────────────────
+  ollama-swappable:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=0
+      - OLLAMA_NUM_PARALLEL=1
+      - OLLAMA_KEEP_ALIVE=300        # 5-min idle timeout
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_swappable:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # ──────────────────────────────────────────────────────────
+  # FastAPI Orchestration Proxy (:11436)
+  # Routes requests to the correct Ollama instance.
+  # Serialises access to the swappable slot via asyncio.Lock.
+  # ──────────────────────────────────────────────────────────
+  proxy:
+    build: ./proxy
+    restart: unless-stopped
+    ports:
+      - "11436:11436"
+    depends_on:
+      ollama-permanent:
+        condition: service_healthy
+      ollama-swappable:
+        condition: service_healthy
+    environment:
+      - OLLAMA_PERMANENT=http://ollama-permanent:11434
+      - OLLAMA_SWAPPABLE=http://ollama-swappable:11434
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11436/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # ──────────────────────────────────────────────────────────
+  # Discord Bot
+  # Mention routing, typing indicators, lore+mimic chain.
+  # ──────────────────────────────────────────────────────────
+  discord-bot:
+    build: ./discord-bot
+    restart: unless-stopped
+    depends_on:
+      proxy:
+        condition: service_healthy
+      chromadb:
+        condition: service_started
+    environment:
+      - DISCORD_TOKEN=${DISCORD_TOKEN}
+      - OLLAMA_PROXY=http://proxy:11436
+      - CHROMA_HOST=chromadb
+      - CHROMA_PORT=8000
+      - MAX_QUEUE_DEPTH=${MAX_QUEUE_DEPTH:-3}
+      - RATE_LIMIT_PER_USER=${RATE_LIMIT_PER_USER:-5}
+      - TYPING_INDICATOR_INTERVAL=${TYPING_INDICATOR_INTERVAL:-5}
+      - LORE_TOP_K=${LORE_TOP_K:-5}
+
+  # ──────────────────────────────────────────────────────────
+  # LibreChat (:3080)
+  # Self-hosted chat UI. Supports local Ollama model via proxy
+  # and Claude via Anthropic API key (set ANTHROPIC_API_KEY).
+  # ──────────────────────────────────────────────────────────
+  librechat:
+    image: ghcr.io/danny-avila/librechat:latest
+    restart: unless-stopped
+    ports:
+      - "3080:3080"
+    depends_on:
+      proxy:
+        condition: service_healthy
+      librechat-mongodb:
+        condition: service_started
+    volumes:
+      - ./librechat/librechat.yaml:/app/librechat.yaml:ro
+      - librechat_uploads:/app/client/public/images
+    environment:
+      - MONGO_URI=mongodb://librechat-mongodb:27017/LibreChat
+      # Anthropic API key — leave blank to disable Claude backend
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      # Local Ollama endpoint via proxy
+      - OLLAMA_BASE_URL=http://proxy:11436
+
+  # ──────────────────────────────────────────────────────────
+  # LibreChat — MongoDB sidecar
+  # Persists conversation history, user accounts, settings.
+  # ──────────────────────────────────────────────────────────
+  librechat-mongodb:
+    image: mongo:7
+    restart: unless-stopped
+    volumes:
+      - librechat_mongo:/data/db
+
+  # ──────────────────────────────────────────────────────────
+  # RAG Service
+  # Handles Discord history ingestion and lore retrieval.
+  # CPU-only — no VRAM impact.
+  # ──────────────────────────────────────────────────────────
+  rag-service:
+    build: ./rag
+    restart: unless-stopped
+    environment:
+      - CHROMA_HOST=chromadb
+      - CHROMA_PORT=8000
+    depends_on:
+      - chromadb
+
+  # ──────────────────────────────────────────────────────────
+  # ChromaDB
+  # Vector store for lore embeddings.
+  # CPU-only — no VRAM impact.
+  # ──────────────────────────────────────────────────────────
+  chromadb:
+    image: chromadb/chroma:latest
+    restart: unless-stopped
+    volumes:
+      - chroma_data:/chroma/chroma
+
+# ──────────────────────────────────────────────────────────
+# Named volumes
+# All persistent data lives here. Survives container restarts
+# and rebuilds. Use `make nuke` to wipe everything (destructive).
+# ──────────────────────────────────────────────────────────
+volumes:
+  ollama_permanent:       # Permanent Ollama model weights
+  ollama_swappable:       # Swappable Ollama model weights
+  librechat_uploads:      # LibreChat uploaded files
+  librechat_mongo:        # LibreChat conversation history + settings
+  chroma_data:            # ChromaDB lore embeddings

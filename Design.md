@@ -1,3 +1,4 @@
+
 ---
 
 # Deepleffen Bot + Coding Assistant — Revised Design Document v2.3
@@ -518,7 +519,62 @@ This context is prepended to the lore assistant's user message before forwarding
 
 ## 10. Development Phases
 
+### Component Overview
+
+The following software components are built and evolved across the four phases:
+
+| Component | Description |
+|---|---|
+| **Ollama Instances** | Two Docker containers: permanent (`:11435`, autocomplete) and swappable (`:11434`, all other models) |
+| **Orchestration Middleware** | FastAPI proxy on `:11436` — swap logic, async lock, request queue, source tagging |
+| **Ollama Modelfiles** | Registered model definitions: `brain`, `deepleffen_*`, `deepleffen_lore`, `librechat_chat` |
+| **Discord Bot** | `discord.py` bot — mention routing, typing indicators, lore+mimic chain dispatch |
+| **LibreChat** | Self-hosted chat UI container + MongoDB sidecar — local model and Claude API backends |
+| **Discord Data Preprocessor** | Export parser + chunker that feeds raw Discord history into ChromaDB |
+| **RAG Service** | ChromaDB + `all-MiniLM-L6-v2` embedding pipeline — CPU-only, no VRAM impact |
+| **LoRA Training Pipeline** | Unsloth QLoRA fine-tuning on Qwen3.5-9B-Uncensored + GGUF merge and re-registration |
+
+---
+
+### Development Timeline
+
+```
+                             │ Phase 1 │  Phase 2  │    Phase 3    │  Phase 4  │
+                             │ 2–4 days│  1–2 wks  │   (ongoing)   │ (optional)│
+─────────────────────────────┼─────────┼───────────┼───────────────┼───────────┤
+Ollama Instances             │ ████████│           │               │           │
+Orchestration Middleware     │ ████████│           │               │           │
+Ollama Modelfiles            │ ████████│           │ ░░░ LoRA swap │           │
+Discord Bot                  │ ████████│           │               │ ░░░ harden│
+LibreChat + MongoDB          │ ████████│           │               │ ░░░ auth  │
+Discord Data Preprocessor    │         │ ██████████│               │           │
+RAG Service (ChromaDB)       │         │ ██████████│               │           │
+LoRA Training Pipeline       │         │           │ ██████████████│           │
+─────────────────────────────┴─────────┴───────────┴───────────────┴───────────┘
+
+████  Primary development / initial build
+░░░   Minor extension or hardening work
+      (blank) Component stable — no changes required
+```
+
+---
+
 ### Phase 1 — Prototype (2–4 days)
+
+**Components active this phase:**
+
+| Component | Status | Notes |
+|---|---|---|
+| Ollama Instances | 🔨 Build | Stand up both permanent and swappable containers via Docker Compose |
+| Orchestration Middleware | 🔨 Build | FastAPI proxy with swap logic, async lock, and source tagging |
+| Ollama Modelfiles | 🔨 Build | Register all models: `brain`, `deepleffen_*` (system-prompt only), `deepleffen_lore`, `librechat_chat` |
+| Discord Bot | 🔨 Build | Mention routing, typing indicators, basic mimic + lore dispatch |
+| LibreChat + MongoDB | 🔨 Build | Container + sidecar, both Claude API and local Ollama endpoints configured |
+| Discord Data Preprocessor | ⏳ Not started | Needed in Phase 2 |
+| RAG Service | ⏳ Not started | Needed in Phase 2 |
+| LoRA Training Pipeline | ⏳ Not started | Needed in Phase 3 |
+
+**Tasks:**
 - [ ] Stand up dual Ollama instances + proxy + Docker Compose
 - [ ] Register mimic Modelfiles using **system prompt personas only** (no LoRA yet)
 - [ ] Verify Qwen3.5-9B-Uncensored loads and responds correctly via Ollama
@@ -531,13 +587,47 @@ This context is prepended to the lore assistant's user message before forwarding
 - [ ] Register `librechat_chat` Modelfile and verify it loads via proxy
 - [ ] Test LibreChat swap contention with a concurrent Discord request
 
+---
+
 ### Phase 2 — RAG + Lore (1–2 weeks)
+
+**Components active this phase:**
+
+| Component | Status | Notes |
+|---|---|---|
+| Ollama Instances | ✅ Stable | No changes — already running |
+| Orchestration Middleware | ✅ Stable | No changes — proxy handles lore requests identically |
+| Ollama Modelfiles | ✅ Stable | `deepleffen_lore` Modelfile already registered in Phase 1 |
+| Discord Bot | ✅ Stable | Lore+mimic chain dispatch already wired in Phase 1; RAG context injection is the only addition |
+| LibreChat + MongoDB | ✅ Stable | No changes |
+| Discord Data Preprocessor | 🔨 Build | Parse Discord history export, chunk by conversation thread, embed and load into ChromaDB |
+| RAG Service (ChromaDB) | 🔨 Build | Stand up ChromaDB container, wire retrieval into lore assistant context at inference time |
+| LoRA Training Pipeline | ⏳ Not started | Needed in Phase 3 |
+
+**Tasks:**
 - [ ] Ingest Discord history export into ChromaDB
-- [ ] Wire RAG retrieval into lore assistant Modelfile context
+- [ ] Wire RAG retrieval into lore assistant context (prepend retrieved chunks to user message)
 - [ ] Test lore+mimic sequential chain (Step 8.2 flow)
 - [ ] Tune lore assistant temperature and retrieval `top_k`
 
+---
+
 ### Phase 3 — LoRA Persona Refinement (ongoing)
+
+**Components active this phase:**
+
+| Component | Status | Notes |
+|---|---|---|
+| Ollama Instances | ✅ Stable | No changes |
+| Orchestration Middleware | ✅ Stable | No changes — proxy is model-name-agnostic by design |
+| Ollama Modelfiles | 🔄 Extend | Re-register `deepleffen_*` Modelfiles pointing to LoRA-merged GGUFs; zero proxy changes |
+| Discord Bot | ✅ Stable | No changes — bot references model names, not weights |
+| LibreChat + MongoDB | ✅ Stable | No changes |
+| Discord Data Preprocessor | ✅ Stable | Re-run ingestion as new lore accumulates (manual or cron) |
+| RAG Service (ChromaDB) | ✅ Stable | Re-embed on new significant events; no structural changes |
+| LoRA Training Pipeline | 🔨 Build | Unsloth QLoRA fine-tuning on Qwen3.5-9B-Uncensored per member; GGUF merge and re-registration |
+
+**Tasks:**
 - [ ] Collect 500–1000 messages per member from Discord history
 - [ ] Fine-tune LoRA adapters on Qwen3.5-9B base using Unsloth (QLoRA, RTX 3090)
 - [ ] Merge adapters into full models: `deepleffen_<member>_v2.gguf`
@@ -546,7 +636,24 @@ This context is prepended to the lore assistant's user message before forwarding
 
 > **LoRA training note:** Unsloth supports Qwen3.5 fine-tuning natively as of March 2026. The uncensored base weights are the correct starting point for LoRA — you're training style on top of an already-unlocked model, which means the adapter doesn't need to fight the base model's refusal tendencies.
 
+---
+
 ### Phase 4 — Hardening (optional)
+
+**Components active this phase:**
+
+| Component | Status | Notes |
+|---|---|---|
+| Ollama Instances | ✅ Stable | No changes |
+| Orchestration Middleware | 🔄 Extend | Add per-user rate limiting, queue depth cap, optional Brain priority preemption |
+| Ollama Modelfiles | ✅ Stable | No changes |
+| Discord Bot | 🔄 Extend | Ephemeral error messages on queue rejection; disclaimer post-processing strip |
+| LibreChat + MongoDB | 🔄 Extend | Enable built-in user authentication if exposing beyond localhost |
+| Discord Data Preprocessor | ✅ Stable | No changes |
+| RAG Service (ChromaDB) | ✅ Stable | No changes |
+| LoRA Training Pipeline | ✅ Stable | Ongoing as needed; no structural changes to pipeline |
+
+**Tasks:**
 - [ ] Per-user rate limiting (5 requests/min default, configurable per member)
 - [ ] Queue depth cap (reject if >3 requests queued, return Discord ephemeral error)
 - [ ] Graceful Brain priority: Brain requests can optionally preempt queued Discord requests with configurable precedence

@@ -1,0 +1,46 @@
+# Environment / secrets — NEVER commit these
+.env
+*.env.local
+
+# Large model files
+*.gguf
+*.bin
+*.safetensors
+*.pt
+*.pth
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node (LibreChat dev, if ever needed)
+node_modules/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/settings.json
+*.swp
+*.swo
+
+# Docker
+*.log
+
+# LoRA training outputs (large)
+lora-training/outputs/
+lora-training/checkpoints/
+lora-training/runs/
