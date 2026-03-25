@@ -576,7 +576,7 @@ LoRA Training Pipeline       │         │           │ ███████
 **Tasks:**
 - [ ] Stand up dual Ollama instances + proxy + Docker Compose
 - [ ] Register mimic Modelfiles using **system prompt personas only** (no LoRA yet)
-- [ ] Verify Qwen3.5-9B-Uncensored loads and responds correctly via Ollama
+- [ ] Verify Qwen3.5-35B-A3B-Uncensored loads and responds correctly via Ollama
 - [ ] Confirm `thinking false` parameter suppresses chain-of-thought tokens in output
 - [ ] Wire Discord bot with mention routing and typing indicators
 - [ ] Test basic swap cycle: mimic → lore → mimic
