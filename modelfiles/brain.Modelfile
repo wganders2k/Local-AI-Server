@@ -1,7 +1,13 @@
 # brain.Modelfile
 # Swappable slot (:11434) — Deep coding assistant (VS Code / Cursor chat)
 # Largest model in the stack. Stays loaded until evicted by another request.
-FROM qwen3.5:35b-a3b-q4_K_M
+#
+# Source: HuggingFace — unsloth/Qwen3.5-35B-A3B-GGUF (UD-IQ4_NL quant)
+# Quant: UD-IQ4_NL (~17.8 GB VRAM) — importance-weighted 4-bit NL variant
+#
+# To switch to a different model/quant, update the FROM line and run:
+#   make model-redownload MODEL=brain SLOT=swappable
+FROM hf.co/unsloth/Qwen3.5-35B-A3B-GGUF:UD-IQ4_NL
 
 PARAMETER num_ctx 40960
 PARAMETER num_predict -1

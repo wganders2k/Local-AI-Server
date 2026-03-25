@@ -25,7 +25,7 @@
 | Slot | Purpose | Model | Quant | VRAM |
 |---|---|---|---|---|
 | Permanent (:11435) | Autocomplete | `qwen2.5-coder:1.5b` | Q8_0 | ~1.5 GB |
-| Swappable (:11434) | Brain (coding) | `qwen3.5:35b-a3b` | Q4_K_M | ~17.8 GB |
+| Swappable (:11434) | Brain (coding) | `qwen3.5:35b-a3b` | UD-IQ4_NL | ~17.8 GB |
 | Swappable (:11434) | Mimic personas (×6) | `Qwen3.5-9B-Uncensored` | Q6_K | ~7.4 GB |
 | Swappable (:11434) | Lore assistant | `gemma3:12b` | Q6_K | ~9.5 GB |
 | Swappable (:11434) | LibreChat local model | `qwen3.5:14b` | UD-IQ4_XS | ~9.5 GB |
@@ -242,11 +242,13 @@ guessing. Never invent lore, events, or quotes.
 """
 ```
 
-### 5.3 Brain Modelfile (unchanged)
+### 5.3 Brain Modelfile
 
 ```dockerfile
 # brain.Modelfile
-FROM qwen3.5:35b-a3b-q4_K_M
+# Source: HuggingFace — unsloth/Qwen3.5-35B-A3B-GGUF (UD-IQ4_NL quant)
+# Quant: UD-IQ4_NL (~17.8 GB VRAM)
+FROM hf.co/unsloth/Qwen3.5-35B-A3B-GGUF:UD-IQ4_NL
 
 PARAMETER num_ctx 40960
 PARAMETER num_predict -1
@@ -582,11 +584,20 @@ Using the full message history maximises style capture for LoRA training. The ke
 
 ### 9a.2 LoRA Retraining Trigger
 
-After each incremental pull, the service checks whether any user has accumulated ≥ `RETRAIN_THRESHOLD` (default: 200) new clean messages since their last training run. If so, a training job is queued.
+Retraining is triggered via three distinct paths, each handled by `training_trigger.py`:
+
+| Trigger | Caller | What it does |
+|---|---|---|
+| **Threshold check** | `main.py` after each incremental pull | Increments `messages_since_last_train`; sets `status = "queued"` for any user who hits `RETRAIN_THRESHOLD`. Does **not** dispatch training — only updates state. |
+| **Training window scheduler** | `main.py` APScheduler job (every 5 min, 3–6 AM only) | Calls `training_trigger.dispatch_queued()` — scans for `queued` users and dispatches training if the proxy queue depth is zero. Retries automatically at the next tick if the proxy is busy. |
+| **Force-all (manual)** | `make mimic-source-refresh` → `python training_trigger.py --force-all` | Sets **all** users to `queued` regardless of threshold (used when the mimic base model changes and all LoRA adapters must be retrained from scratch). Training still dispatches via the training window scheduler — `--force-all` only updates state. |
+
+**Why separate threshold-check from dispatch?**
+The incremental pull path stays fast and simple — it only updates counters and sets `queued` status. All actual training dispatch happens from the dedicated training window scheduler, which has a clear, single responsibility. Retry logic is implicit: if the proxy is busy at 3:05 AM, the scheduler tries again at 3:10 AM. No special retry code needed. If the service restarts while jobs are `queued`, the scheduler picks them up naturally at the next tick during the training window.
 
 **Training coordination:**
 - Training is only dispatched during the configured training window (default: 3–6 AM) to avoid inference contention
-- Before starting, the service checks that the proxy queue depth is zero
+- Before dispatching, `dispatch_queued()` checks that the proxy queue depth is zero
 - The swappable Ollama slot is explicitly unloaded before training begins (QLoRA requires ~14–16 GB VRAM)
 - Training runs as a subprocess calling `lora-training/train.py` then `lora-training/merge.py`
 - After the GGUF merge, the service re-registers the Ollama Modelfile automatically — zero bot or proxy changes required
