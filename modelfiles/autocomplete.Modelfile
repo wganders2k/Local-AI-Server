@@ -1,0 +1,11 @@
+# autocomplete.Modelfile
+# Permanent slot (:11435) — VS Code / Cursor autocomplete
+# Never swapped. num_parallel 4 set at the Ollama instance level.
+FROM qwen2.5-coder:1.5b
+
+PARAMETER num_ctx 4096
+PARAMETER num_predict 256
+PARAMETER temperature 0.1
+PARAMETER top_k 20
+PARAMETER top_p 0.9
+PARAMETER keep_alive -1        # Never unload — permanent slot

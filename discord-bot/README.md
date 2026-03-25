@@ -4,7 +4,7 @@
 
 ## Responsibilities
 
-- Parse `@deepleffen_<member>` and `@deepleffen_lore` mentions
+- Parse `@mimic_<member>` and `@lore` mentions
 - Route requests to the proxy (`/api/chat`) with the correct model name
 - Maintain typing indicator throughout swap + inference latency
 - Enforce per-user rate limiting (default: 5 req/min)
@@ -45,11 +45,11 @@ discord-bot/
 ├── formatters.py       # Response formatting, disclaimer stripping, embed builders
 ├── config.py           # Environment variable loading and defaults
 └── modelfiles/         # Ollama Modelfile templates (reference copies)
-    ├── deepleffen_user1.Modelfile
-    ├── deepleffen_user2.Modelfile
-    ├── deepleffen_user3.Modelfile
-    ├── deepleffen_user4.Modelfile
-    ├── deepleffen_user5.Modelfile
-    ├── deepleffen_user6.Modelfile
-    └── deepleffen_lore.Modelfile
+    ├── mimic_user1.Modelfile
+    ├── mimic_user2.Modelfile
+    ├── mimic_user3.Modelfile
+    ├── mimic_user4.Modelfile
+    ├── mimic_user5.Modelfile
+    ├── mimic_user6.Modelfile
+    └── lore.Modelfile
 ```

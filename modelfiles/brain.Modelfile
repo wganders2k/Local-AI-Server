@@ -1,0 +1,15 @@
+# brain.Modelfile
+# Swappable slot (:11434) — Deep coding assistant (VS Code / Cursor chat)
+# Largest model in the stack. Stays loaded until evicted by another request.
+FROM qwen3.5:35b-a3b-q4_K_M
+
+PARAMETER num_ctx 40960
+PARAMETER num_predict -1
+PARAMETER num_parallel 1
+PARAMETER keep_alive -1        # Stay loaded until explicitly swapped
+PARAMETER temperature 0.2
+PARAMETER top_k 10
+PARAMETER top_p 0.9
+PARAMETER thinking false       # Disable by default — enable per-request for complex reasoning
+
+SYSTEM """You are an expert coding assistant. You help with software architecture, debugging, code review, and implementation across all languages and frameworks. Be precise, thorough, and cite relevant documentation or best practices when applicable."""

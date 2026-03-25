@@ -5,7 +5,7 @@ CPU-only service that handles Discord history ingestion and lore retrieval for t
 ## Responsibilities
 
 - Parse Discord history exports and chunk by conversation thread (max 512 tokens/chunk)
-- Embed chunks using `all-MiniLM-L6-v2` and store in ChromaDB collection `deepleffen_lore`
+- Embed chunks using `all-MiniLM-L6-v2` and store in ChromaDB collection `lore`
 - Expose a retrieval function used by the Discord bot at inference time
 - Support re-ingestion as new lore accumulates (manual trigger or cron)
 

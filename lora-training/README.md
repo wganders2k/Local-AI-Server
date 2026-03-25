@@ -1,37 +1,77 @@
 # LoRA Training Pipeline
 
-Phase 3 component. Unsloth QLoRA fine-tuning on `Qwen3.5-9B-Uncensored` per server member, followed by GGUF merge and re-registration in Ollama. Not a running service — scripts are run manually on the server when training new persona models.
+Phase 3 component. Unsloth QLoRA fine-tuning on `Qwen3.5-9B-Uncensored` per server member, followed by GGUF merge and re-registration in Ollama. Scripts can be run manually or invoked automatically by the `history-service` training trigger.
 
 ## Responsibilities
 
 - Fine-tune per-member LoRA adapters on `Qwen3.5-9B-Uncensored` base using Unsloth QLoRA
-- Merge adapters into full GGUF models: `deepleffen_<member>_v2.gguf`
+- Merge adapters into full GGUF models: `mimic_<member>_v{n}.gguf`
 - Re-register updated Modelfiles in Ollama — zero proxy or bot code changes required
 
 ## Design Reference
 
-See `Design.md` §10 Phase 3 (LoRA Persona Refinement).
+See `Design.md` §9a (History & Training Pipeline) and §10 Phase 3 (LoRA Persona Refinement).
 
 ## Prerequisites
 
-- 500–1000 messages per member extracted from Discord history
+- Per-user JSONL message history collected by `history-service` (minimum ~200 clean messages to trigger; more is better)
 - Unsloth installed (supports Qwen3.5 fine-tuning natively as of March 2026)
-- RTX 3090 with sufficient VRAM headroom (training uses the same GPU)
+- RTX 3090 with sufficient VRAM headroom (~14–16 GB required for QLoRA training)
+- Swappable Ollama slot must be idle before training begins (history-service handles this automatically)
 
-## Upgrade path (zero bot changes)
+## Invocation
 
-1. Train LoRA adapter on Qwen3.5-9B-Uncensored base
-2. Merge: `deepleffen_<member>_v2.gguf`
-3. Update Modelfile `FROM` line to point to merged GGUF
-4. `ollama rm deepleffen_<member>` + `ollama create deepleffen_<member> -f deepleffen_<member>_v2.Modelfile`
-5. Bot continues using the same model name — no proxy changes, no bot code changes
+### Automatic (Phase 3 — via history-service)
 
-## Planned file structure
+When `TRAINING_TRIGGER_ENABLED=true` in the history-service, training is dispatched automatically when a user accumulates ≥ `RETRAIN_THRESHOLD` new clean messages. The history-service calls these scripts as subprocesses:
+
+```bash
+# Called by history-service/training_trigger.py
+python train.py --user <user_id> --data /app/data/history/<user_id>.jsonl --output /app/lora-outputs/<user_id>/
+python merge.py --user <user_id> --checkpoint /app/lora-outputs/<user_id>/checkpoint/ --output /app/lora-outputs/<user_id>/
+```
+
+### Manual (Phase 3 — standalone)
+
+```bash
+# Fine-tune LoRA adapter for a specific member
+python train.py --user user3 --data data/user3_clean.jsonl --output outputs/user3/
+
+# Merge adapter into full GGUF
+python merge.py --user user3 --checkpoint outputs/user3/checkpoint/ --output outputs/user3/
+
+# Re-register Modelfile in Ollama
+ollama rm mimic_user3
+ollama create mimic_user3 -f /modelfiles/mimic_user3_v2.Modelfile
+```
+
+## Upgrade Path (zero bot changes)
+
+1. Training completes → `mimic_<member>_v{n+1}.gguf` saved to outputs directory
+2. `merge.py` updates the Modelfile `FROM` line to point to the new GGUF
+3. `ollama rm mimic_<member>` + `ollama create mimic_<member> -f updated Modelfile`
+4. Bot continues using the same model name — no proxy changes, no bot code changes
+5. `history-service` updates `training_state.json`: resets `messages_since_last_train = 0`, increments `model_version`
+
+## Training Notes
+
+**Why train on all clean history (not just recent messages)?**
+Using the full clean message history maximises style capture. QLoRA only trains the adapter (not the base weights), so the training corpus can be large without catastrophic forgetting risk. Aggressive filtering (see `history-service` README) ensures only quality messages reach the training dataset.
+
+**Epoch count:** 1–2 epochs recommended. More epochs risk overfitting to specific phrases rather than capturing general style.
+
+**Base model:** Always train from the fresh `Qwen3.5-9B-Uncensored` checkpoint. Never train on top of a previously merged model — this compounds drift across versions.
+
+**VRAM during training:** QLoRA on the 9B model requires ~14–16 GB VRAM. The history-service sends an explicit unload request to the swappable Ollama instance before starting training to free VRAM.
+
+## Planned File Structure
 
 ```
 lora-training/
 ├── train.py            # Unsloth QLoRA fine-tuning script
+│                       # Args: --user, --data <jsonl_path>, --output <dir>
 ├── merge.py            # Adapter merge + GGUF export script
+│                       # Args: --user, --checkpoint <dir>, --output <dir>
 ├── data/               # Per-member message datasets (gitignored if large)
 ├── outputs/            # Merged GGUFs (gitignored — large files)
 └── checkpoints/        # Training checkpoints (gitignored — large files)
@@ -39,3 +79,15 @@ lora-training/
 
 > `outputs/` and `checkpoints/` are excluded from git via `.gitignore`.
 > Store trained models on the server filesystem, not in the repo.
+> When invoked by history-service, outputs go to the `lora_outputs` Docker volume.
+
+## Relationship to `history-service`
+
+The `history-service` is the automated orchestration layer that:
+1. Collects and filters Discord messages into per-user JSONL files
+2. Tracks clean message counts and triggers training when the threshold is met
+3. Calls `train.py` and `merge.py` as subprocesses
+4. Re-registers the Ollama Modelfile after merge completes
+5. Updates training state (version, timestamp, status)
+
+These scripts remain independently runnable for manual workflows. The history-service adds the automated scheduling layer on top.
