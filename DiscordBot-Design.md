@@ -12,7 +12,7 @@ The bot has **two distinct functional modes:**
 
 | Mode | Trigger | Model Used | Purpose |
 |---|---|---|---|
-| Mimic | `@mimic_<member>` | `Qwen3.5-9B-Uncensored` Q6_K | Impersonate a server member's Discord personality |
+| Mimic | `@mimic_<member>` | `Qwen3.5-35B-A3B-Uncensored` IQ4_XS | Impersonate a server member's Discord personality |
 | Lore | `@lore` | `gemma3:12b` Q6_K | Answer questions about server history, in-jokes, and events |
 
 These modes can be chained in a single message (see Section 6.2).
@@ -483,12 +483,12 @@ Each mimic persona is defined by two artefacts:
 
 | Persona | Model | Quant | VRAM | Temp | Ctx | Max Tokens | Thinking |
 |---|---|---|---|---|---|---|---|
-| mimic_user1 | Qwen3.5-9B-Uncensored | Q6_K | ~7.4 GB | 0.85 | 8192 | 512 | false |
-| mimic_user2 | Qwen3.5-9B-Uncensored | Q6_K | ~7.4 GB | 0.85 | 8192 | 512 | false |
-| mimic_user3 | Qwen3.5-9B-Uncensored | Q6_K | ~7.4 GB | 0.85 | 8192 | 512 | false |
-| mimic_user4 | Qwen3.5-9B-Uncensored | Q6_K | ~7.4 GB | 0.85 | 8192 | 512 | false |
-| mimic_user5 | Qwen3.5-9B-Uncensored | Q6_K | ~7.4 GB | 0.85 | 8192 | 512 | false |
-| mimic_user6 | Qwen3.5-9B-Uncensored | Q6_K | ~7.4 GB | 0.85 | 8192 | 512 | false |
+| mimic_user1 | Qwen3.5-35B-A3B-Uncensored | IQ4_XS | ~18 GB | 0.85 | 8192 | 512 | false |
+| mimic_user2 | Qwen3.5-35B-A3B-Uncensored | IQ4_XS | ~18 GB | 0.85 | 8192 | 512 | false |
+| mimic_user3 | Qwen3.5-35B-A3B-Uncensored | IQ4_XS | ~18 GB | 0.85 | 8192 | 512 | false |
+| mimic_user4 | Qwen3.5-35B-A3B-Uncensored | IQ4_XS | ~18 GB | 0.85 | 8192 | 512 | false |
+| mimic_user5 | Qwen3.5-35B-A3B-Uncensored | IQ4_XS | ~18 GB | 0.85 | 8192 | 512 | false |
+| mimic_user6 | Qwen3.5-35B-A3B-Uncensored | IQ4_XS | ~18 GB | 0.85 | 8192 | 512 | false |
 | lore | Gemma3-12B | Q6_K | ~9.5 GB | 0.3 | 16384 | 1024 | N/A |
 
 > All mimic personas share the same base model and quant — only the system prompt differs. This means swapping between any two mimic personas is a **system prompt swap only**, not a model reload. The proxy's `current_model` key distinguishes them by name, but Ollama may cache the base weights and only swap the KV context. Verify this behaviour during Phase 1 testing.
@@ -518,7 +518,7 @@ Customise the italicised description per member during Phase 1 testing. In Phase
 | RAG lookup (lore chain only) | ~500ms | ChromaDB CPU query |
 | Proxy lock acquisition (no queue) | ~1ms | Immediate if slot free |
 | Proxy lock acquisition (queued) | Variable | Depends on in-progress generation |
-| Model swap (mimic, cold) | ~3–5s | Qwen3.5-9B Q6_K from NVMe |
+| Model swap (mimic, cold) | ~5–8s | Qwen3.5-35B-A3B IQ4_XS from NVMe (~18 GB) |
 | Model swap (lore, cold) | ~4–6s | Gemma3-12B Q6_K from NVMe |
 | Model swap (same model, warm) | ~0s | Already loaded, no swap needed |
 | Mimic inference | ~1–2s | ~40 tok/s, 512 max tokens |
@@ -558,11 +558,27 @@ The typing indicator is active from step 1 through Discord post, masking all lat
 
 ---
 
-## 16. Phase 3 LoRA Upgrade Path
+## 16. Image Captioning in Discord History
+
+Discord image attachments shared by members are automatically captioned by the `history-service` as a background process. This is **transparent to the bot** — the bot never calls the image captioner directly.
+
+**What this means for the bot:**
+- The `history-service` stores captions in JSONL records alongside the original message content
+- The RAG service ingests these captions into ChromaDB, making image content searchable via lore queries
+- When a user asks `@lore` about something that was originally an image (e.g. "what was that meme about the tournament?"), the lore assistant can retrieve and reference it
+- Captions are flagged `caption_excluded_from_training: true` and are never used in LoRA training — they are synthetic descriptions, not the user's voice
+
+The image captioner uses the same `Qwen3.5-35B-A3B-Uncensored` base as the mimic personas (registered as `image-caption` in Ollama), ensuring no refusals on Discord content. It runs exclusively during the configured off-hours window (default 3–6 AM) and never contends with live bot requests.
+
+See `history-service/README.md` §Image Captioning Pipeline for full details.
+
+---
+
+## 17. Phase 3 LoRA Upgrade Path
 
 When Phase 3 LoRA-merged models are ready, the bot requires **zero code changes.** The upgrade path is:
 
-1. Train LoRA adapter on Qwen3.5-9B-Uncensored base using member message history
+1. Train LoRA adapter on Qwen3.5-35B-A3B-Uncensored base using member message history
 2. Merge adapter into full model: `mimic_<member>_v2.gguf`
 3. Update Modelfile: change `FROM` line to point to merged GGUF
 4. `ollama rm mimic_<member>` + `ollama create mimic_<member> -f mimic_<member>_v2.Modelfile`

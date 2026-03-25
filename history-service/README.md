@@ -243,6 +243,137 @@ Used when the mimic base model changes (new base or quant in `mimic.Modelfile`) 
 
 ---
 
+## Image Captioning Pipeline
+
+The history service includes a background image captioning step that enriches JSONL records with natural-language descriptions of Discord image attachments. This runs as a separate scheduled job — it is **not** in the incremental pull hot path.
+
+### Purpose
+
+Discord messages frequently contain images (memes, screenshots, reaction images). Without captioning, this content is invisible to:
+- **Lore RAG** — the vector store can't retrieve image content it can't read
+- **LoRA training context** — the model has no signal about what images a user shared
+
+Captions make image content searchable and contextually meaningful, while the `caption_excluded_from_training` flag ensures synthetic descriptions never pollute the LoRA training corpus.
+
+### Model: `image-caption`
+
+The captioner uses the `image-caption` Ollama model, defined in `modelfiles/image-caption.Modelfile`. This model uses the **same base weights as the mimic personas** (`HauhauCS/Qwen3.5-35B-A3B-Uncensored-HauhauCS-Aggressive:IQ4_XS`) — an `image-text-to-text` capable model with zero refusals. This is critical: Discord content includes crude memes and adult humour that a standard censored vision model would refuse to describe.
+
+Because the base weights are shared with `mimic_*`, Ollama may reuse cached weights when swapping between a mimic persona and the image captioner, reducing swap overhead.
+
+**VRAM:** ~18 GB (same as mimic slot). The captioner only runs during the configured caption window when no inference is active.
+
+### Scheduling
+
+Image captioning runs as a dedicated APScheduler job in `main.py`. By default it shares the training window (3–6 AM) and runs **before** training dispatch to avoid VRAM contention:
+
+```
+Caption window (3–6 AM):
+  1. image_captioner.process_pending_batch()   ← runs first
+  2. training_trigger.dispatch_queued()        ← runs after captions complete
+```
+
+The captioner checks proxy queue depth before starting each batch. If the proxy is busy (e.g. a late-night Discord request), it defers to the next scheduler tick (every 5 minutes).
+
+### Batch Processing
+
+Images are processed in configurable batches (`IMAGE_CAPTION_BATCH_SIZE`, default 10) to avoid monopolising the swappable slot for extended periods. After each batch, the slot is released (short `keep_alive: 60s` in the Modelfile). Uncaptioned images are tracked via `caption_status` in the JSONL record and are picked up on subsequent runs.
+
+**Per-image flow:**
+```
+1. Scan JSONL records for attachments with caption_status == "pending"
+2. Filter: skip if content_type is not image/* or file size > IMAGE_CAPTION_MAX_FILE_SIZE_MB
+3. Download image to a temporary file
+4. Check proxy queue depth — defer if busy
+5. POST to proxy: model=image-caption, with image + caption prompt
+6. Store caption text in the attachment record
+7. Set caption_status = "done" (or "skipped" on error/unsupported format)
+8. Set caption_excluded_from_training = true
+9. Write updated record back to JSONL
+10. Delete temporary image file
+```
+
+### JSONL Schema Changes
+
+The existing JSONL record gains an optional `attachments` array. Messages without image attachments have no `attachments` field (fully backward compatible).
+
+```json
+{
+  "message_id": "123456789012345678",
+  "user_id": "987654321098765432",
+  "username": "user3",
+  "channel_id": "111222333444555666",
+  "channel_name": "general",
+  "timestamp": "2025-03-15T14:23:01Z",
+  "content": "check this out",
+  "word_count": 3,
+  "clean": true,
+  "attachments": [
+    {
+      "url": "https://cdn.discordapp.com/attachments/.../meme.png",
+      "content_type": "image/png",
+      "filename": "meme.png",
+      "file_size_bytes": 204800,
+      "caption": "A man in a suit pointing at a whiteboard that reads 'dying slower'.",
+      "caption_status": "done",
+      "caption_excluded_from_training": true
+    }
+  ]
+}
+```
+
+**`caption_status` values:**
+
+| Status | Meaning |
+|---|---|
+| `pending` | Attachment detected; caption not yet generated |
+| `done` | Caption successfully generated and stored |
+| `skipped` | Skipped — unsupported format, file too large, or download failed |
+| `error` | Caption request failed (model error); will retry on next run |
+
+### Training Exclusion
+
+The `caption_excluded_from_training: true` flag on each attachment signals the LoRA dataset exporter in `training_trigger.py` to treat caption text as **read-only context**, not training data. Specifically:
+
+- **RAG ingestion:** The caption is appended to the message's effective content string when chunking for ChromaDB: `"check this out [image: A man in a suit pointing at a whiteboard...]"`. This makes image content searchable via lore retrieval.
+- **LoRA training dataset:** The caption text is **never** included in training samples. Only the original `content` field (the user's actual words) is used. The presence of `caption_excluded_from_training: true` on any attachment is the explicit signal to skip that text.
+
+This distinction is important: the goal of LoRA training is to capture a user's *voice* — their vocabulary, tone, and mannerisms. Synthetic image descriptions generated by a VLM are not the user's voice and would degrade persona quality if included.
+
+### New Environment Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `IMAGE_CAPTION_ENABLED` | `false` | Enable/disable image captioning. Set `true` once `image-caption` model is registered. |
+| `IMAGE_CAPTION_MODEL` | `image-caption` | Ollama model name for captioning (must match registered Modelfile name) |
+| `IMAGE_CAPTION_BATCH_SIZE` | `10` | Images processed per captioning run |
+| `IMAGE_CAPTION_WINDOW_START` | `3` | Hour (0–23) when captioning may run |
+| `IMAGE_CAPTION_WINDOW_END` | `6` | Hour (0–23) when captioning window closes |
+| `IMAGE_CAPTION_MAX_FILE_SIZE_MB` | `10` | Skip images larger than this (avoids downloading huge files) |
+
+### New Module: `image_captioner.py`
+
+```
+history-service/
+├── image_captioner.py   # Batch processor: scans pending attachments, downloads images,
+│                        # calls proxy with image-caption model, writes captions to JSONL
+```
+
+`image_captioner.py` is called by the APScheduler caption job in `main.py`. It is stateless between runs — all state is tracked via `caption_status` in the JSONL records themselves.
+
+### Phase Timeline
+
+Image captioning is introduced in **Phase 2** alongside history collection. It is disabled by default (`IMAGE_CAPTION_ENABLED=false`) until the `image-caption` model is registered in Ollama.
+
+| Phase | Image Captioning |
+|---|---|
+| Phase 1 | ⏳ Not started |
+| Phase 2 | 🔨 Build + enable (requires `make model-create MODEL=image-caption SLOT=swappable`) |
+| Phase 3 | ✅ Running |
+| Phase 4 | ✅ Stable |
+
+---
+
 ## Why Not Merge Into the RAG Service?
 
 The RAG service is a **live inference dependency** — the Discord bot calls it synchronously during every lore request. It must be fast, lightweight, and always available.
