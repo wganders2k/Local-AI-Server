@@ -1,8 +1,8 @@
 ---
 
-# Deepleffen Bot + Coding Assistant — Revised Design Document v2.1
+# Deepleffen Bot + Coding Assistant — Revised Design Document v2.3
 
-**Revision:** Mimic persona base model changed from `mistral-nemo:12b` to `HauhauCS/Qwen3.5-9B-Uncensored-Aggressive`. Lore assistant unchanged. Ollama compatibility confirmed.
+**Revision:** LibreChat local model upgraded from `qwen2.5:14b` to `qwen3.5:14b` (UD-IQ4_XS, ~9.5 GB). Qwen3.5-14B is the current-generation successor to Qwen2.5-14B, offering significantly improved reasoning and instruction following at the same parameter count. The UD-IQ4_XS quant from Unsloth is used — a high-quality importance-weighted 4-bit quant that preserves more accuracy than standard Q4_K_M at a smaller footprint. VRAM budget updated accordingly.
 
 ---
 
@@ -13,6 +13,7 @@
 - **Two distinct model personalities.** Mimic personas use an abliterated base with no content refusals. The lore assistant uses a sterile, instruction-following base. Neither bleeds into the other.
 - **Swap-friendly by design.** The smaller the Discord model footprint, the faster the swap. Qwen3.5-9B at Q6_K (~7.4 GB) is significantly better than NeMo 12B (~10.5 GB) here.
 - **Prototype-first.** Phase 1 uses system prompt personas with no LoRA. LoRA-merged models slot in during Phase 2 with zero orchestration changes.
+- **LibreChat is a first-class consumer.** LibreChat routes through the same orchestration proxy as Discord and VS Code. When using a local model, it competes for the swappable slot under the same lock. When using Claude via API key, it bypasses the proxy entirely — zero VRAM impact.
 
 ---
 
@@ -26,6 +27,7 @@
 | Swappable (:11434) | Brain (coding) | `qwen3.5:35b-a3b` | Q4_K_M | ~17.8 GB |
 | Swappable (:11434) | Mimic personas (×6) | `Qwen3.5-9B-Uncensored` | Q6_K | ~7.4 GB |
 | Swappable (:11434) | Lore assistant | `gemma3:12b` | Q6_K | ~9.5 GB |
+| Swappable (:11434) | LibreChat local model | `qwen3.5:14b` | UD-IQ4_XS | ~9.5 GB |
 
 **VRAM utilisation by mode:**
 
@@ -35,8 +37,10 @@
 | Mimic active (+ Autocomplete) | ~8.9 GB | ~15.4 GB |
 | Lore active (+ Autocomplete) | ~11.0 GB | ~13.3 GB |
 | Coding KV cache at 32k ctx | ~21.0 GB | ~3.3 GB |
+| LibreChat local (+ Autocomplete) | ~11.0 GB | ~13.3 GB |
+| LibreChat via Claude API | ~1.5 GB (autocomplete only) | ~22.8 GB |
 
-> **KV Cache:** q8_0 for coding model. Brain: `num_parallel 1`, context 32k–40k. Mimic: `num_parallel 2`, context 8k (Discord messages are short). Lore: `num_parallel 1`, context 16k (RAG chunks need room).
+> **KV Cache:** q8_0 for coding model. Brain: `num_parallel 1`, context 32k–40k. Mimic: `num_parallel 2`, context 8k (Discord messages are short). Lore: `num_parallel 1`, context 16k (RAG chunks need room). LibreChat local: `num_parallel 1`, context 16k (conversational use).
 
 ---
 
@@ -64,47 +68,124 @@ Gemma 3 12B fits comfortably at Q6 on 16 GB VRAM, giving you ~9.5 GB at Q6_K on 
 
 ---
 
+## 3a. LibreChat Model Selection
+
+### 3a.1 Use Case
+
+LibreChat is a general-purpose personal chat interface — think of it as a self-hosted ChatGPT replacement. It supports multi-turn conversation, system prompts, and multiple model backends. The two viable backends for this setup are:
+
+1. **Claude via Anthropic API key** — zero local VRAM cost, best quality, requires internet + paid API usage.
+2. **Local Ollama model via proxy** — fully offline, competes for the swappable slot, free after hardware cost.
+
+### 3a.2 Recommended Local Model: `qwen3.5:14b` at UD-IQ4_XS (~9.5 GB)
+
+For a general-purpose chat model that fits comfortably on the 3090 alongside the permanent autocomplete slot, **`qwen3.5:14b` at UD-IQ4_XS (~9.5 GB)** is the recommended choice.
+
+**Why Qwen3.5-14B over Qwen2.5-14B:**
+Qwen3.5 is the current-generation successor to Qwen2.5, released in early 2026. At the same 14B parameter count, Qwen3.5-14B delivers meaningfully better instruction following, multi-step reasoning, and long-context coherence. It is the same model family used for the Brain (35B-a3b) and Mimic (9B) slots — keeping the entire stack on a single model family simplifies Ollama management and ensures consistent chat template behaviour.
+
+Qwen3.5-14B is a standard instruction-tuned model with no uncensored modifications, appropriate for general personal use where you want helpful, balanced responses rather than the mimic's zero-refusal behaviour. Thinking mode is available but should be left disabled for conversational chat — you want fast responses, not chain-of-thought overhead.
+
+**Why UD-IQ4_XS at ~9.5 GB:**
+The Unsloth UD-IQ4_XS quant is an importance-weighted 4-bit quantisation that applies higher precision to the most sensitive weight layers and lower precision to less critical ones. Compared to a naive Q4_K_M, it preserves significantly more accuracy at a smaller or equal footprint. For the 14B model, UD-IQ4_XS lands at approximately **9.5 GB** — the same VRAM footprint as the lore assistant (Gemma3-12B Q6_K), which is already validated to fit comfortably on the 3090 with 13+ GB headroom.
+
+**Quant comparison for Qwen3.5-14B (approximate, based on Unsloth published sizes for the 35B-a3b as a reference family — 14B sizes scale proportionally):**
+
+| Quant | Approx VRAM | Notes |
+|---|---|---|
+| UD-IQ4_XS | ~9.5 GB | **Recommended** — best accuracy/size ratio for conversational use |
+| Q4_K_M | ~10.5 GB | Standard 4-bit, slightly larger, slightly lower accuracy than UD |
+| Q6_K | ~13.5 GB | Higher accuracy, but eats into headroom unnecessarily for chat |
+| Q8_0 | ~17.5 GB | Near-lossless, but approaches Brain footprint — not justified for chat |
+
+UD-IQ4_XS is the sweet spot: frontier-quality 14B reasoning at a footprint that leaves ~13 GB headroom alongside autocomplete.
+
+**Why not use the Brain model (`qwen3.5:35b-a3b`) for LibreChat?**
+The Brain model occupies ~17.8 GB and is optimised for deep coding tasks. Using it for general chat wastes VRAM headroom and swap time, and it would contend heavily with VS Code coding sessions. The 14B model swaps in ~4–5 seconds vs ~8 seconds for Brain.
+
+**Why not use a 7B or 9B model?**
+For personal general-purpose chat, sub-10B models are noticeably weaker at multi-step reasoning, nuanced instruction following, and longer conversations. The 14B tier is the minimum recommended for a satisfying ChatGPT-replacement experience. The VRAM cost (~9.5 GB vs ~5 GB for 7B) is well justified given the 3090's headroom.
+
+**Claude via API as the preferred option when available:**
+If you have an Anthropic API key, routing LibreChat to Claude (Sonnet or Haiku) is the better default for general chat — it offloads all inference to Anthropic's servers, keeps the swappable slot free for Discord/coding, and provides frontier-model quality. The local model is the fallback for offline use or cost control.
+
+### 3a.3 LibreChat Modelfile
+
+```dockerfile
+# librechat_chat.Modelfile
+FROM hf.co/unsloth/Qwen3.5-14B-GGUF:UD-IQ4_XS
+
+PARAMETER temperature 0.7
+PARAMETER top_k 40
+PARAMETER top_p 0.9
+PARAMETER num_ctx 16384
+PARAMETER num_predict -1
+PARAMETER num_parallel 1
+PARAMETER thinking false        # Disabled — fast conversational responses, no CoT overhead
+PARAMETER keep_alive 600        # 10-min idle timeout — LibreChat sessions can be bursty
+
+SYSTEM """
+You are a helpful, knowledgeable, and thoughtful personal assistant.
+Answer questions clearly and accurately. When you are uncertain, say so.
+You can help with writing, research, analysis, coding questions, and general conversation.
+"""
+```
+
+> **Note on thinking mode:** Qwen3.5-14B supports optional thinking/reasoning mode. For LibreChat general chat, leave it disabled — thinking adds latency and token overhead that is not useful for conversational queries. It can be enabled per-session in LibreChat's system prompt if needed for a specific complex task.
+
+---
+
 ## 4. Architecture Overview
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    Ubuntu Server (RTX 3090)                  │
-│                                                             │
-│  ┌──────────────────────────────────────────────────────┐  │
-│  │           FastAPI Orchestration Proxy :11436          │  │
-│  │                                                      │  │
-│  │  State Machine:                                      │  │
-│  │  ┌─────────────────────────────────────────────┐    │  │
-│  │  │ current_model: str | None                   │    │  │
-│  │  │ lock: asyncio.Lock (one request at a time)  │    │  │
-│  │  │ queue: asyncio.Queue                        │    │  │
-│  │  └─────────────────────────────────────────────┘    │  │
-│  └──────────────────────────────────────────────────┘  │
-│            │                          │                     │
-│            ▼                          ▼                     │
-│  ┌─────────────────┐       ┌──────────────────────────┐   │
-│  │  Ollama :11435  │       │      Ollama :11434        │   │
-│  │  (PERMANENT)    │       │      (SWAPPABLE)          │   │
-│  │                 │       │                           │   │
-│  │ qwen2.5-coder   │       │ ← Brain (17.8 GB)         │   │
-│  │ 1.5b Q8_0       │       │   OR                      │   │
-│  │ ~1.5 GB VRAM    │       │ ← Mimic deepleffen_X      │   │
-│  │ num_parallel 4  │       │   (Qwen3.5-9B-Uncensored  │   │
-│  │ keep_alive -1   │       │    Q6_K ~7.4 GB)          │   │
-│  │                 │       │   OR                      │   │
-│  └─────────────────┘       │ ← Lore assistant          │   │
-│                             │   (gemma3:12b Q6_K        │   │
-│                             │    ~9.5 GB)               │   │
-│                             └──────────────────────────┘   │
-└─────────────────────────────────────────────────────────────┘
-         ▲                                    ▲
-         │                                    │
-┌────────┴──────────┐             ┌───────────┴──────────┐
-│  VS Code / Cursor │             │    Discord Bot        │
-│  (autocomplete    │             │    (discord.py)       │
-│   + chat)         │             │                       │
-└───────────────────┘             └──────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                      Ubuntu Server (RTX 3090)                     │
+│                                                                  │
+│  ┌───────────────────────────────────────────────────────────┐  │
+│  │              FastAPI Orchestration Proxy :11436            │  │
+│  │                                                           │  │
+│  │  State Machine:                                           │  │
+│  │  ┌──────────────────────────────────────────────────┐    │  │
+│  │  │ current_model: str | None                        │    │  │
+│  │  │ lock: asyncio.Lock (one request at a time)       │    │  │
+│  │  │ queue: asyncio.Queue                             │    │  │
+│  │  │ source_tag: "discord" | "librechat" | "vscode"   │    │  │
+│  │  └──────────────────────────────────────────────────┘    │  │
+│  └───────────────────────────────────────────────────────┘  │
+│               │                          │                       │
+│               ▼                          ▼                       │
+│  ┌──────────────────┐       ┌───────────────────────────┐      │
+│  │  Ollama :11435   │       │      Ollama :11434         │      │
+│  │  (PERMANENT)     │       │      (SWAPPABLE)           │      │
+│  │                  │       │                            │      │
+│  │ qwen2.5-coder    │       │ ← Brain (17.8 GB)          │      │
+│  │ 1.5b Q8_0        │       │   OR                       │      │
+│  │ ~1.5 GB VRAM     │       │ ← Mimic deepleffen_X       │      │
+│  │ num_parallel 4   │       │   (Qwen3.5-9B-Uncensored   │      │
+│  │ keep_alive -1    │       │    Q6_K ~7.4 GB)           │      │
+│  │                  │       │   OR                       │      │
+│  └──────────────────┘       │ ← Lore assistant           │      │
+│                              │   (gemma3:12b Q6_K         │      │
+│                              │    ~9.5 GB)                │      │
+│                              │   OR                       │      │
+│                              │ ← LibreChat local          │      │
+│                              │   (qwen3.5:14b UD-IQ4_XS   │      │
+│                              │    ~9.5 GB)                │      │
+│                              └───────────────────────────┘      │
+└──────────────────────────────────────────────────────────────────┘
+         ▲                    ▲                    ▲
+         │                    │                    │
+┌────────┴──────┐  ┌──────────┴──────┐  ┌─────────┴──────────┐
+│ VS Code /     │  │   LibreChat     │  │   Discord Bot      │
+│ Cursor        │  │   :3080         │  │   (discord.py)     │
+│ (autocomplete │  │ (local model    │  │                    │
+│  + chat)      │  │  via proxy OR   │  │                    │
+└───────────────┘  │  Claude API     │  └────────────────────┘
+                   │  direct)        │
+                   └─────────────────┘
 ```
+
+> **LibreChat + Claude API path:** When LibreChat is configured to use Claude, requests go directly from the LibreChat container to `api.anthropic.com` — they never touch the proxy or Ollama. The proxy is only in the path when LibreChat is configured to use the local Ollama model (`librechat_chat`).
 
 ---
 
@@ -175,6 +256,28 @@ PARAMETER temperature 0.2
 SYSTEM """You are an expert coding assistant..."""
 ```
 
+### 5.4 LibreChat Local Chat Modelfile
+
+```dockerfile
+# librechat_chat.Modelfile
+FROM hf.co/unsloth/Qwen3.5-14B-GGUF:UD-IQ4_XS
+
+PARAMETER temperature 0.7
+PARAMETER top_k 40
+PARAMETER top_p 0.9
+PARAMETER num_ctx 16384
+PARAMETER num_predict -1
+PARAMETER num_parallel 1
+PARAMETER thinking false
+PARAMETER keep_alive 600
+
+SYSTEM """
+You are a helpful, knowledgeable, and thoughtful personal assistant.
+Answer questions clearly and accurately. When you are uncertain, say so.
+You can help with writing, research, analysis, coding questions, and general conversation.
+"""
+```
+
 ---
 
 ## 6. Proxy State Machine (Pseudocode)
@@ -192,7 +295,12 @@ SWAPPABLE_MODELS = {
     "deepleffen_user1", "deepleffen_user2", "deepleffen_user3",
     "deepleffen_user4", "deepleffen_user5", "deepleffen_user6",
     "deepleffen_lore",
+    "librechat_chat",   # local general-purpose chat model for LibreChat
 }
+
+# LibreChat may also be configured to use Claude directly (no proxy involvement).
+# In that case, requests never reach this proxy — they go to api.anthropic.com.
+# The proxy only sees LibreChat traffic when the local model backend is selected.
 
 async def route_request(model: str, payload: dict):
     if model in AUTOCOMPLETE_MODELS:
@@ -205,7 +313,10 @@ async def route_request(model: str, payload: dict):
         return await forward(":11434", payload)
 ```
 
-**Swap cost:** Mimic swaps (Qwen3.5 9B Q6_K, ~7.4 GB from NVMe) take approximately **3–5 seconds** cold load. Lore swaps (~9.5 GB) take approximately **4–6 seconds**. Lore→mimic sequential chain (two swaps) is **7–12 seconds total**, down from the 10–15s estimate with NeMo. The typing indicator in the Discord bot masks this latency.
+**Swap cost:** Mimic swaps (Qwen3.5 9B Q6_K, ~7.4 GB from NVMe) take approximately **3–5 seconds** cold load. Lore swaps (~9.5 GB) take approximately **4–6 seconds**. LibreChat local model swaps (~9.5 GB) take approximately **4–6 seconds**. Lore→mimic sequential chain (two swaps) is **7–12 seconds total**. The typing indicator in the Discord bot masks Discord latency; LibreChat shows a streaming cursor which masks its swap latency.
+
+**Contention between LibreChat and Discord/VS Code:**
+LibreChat requests queue behind any in-progress Discord or Brain generation under the same lock. Since LibreChat is personal/interactive use, the user is already expecting a short wait. If LibreChat is actively in a long conversation while a Discord request arrives, the Discord request queues — the same behaviour as Brain contention. This is acceptable for single-user personal use. If simultaneous use becomes a real problem, switching LibreChat to the Claude API backend eliminates all contention.
 
 ---
 
@@ -266,6 +377,28 @@ services:
       - OLLAMA_PROXY=http://proxy:11436
       - DISCORD_TOKEN=${DISCORD_TOKEN}
 
+  librechat:
+    image: ghcr.io/danny-avila/librechat:latest
+    ports:
+      - "3080:3080"
+    depends_on:
+      - proxy
+      - librechat-mongodb
+    volumes:
+      - ./librechat/librechat.yaml:/app/librechat.yaml:ro
+      - librechat_uploads:/app/client/public/images
+    environment:
+      - MONGO_URI=mongodb://librechat-mongodb:27017/LibreChat
+      # Anthropic API key — leave blank to disable Claude backend
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      # Local Ollama endpoint via proxy
+      - OLLAMA_BASE_URL=http://proxy:11436
+
+  librechat-mongodb:
+    image: mongo:7
+    volumes:
+      - librechat_mongo:/data/db
+
   rag-service:
     build: ./rag
     environment:
@@ -281,10 +414,16 @@ services:
 volumes:
   ollama_permanent:
   ollama_swappable:
+  librechat_uploads:
+  librechat_mongo:
   chroma_data:
 ```
 
 > **Why two separate Ollama instances share the same `NVIDIA_VISIBLE_DEVICES=0`?** Ollama manages its own VRAM allocation. Both instances can reference the same GPU — the proxy enforces that only one swappable model is loaded at a time. The permanent instance holds exactly one model forever. Docker resource constraints don't need GPU isolation here since we're self-policing via the proxy lock.
+
+> **LibreChat MongoDB:** LibreChat requires MongoDB for conversation history, user accounts, and settings persistence. A lightweight `mongo:7` sidecar is sufficient — no external MongoDB needed.
+
+> **LibreChat configuration (`librechat.yaml`):** The `librechat.yaml` file defines the available model endpoints. Configure two endpoints: one pointing to `OLLAMA_BASE_URL` with model `librechat_chat`, and one pointing to the Anthropic API with your preferred Claude model (e.g. `claude-sonnet-4-5`). LibreChat's UI lets you switch between them per-conversation.
 
 ---
 
@@ -335,7 +474,20 @@ Developer: [asks Brain a question in VS Code chat]
            [releases lock — Brain stays loaded until Discord request evicts it]
 ```
 
-> **Contention note:** If a Discord request arrives while Brain is active, it queues behind the Brain's current generation. Brain is never evicted mid-response. Discord users see a typing indicator and wait. This is acceptable for a hobby bot — if concurrent throughput becomes a real need, a second GPU eliminates the problem entirely.
+### 8.4 LibreChat Local Chat Request
+```
+User: [sends message in LibreChat with local model selected]
+      [LibreChat sends request to proxy :11436 with model: librechat_chat]
+      [acquires proxy lock]
+      [swap to librechat_chat if not current: ~6s]
+      [streaming inference begins — LibreChat streams tokens to browser]
+      [releases lock after full response]
+
+Note: If Claude API backend is selected in LibreChat, this entire flow is bypassed.
+      The request goes directly to api.anthropic.com — proxy and Ollama are not involved.
+```
+
+> **Contention note:** If a Discord request arrives while Brain is active, it queues behind the Brain's current generation. Brain is never evicted mid-response. Discord users see a typing indicator and wait. This is acceptable for a hobby bot — if concurrent throughput becomes a real need, a second GPU eliminates the problem entirely. LibreChat contention follows the same rules: an in-progress LibreChat generation will not be interrupted by a Discord request.
 
 ---
 
@@ -374,6 +526,10 @@ This context is prepended to the lore assistant's user message before forwarding
 - [ ] Wire Discord bot with mention routing and typing indicators
 - [ ] Test basic swap cycle: mimic → lore → mimic
 - [ ] Validate VRAM budget under real swap load
+- [ ] Stand up LibreChat container + MongoDB sidecar
+- [ ] Configure LibreChat with both Claude API endpoint and local Ollama endpoint
+- [ ] Register `librechat_chat` Modelfile and verify it loads via proxy
+- [ ] Test LibreChat swap contention with a concurrent Discord request
 
 ### Phase 2 — RAG + Lore (1–2 weeks)
 - [ ] Ingest Discord history export into ChromaDB
@@ -395,23 +551,27 @@ This context is prepended to the lore assistant's user message before forwarding
 - [ ] Queue depth cap (reject if >3 requests queued, return Discord ephemeral error)
 - [ ] Graceful Brain priority: Brain requests can optionally preempt queued Discord requests with configurable precedence
 - [ ] Disclaimer stripping in post-processing (catch the occasional baked-in lore assistant disclaimer)
+- [ ] LibreChat authentication (enable LibreChat's built-in user auth if exposing beyond localhost)
 
 ---
 
 ## 11. Key Configuration Parameters
 
-| Parameter | Mimic (Qwen3.5-9B) | Lore (Gemma3-12B) | Brain (Qwen3.5-35B) |
-|---|---|---|---|
-| temperature | 0.85 | 0.3 | 0.2 |
-| top_k | 40 | 20 | 10 |
-| top_p | 0.9 | 0.8 | 0.9 |
-| presence_penalty | 1.3 | 0.0 | 0.0 |
-| num_ctx | 8192 | 16384 | 40960 |
-| num_predict | 512 | 1024 | -1 |
-| thinking | false | false | false* |
-| num_parallel | 2 | 1 | 1 |
+| Parameter | Mimic (Qwen3.5-9B) | Lore (Gemma3-12B) | Brain (Qwen3.5-35B) | LibreChat (Qwen3.5-14B) |
+|---|---|---|---|---|
+| temperature | 0.85 | 0.3 | 0.2 | 0.7 |
+| top_k | 40 | 20 | 10 | 40 |
+| top_p | 0.9 | 0.8 | 0.9 | 0.9 |
+| presence_penalty | 1.3 | 0.0 | 0.0 | 0.0 |
+| num_ctx | 8192 | 16384 | 40960 | 16384 |
+| num_predict | 512 | 1024 | -1 | -1 |
+| thinking | false | false | false* | false |
+| num_parallel | 2 | 1 | 1 | 1 |
+| keep_alive | 300s | 300s | -1 | 600s |
 
 > *Brain can have thinking enabled per-request for complex multi-step reasoning. Disabled by default for chat latency.
+
+> **LibreChat keep_alive at 600s:** LibreChat sessions tend to be bursty — a user sends a message, reads the response, then sends another a minute later. A 10-minute keep_alive avoids repeated cold swaps within a single conversation session.
 
 ---
 
@@ -426,3 +586,6 @@ This context is prepended to the lore assistant's user message before forwarding
 | Ollama Qwen3.5 regression in future update | Low | Pin Ollama version in Docker Compose; test updates in staging first |
 | ChromaDB retrieves wrong lore (hallucinated context) | Medium | Lore assistant system prompt: "say I don't know if context is insufficient"; `top_k` tuning |
 | Swap latency annoys Discord users | Medium | Typing indicator; warm-up keep_alive (swap on first mention, keep alive 10 min) |
+| LibreChat local model contends with Discord during active chat session | Medium | Switch LibreChat to Claude API backend during heavy Discord usage; or accept queue wait |
+| Anthropic API key exposed in Docker environment | Low | Use Docker secrets or `.env` file excluded from version control; never hardcode in Compose |
+| LibreChat conversation history lost on container restart | Low | MongoDB volume persists data; ensure `librechat_mongo` volume is backed up |
