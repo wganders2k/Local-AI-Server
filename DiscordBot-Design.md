@@ -27,7 +27,7 @@ These modes can be chained in a single message (see Section 6.2).
 | Discord library | `discord.py` 2.x | Mature, async, slash command + mention support |
 | HTTP client | `httpx` (async) | Non-blocking requests to proxy; streaming support |
 | Containerisation | Docker (Compose service `discord-bot`) | Consistent environment; restarts on crash |
-| Configuration | Environment variables via `.env` | `DISCORD_TOKEN`, `OLLAMA_PROXY` |
+| Configuration | Environment variables via `.env` | `DISCORD_TOKEN`, `PROXY_URL` |
 
 ---
 
@@ -36,7 +36,7 @@ These modes can be chained in a single message (see Section 6.2).
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `DISCORD_TOKEN` | ✅ | — | Bot token from Discord Developer Portal |
-| `OLLAMA_PROXY` | ✅ | — | Base URL of the orchestration proxy (e.g. `http://proxy:11436`) |
+| `PROXY_URL` | ✅ | — | Base URL of the orchestration proxy (e.g. `http://proxy:11436`) |
 | `BOT_PREFIX` | ❌ | `mimic_` | Prefix used to identify bot mention targets |
 | `MAX_QUEUE_DEPTH` | ❌ | `3` | Max queued requests before returning an ephemeral error |
 | `RATE_LIMIT_PER_USER` | ❌ | `5` | Max requests per user per minute |
@@ -434,7 +434,7 @@ discord-bot:
     - chromadb          # RAG lookups for lore chain
   environment:
     - DISCORD_TOKEN=${DISCORD_TOKEN}
-    - OLLAMA_PROXY=http://proxy:11436
+    - PROXY_URL=http://proxy:11436
     - CHROMA_HOST=chromadb
     - CHROMA_PORT=8000
     - MAX_QUEUE_DEPTH=3

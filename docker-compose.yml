@@ -116,7 +116,7 @@ services:
         condition: service_started
     environment:
       - DISCORD_TOKEN=${DISCORD_TOKEN}
-      - OLLAMA_PROXY=http://proxy:11436
+      - PROXY_URL=http://proxy:11436
       - CHROMA_HOST=chromadb
       - CHROMA_PORT=8000
       - MAX_QUEUE_DEPTH=${MAX_QUEUE_DEPTH:-3}

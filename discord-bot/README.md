@@ -5,7 +5,7 @@
 ## Responsibilities
 
 - Parse `@mimic_<member>` and `@lore` mentions
-- Route requests to the proxy (`/api/chat`) with the correct model name
+- Route requests to the proxy (`/v1/chat/completions`) with the correct model name and system prompt
 - Maintain typing indicator throughout swap + inference latency
 - Enforce per-user rate limiting (default: 5 req/min)
 - Maintain per-channel, per-persona conversation history (rolling 10-turn window)
@@ -22,7 +22,7 @@ See `DiscordBot-Design.md` for full detail. See `Design.md` §8 for request flow
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `DISCORD_TOKEN` | ✅ | — | Bot token from Discord Developer Portal |
-| `OLLAMA_PROXY` | ✅ | — | Proxy base URL (e.g. `http://proxy:11436`) |
+| `PROXY_URL` | ✅ | — | Proxy base URL (e.g. `http://proxy:11436`) |
 | `CHROMA_HOST` | ✅ | — | ChromaDB hostname |
 | `CHROMA_PORT` | ❌ | `8000` | ChromaDB port |
 | `MAX_QUEUE_DEPTH` | ❌ | `3` | Max queued requests before ephemeral error |
@@ -38,18 +38,10 @@ discord-bot/
 ├── requirements.txt
 ├── bot.py              # Entry point: Discord client setup, event loop
 ├── router.py           # Mention parsing, model name resolution
-├── proxy_client.py     # httpx async client for proxy API calls
+├── proxy_client.py     # httpx async client for proxy API calls (/v1/chat/completions)
 ├── rag_client.py       # ChromaDB query wrapper for lore retrieval
 ├── rate_limiter.py     # Per-user rate limiting logic
 ├── history.py          # Conversation history management (deque per channel/persona)
 ├── formatters.py       # Response formatting, disclaimer stripping, embed builders
-├── config.py           # Environment variable loading and defaults
-└── modelfiles/         # Ollama Modelfile templates (reference copies)
-    ├── mimic_user1.Modelfile
-    ├── mimic_user2.Modelfile
-    ├── mimic_user3.Modelfile
-    ├── mimic_user4.Modelfile
-    ├── mimic_user5.Modelfile
-    ├── mimic_user6.Modelfile
-    └── lore.Modelfile
+└── config.py           # Environment variable loading, defaults, system prompts
 ```

@@ -4,7 +4,7 @@ Configuration files for the LibreChat container. The LibreChat image itself is p
 
 ## Files
 
-- `librechat.yaml` — defines available model endpoints (local Ollama via proxy + Claude API)
+- `librechat.yaml` — defines available model endpoints (local llama-server via proxy + Claude API)
 
 ## Design Reference
 
@@ -14,17 +14,12 @@ See `Design.md` §3a (LibreChat Model Selection) and §7 (Docker Compose).
 
 Two endpoints are configured:
 
-1. **Local Ollama** — routes to `http://proxy:11436` with model `librechat_chat` (Qwen3.5-14B UD-IQ4_XS). Competes for the swappable slot under the proxy lock.
+1. **Local model** — routes to `http://proxy:11436/v1` (OpenAI-compatible) with model `librechat_chat` (Qwen3.5-14B UD-IQ4_XS). Competes for the swappable slot under the proxy lock.
 2. **Claude API** — routes directly to `api.anthropic.com` using `ANTHROPIC_API_KEY`. Bypasses the proxy entirely — zero VRAM impact. Leave `ANTHROPIC_API_KEY` blank in `.env` to disable this endpoint.
 
-## Modelfile reference
+## Model configuration
 
-The `librechat_chat` Modelfile is defined in `Design.md` §5.4. Register it in the swappable Ollama instance:
-
-```bash
-# From the server, after `make up`:
-docker compose exec ollama-swappable ollama create librechat_chat -f /path/to/librechat_chat.Modelfile
-```
+The `librechat_chat` model is defined as `[librechat_chat]` in `models.ini`. The GGUF is downloaded via `make models-download`. No manual registration step is needed — llama-server's router mode loads it on first request.
 
 ## Notes
 

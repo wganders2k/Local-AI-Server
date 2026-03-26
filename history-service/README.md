@@ -12,7 +12,7 @@ Background service that manages per-user Discord message history (JSONL) and aut
 
 3. **LoRA retraining trigger** — after each incremental pull, check if any user has accumulated ≥ `RETRAIN_THRESHOLD` new clean messages since their last training run. If so, queue a training job.
 
-4. **Training coordination** — training uses the same RTX 3090 as inference. The service checks proxy idle status before starting and respects a configurable training window (default: 3–6 AM) to avoid contention. After training and GGUF merge complete, the service automatically re-registers the Ollama Modelfile — zero bot or proxy changes required.
+4. **Training coordination** — training uses the same RTX 3090 as inference. The service checks proxy idle status before starting and respects a configurable training window (default: 3–6 AM) to avoid contention. After training and GGUF merge complete, the service updates `models.ini` and restarts `llama-swappable` — zero bot or proxy changes required.
 
 ## Design Reference
 
@@ -45,7 +45,9 @@ history-service/
 │                            #     sets ALL users to queued regardless of threshold (used
 │                            #     when the mimic base model changes and all adapters must
 │                            #     be retrained from scratch).
-├── ollama_registrar.py      # Post-training: ollama rm + ollama create
+├── llama_registrar.py       # Post-training: updates models.ini + restarts llama-swappable
+├── image_captioner.py       # Batch processor: scans pending attachments, downloads images,
+│                            # calls proxy with image-caption model, writes captions to JSONL
 ├── config.py                # Environment variable loading and defaults
 └── data/
     ├── history/             # <user_id>.jsonl files (gitignored — can be large)
@@ -63,7 +65,7 @@ history-service/
 | `DISCORD_TOKEN` | ✅ | — | Bot token (same token as discord-bot service) |
 | `DISCORD_GUILD_ID` | ✅ | — | Target server (guild) ID |
 | `PROXY_URL` | ✅ | — | Orchestration proxy URL (e.g. `http://proxy:11436`) |
-| `OLLAMA_SWAPPABLE` | ✅ | — | Swappable Ollama URL (e.g. `http://ollama-swappable:11434`) |
+| `LLAMA_SWAPPABLE` | ✅ | — | Swappable llama-server URL (e.g. `http://llama-swappable:8080`) |
 | `RETRAIN_THRESHOLD` | ❌ | `200` | New clean messages per user before triggering retraining |
 | `INCREMENTAL_PULL_INTERVAL` | ❌ | `15` | Minutes between incremental pulls |
 | `FULL_PULL_CRON` | ❌ | `0 3 1 * *` | Cron expression for full rebuild (default: monthly at 3 AM) |
@@ -72,7 +74,7 @@ history-service/
 | `MIN_WORD_COUNT` | ❌ | `5` | Minimum words for a message to be considered clean |
 | `ACTIVE_CHANNEL_LOOKBACK_HOURS` | ❌ | `24` | Hours to look back when identifying recently active channels |
 | `LORA_OUTPUTS_DIR` | ❌ | `/app/lora-outputs` | Directory for merged GGUF outputs |
-| `MODELFILES_DIR` | ❌ | `/modelfiles` | Directory containing Ollama Modelfile templates |
+| `MODELS_INI_PATH` | ❌ | `/models.ini` | Path to the llama-server preset config (updated after training) |
 
 ---
 
@@ -132,8 +134,8 @@ Clean messages are the training corpus. Unclean messages are retained in JSONL f
 | `queued` | Threshold met, waiting for training window / proxy idle |
 | `training` | Unsloth QLoRA fine-tuning in progress |
 | `merging` | Adapter merge + GGUF export in progress |
-| `registering` | `ollama rm` + `ollama create` in progress |
-| `done` | Training cycle complete — resets to `idle` after Modelfile registration |
+| `registering` | Updating `models.ini` + restarting `llama-swappable` |
+| `done` | Training cycle complete — resets to `idle` |
 | `error` | Training failed — check logs; manual intervention required |
 
 ---
@@ -205,19 +207,19 @@ for each user in training_state.json:
   set status = "queued"
 ```
 
-Used when the mimic base model changes (new base or quant in `mimic.Modelfile`) — all existing LoRA adapters are trained against the old base and must be retrained from scratch. The `--force-all` flag only updates state; actual training still dispatches via the training window scheduler (Path 2).
+Used when the mimic base model changes (new base or quant in `models.ini`) — all existing LoRA adapters are trained against the old base and must be retrained from scratch. The `--force-all` flag only updates state; actual training still dispatches via the training window scheduler (Path 2).
 
 ### Training job (dispatched by Path 2, one user at a time)
 
 ```
   1. Export user's clean JSONL messages → formatted training dataset (JSONL chat format)
-  2. Run lora-training/train.py (Unsloth QLoRA, 1–2 epochs)
+  2. Stop llama-swappable to free VRAM for training
+  3. Run lora-training/train.py (Unsloth QLoRA, 1–2 epochs)
      → checkpoint saved to LORA_OUTPUTS_DIR/<user_id>/checkpoint/
-  3. Run lora-training/merge.py → mimic_<username>_v{n+1}.gguf
+  4. Run lora-training/merge.py → mimic_<username>_v{n+1}.gguf
      → saved to LORA_OUTPUTS_DIR/<user_id>/mimic_<username>_v{n+1}.gguf
-  4. Update Modelfile FROM line to point to new GGUF
-  5. ollama rm mimic_<username>
-  6. ollama create mimic_<username> -f updated Modelfile
+  5. Update models.ini: set model path for [mimic_<username>] to new GGUF
+  6. Restart llama-swappable (picks up new models.ini)
   7. Update training_state.json:
      - messages_since_last_train = 0
      - model_version += 1
@@ -225,7 +227,7 @@ Used when the mimic base model changes (new base or quant in `mimic.Modelfile`) 
      - training_status = "idle"
 ```
 
-**GPU contention note:** Training is only dispatched when the proxy reports zero queued requests. The training window (3–6 AM by default) further reduces the chance of contention. If a Discord request arrives during training, it will queue at the proxy as normal — training does not hold the proxy lock, it uses the GPU directly via Unsloth. The only contention is raw VRAM: training the 9B model with QLoRA requires ~14–16 GB VRAM, which means the swappable Ollama slot must be idle (no model loaded). The service sends an explicit unload request to the swappable Ollama instance before starting training.
+**GPU contention note:** Training is only dispatched when the proxy reports zero queued requests. The training window (3–6 AM by default) further reduces the chance of contention. If a Discord request arrives during training, it will queue at the proxy as normal — training does not hold the proxy lock, it uses the GPU directly via Unsloth. The only contention is raw VRAM: training the 35B-A3B model with QLoRA requires ~14–16 GB VRAM, which means the swappable llama-server slot must be stopped before training begins.
 
 ---
 
@@ -236,7 +238,7 @@ Used when the mimic base model changes (new base or quant in `mimic.Modelfile`) 
 | `GET /health` | — | Health check |
 | `GET /status` | — | Training state for all users (JSON) |
 | `POST /full-pull` | — | Trigger a full history rebuild immediately |
-| `POST /train/{username}` | — | Manually trigger training for a specific user (single-user equivalent of `--force-all`; sets that user to `queued` and dispatches immediately if proxy is idle, regardless of training window) |
+| `POST /train/{username}` | — | Manually trigger training for a specific user (sets that user to `queued` and dispatches immediately if proxy is idle, regardless of training window) |
 | `GET /history/{user_id}/count` | — | Clean message count for a user |
 
 > **Force-all vs per-user manual trigger:** `POST /train/{username}` is for ad-hoc single-user retraining (e.g. testing a new persona or recovering from an `error` state). `make mimic-source-refresh` → `training_trigger.py --force-all` is for bulk retraining after a base model change — it queues all users and lets the training window scheduler dispatch them in sequence overnight.
@@ -257,9 +259,9 @@ Captions make image content searchable and contextually meaningful, while the `c
 
 ### Model: `image-caption`
 
-The captioner uses the `image-caption` Ollama model, defined in `modelfiles/image-caption.Modelfile`. This model uses the **same base weights as the mimic personas** (`HauhauCS/Qwen3.5-35B-A3B-Uncensored-HauhauCS-Aggressive:IQ4_XS`) — an `image-text-to-text` capable model with zero refusals. This is critical: Discord content includes crude memes and adult humour that a standard censored vision model would refuse to describe.
+The captioner uses the `image-caption` alias defined in `models.ini`. This alias points to the **same GGUF as the mimic personas** (`HauhauCS/Qwen3.5-35B-A3B-Uncensored` IQ4_XS) — an `image-text-to-text` capable model with zero refusals. This is critical: Discord content includes crude memes and adult humour that a standard censored vision model would refuse to describe.
 
-Because the base weights are shared with `mimic_*`, Ollama may reuse cached weights when swapping between a mimic persona and the image captioner, reducing swap overhead.
+Because `image-caption` and `mimic_*` share the same GGUF, llama-server's router loads the file once and serves all aliases from it. Swapping from a mimic persona to `image-caption` is a context switch, not a model reload.
 
 **VRAM:** ~18 GB (same as mimic slot). The captioner only runs during the configured caption window when no inference is active.
 
@@ -277,7 +279,7 @@ The captioner checks proxy queue depth before starting each batch. If the proxy 
 
 ### Batch Processing
 
-Images are processed in configurable batches (`IMAGE_CAPTION_BATCH_SIZE`, default 10) to avoid monopolising the swappable slot for extended periods. After each batch, the slot is released (short `keep_alive: 60s` in the Modelfile). Uncaptioned images are tracked via `caption_status` in the JSONL record and are picked up on subsequent runs.
+Images are processed in configurable batches (`IMAGE_CAPTION_BATCH_SIZE`, default 10) to avoid monopolising the swappable slot for extended periods. Uncaptioned images are tracked via `caption_status` in the JSONL record and are picked up on subsequent runs.
 
 **Per-image flow:**
 ```
@@ -336,39 +338,27 @@ The existing JSONL record gains an optional `attachments` array. Messages withou
 The `caption_excluded_from_training: true` flag on each attachment signals the LoRA dataset exporter in `training_trigger.py` to treat caption text as **read-only context**, not training data. Specifically:
 
 - **RAG ingestion:** The caption is appended to the message's effective content string when chunking for ChromaDB: `"check this out [image: A man in a suit pointing at a whiteboard...]"`. This makes image content searchable via lore retrieval.
-- **LoRA training dataset:** The caption text is **never** included in training samples. Only the original `content` field (the user's actual words) is used. The presence of `caption_excluded_from_training: true` on any attachment is the explicit signal to skip that text.
-
-This distinction is important: the goal of LoRA training is to capture a user's *voice* — their vocabulary, tone, and mannerisms. Synthetic image descriptions generated by a VLM are not the user's voice and would degrade persona quality if included.
+- **LoRA training dataset:** The caption text is **never** included in training samples. Only the original `content` field (the user's actual words) is used.
 
 ### New Environment Variables
 
 | Variable | Default | Description |
 |---|---|---|
-| `IMAGE_CAPTION_ENABLED` | `false` | Enable/disable image captioning. Set `true` once `image-caption` model is registered. |
-| `IMAGE_CAPTION_MODEL` | `image-caption` | Ollama model name for captioning (must match registered Modelfile name) |
+| `IMAGE_CAPTION_ENABLED` | `false` | Enable/disable image captioning. Set `true` once GGUF is downloaded. |
+| `IMAGE_CAPTION_MODEL` | `image-caption` | Model alias for captioning (must match alias in `models.ini`) |
 | `IMAGE_CAPTION_BATCH_SIZE` | `10` | Images processed per captioning run |
 | `IMAGE_CAPTION_WINDOW_START` | `3` | Hour (0–23) when captioning may run |
 | `IMAGE_CAPTION_WINDOW_END` | `6` | Hour (0–23) when captioning window closes |
 | `IMAGE_CAPTION_MAX_FILE_SIZE_MB` | `10` | Skip images larger than this (avoids downloading huge files) |
 
-### New Module: `image_captioner.py`
-
-```
-history-service/
-├── image_captioner.py   # Batch processor: scans pending attachments, downloads images,
-│                        # calls proxy with image-caption model, writes captions to JSONL
-```
-
-`image_captioner.py` is called by the APScheduler caption job in `main.py`. It is stateless between runs — all state is tracked via `caption_status` in the JSONL records themselves.
-
 ### Phase Timeline
 
-Image captioning is introduced in **Phase 2** alongside history collection. It is disabled by default (`IMAGE_CAPTION_ENABLED=false`) until the `image-caption` model is registered in Ollama.
+Image captioning is introduced in **Phase 2** alongside history collection. It is disabled by default (`IMAGE_CAPTION_ENABLED=false`) until the GGUF is downloaded via `make models-download`.
 
 | Phase | Image Captioning |
 |---|---|
 | Phase 1 | ⏳ Not started |
-| Phase 2 | 🔨 Build + enable (requires `make model-create MODEL=image-caption SLOT=swappable`) |
+| Phase 2 | 🔨 Build + enable (set `IMAGE_CAPTION_ENABLED=true` after `make models-download`) |
 | Phase 3 | ✅ Running |
 | Phase 4 | ✅ Stable |
 
@@ -414,7 +404,7 @@ history-service:
     - DISCORD_TOKEN=${DISCORD_TOKEN}
     - DISCORD_GUILD_ID=${DISCORD_GUILD_ID}
     - PROXY_URL=http://proxy:11436
-    - OLLAMA_SWAPPABLE=http://ollama-swappable:11434
+    - LLAMA_SWAPPABLE=http://llama-swappable:8080
     - RETRAIN_THRESHOLD=${RETRAIN_THRESHOLD:-200}
     - INCREMENTAL_PULL_INTERVAL=${INCREMENTAL_PULL_INTERVAL:-15}
     - FULL_PULL_CRON=${FULL_PULL_CRON:-"0 3 1 * *"}
@@ -423,8 +413,8 @@ history-service:
   volumes:
     - history_data:/app/data
     - lora_outputs:/app/lora-outputs
-    - ./modelfiles:/modelfiles
-    - ./lora-training:/lora-training:ro   # training scripts (read-only mount)
+    - ./models.ini:/models.ini         # Preset config updated after training
+    - ./lora-training:/lora-training:ro  # Training scripts (read-only mount)
 ```
 
 ---
