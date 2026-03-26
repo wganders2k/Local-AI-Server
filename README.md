@@ -1,5 +1,7 @@
 # Local AI Server
 
+(Disclaimer: documentation generated with AI assistance) 
+
 Monorepo for a personal AI server stack running on an Ubuntu machine with an RTX 3090. Hosts a Discord bot with mimic personas and a lore assistant, a self-hosted chat UI (LibreChat), and a VS Code coding assistant — all orchestrated through a single FastAPI proxy that manages VRAM allocation across two llama-server instances.
 
 ## Architecture
