@@ -6,17 +6,17 @@
 # Usage:  make <target>
 #
 # All targets run from the repo root alongside docker-compose.yml.
-# Requires: docker, docker compose (v2), git
+# Requires: docker, docker compose (v2), git, python3
 # ============================================================
 
 .PHONY: help up down restart build pull \
-        logs logs-proxy logs-bot logs-ollama logs-librechat logs-rag logs-history \
+        logs logs-proxy logs-bot logs-llama logs-librechat logs-rag logs-history \
         status \
         restart-bot restart-proxy restart-librechat restart-rag \
         shell-bot shell-proxy shell-rag \
-        ollama-ps ollama-list \
+        llama-ps llama-models \
         check-gpu \
-        models-init model-create model-remove model-redownload \
+        models-download \
         nuke
 
 # Default target — show help
@@ -35,16 +35,16 @@ help:
 	@echo "  logs                Tail logs from all services"
 	@echo "  logs-proxy          Tail proxy logs only"
 	@echo "  logs-bot            Tail discord-bot logs only"
-	@echo "  logs-ollama         Tail both Ollama instance logs"
+	@echo "  logs-llama          Tail both llama-server instance logs"
 	@echo "  logs-librechat      Tail LibreChat logs only"
 	@echo "  logs-rag            Tail RAG service logs only"
 	@echo "  logs-history        Tail history-service logs only"
 	@echo ""
 	@echo "  ── Status ─────────────────────────────────────────────"
 	@echo "  status              Show running containers and health"
-	@echo "  check-gpu           Verify GPU is visible inside Ollama containers"
-	@echo "  ollama-ps           Show models currently loaded in both Ollama instances"
-	@echo "  ollama-list         List all registered models in both Ollama instances"
+	@echo "  check-gpu           Verify GPU is visible inside llama-server containers"
+	@echo "  llama-ps            Show models currently loaded in both llama-server instances"
+	@echo "  llama-models        List all available models in both llama-server instances"
 	@echo ""
 	@echo "  ── Per-service restart ─────────────────────────────────"
 	@echo "  restart-bot         Restart discord-bot only"
@@ -58,19 +58,23 @@ help:
 	@echo "  shell-rag           Open bash inside rag-service container"
 	@echo ""
 	@echo "  ── Model Management ───────────────────────────────────"
-	@echo "  models-init         Register all models (first-time setup or post-nuke)"
-	@echo "  model-create        Register/re-register a model from its Modelfile"
-	@echo "                        Usage: make model-create MODEL=<name> SLOT=<permanent|swappable>"
-	@echo "                        If MODEL=mimic, automatically triggers full LoRA retraining via history-service."
-	@echo "  model-remove        Remove a registered model (GGUF blob stays cached)"
-	@echo "                        Usage: make model-remove MODEL=<name> SLOT=<permanent|swappable>"
-	@echo "  model-redownload    Force full re-fetch: remove + re-create from Modelfile"
-	@echo "                        Usage: make model-redownload MODEL=<name> SLOT=<permanent|swappable>"
-	@echo "                        Edit the FROM line in modelfiles/<name>.Modelfile first to switch models."
-	@echo "                        If MODEL=mimic, automatically triggers full LoRA retraining via history-service."
+	@echo "  models-download     Download all GGUF model files from HuggingFace"
+	@echo "                        Skips files already present. Run before first 'make up'."
+	@echo "                        Usage: make models-download"
+	@echo "                               make models-download SLOT=permanent"
+	@echo "                               make models-download SLOT=swappable"
+	@echo "                               make models-download DRY_RUN=1"
+	@echo "                        Set HF_TOKEN env var for private/gated repos."
+	@echo ""
+	@echo "  To add or change a model:"
+	@echo "    1. Edit models.ini (swappable) or docker-compose.yml --model flag (permanent)"
+	@echo "    2. Add/update the entry in scripts/download_models.py"
+	@echo "    3. Run: make models-download"
+	@echo "    4. Run: make restart  (or restart-llama-swappable / restart-llama-permanent)"
 	@echo ""
 	@echo "  ── Destructive ────────────────────────────────────────"
 	@echo "  nuke                ⚠️  Stop everything AND remove all volumes"
+	@echo "                        Note: GGUF model files in ./models are NOT deleted."
 	@echo ""
 
 # ── Lifecycle ──────────────────────────────────────────────
@@ -110,9 +114,9 @@ logs-proxy:
 logs-bot:
 	docker compose logs -f discord-bot
 
-## Tail both Ollama instance logs
-logs-ollama:
-	docker compose logs -f ollama-permanent ollama-swappable
+## Tail both llama-server instance logs
+logs-llama:
+	docker compose logs -f llama-permanent llama-swappable
 
 ## Tail LibreChat logs only
 logs-librechat:
@@ -132,29 +136,25 @@ logs-history:
 status:
 	docker compose ps
 
-## Verify the GPU is visible inside both Ollama containers
+## Verify the GPU is visible inside both llama-server containers
 check-gpu:
-	@echo "=== ollama-permanent GPU check ==="
-	docker compose exec ollama-permanent nvidia-smi
+	@echo "=== llama-permanent GPU check ==="
+	docker compose exec llama-permanent nvidia-smi
 	@echo ""
-	@echo "=== ollama-swappable GPU check ==="
-	docker compose exec ollama-swappable nvidia-smi
+	@echo "=== llama-swappable GPU check ==="
+	docker compose exec llama-swappable nvidia-smi
 
-## Show models currently loaded (in VRAM) in both Ollama instances
-ollama-ps:
-	@echo "=== ollama-permanent (:11435) — loaded models ==="
-	curl -s http://localhost:11435/api/ps | python3 -m json.tool 2>/dev/null || echo "(not running)"
+## Show models currently loaded (in VRAM) in both llama-server instances
+## Uses the OpenAI-compatible /v1/models endpoint
+llama-ps:
+	@echo "=== llama-permanent (:11435) — available models ==="
+	curl -s http://localhost:11435/v1/models | python3 -m json.tool 2>/dev/null || echo "(not running)"
 	@echo ""
-	@echo "=== ollama-swappable (:11434) — loaded models ==="
-	curl -s http://localhost:11434/api/ps | python3 -m json.tool 2>/dev/null || echo "(not running)"
+	@echo "=== llama-swappable (:11434) — available models ==="
+	curl -s http://localhost:11434/v1/models | python3 -m json.tool 2>/dev/null || echo "(not running)"
 
-## List all registered models in both Ollama instances
-ollama-list:
-	@echo "=== ollama-permanent (:11435) — registered models ==="
-	curl -s http://localhost:11435/api/tags | python3 -m json.tool 2>/dev/null || echo "(not running)"
-	@echo ""
-	@echo "=== ollama-swappable (:11434) — registered models ==="
-	curl -s http://localhost:11434/api/tags | python3 -m json.tool 2>/dev/null || echo "(not running)"
+## Alias for llama-ps
+llama-models: llama-ps
 
 # ── Per-service restart ─────────────────────────────────────
 
@@ -174,6 +174,14 @@ restart-librechat:
 restart-rag:
 	docker compose restart rag-service
 
+## Restart llama-swappable only (picks up models.ini changes)
+restart-llama-swappable:
+	docker compose restart llama-swappable
+
+## Restart llama-permanent only
+restart-llama-permanent:
+	docker compose restart llama-permanent
+
 # ── Shells ─────────────────────────────────────────────────
 
 ## Open an interactive bash shell inside the discord-bot container
@@ -190,101 +198,40 @@ shell-rag:
 
 # ── Model Management ───────────────────────────────────────
 
-## Register all models from scratch.
-## Use this after first `make up` or after `make nuke` to restore all models.
-## Models are pulled from HuggingFace or the Ollama registry as defined in each Modelfile.
-## Note: This registers the mimic base template only. Per-user mimic personas (mimic_<member>)
-## must be created individually.
-## After registering mimic, a full LoRA retraining cycle is automatically queued for all users
-## via history-service. On a fresh stack this is a no-op; on a partial reset it ensures any
-## existing per-user adapters are rebuilt against the current base.
-models-init:
-	@echo "=== Registering permanent models (ollama-permanent :11435) ==="
-	docker compose exec ollama-permanent ollama create autocomplete -f /modelfiles/autocomplete.Modelfile
-	@echo ""
-	@echo "=== Registering swappable models (ollama-swappable :11434) ==="
-	docker compose exec ollama-swappable ollama create brain -f /modelfiles/brain.Modelfile
-	docker compose exec ollama-swappable ollama create mimic -f /modelfiles/mimic.Modelfile
-	docker compose exec ollama-swappable ollama create lore -f /modelfiles/lore.Modelfile
-	docker compose exec ollama-swappable ollama create librechat_chat -f /modelfiles/librechat_chat.Modelfile
-	@echo ""
-	@echo "✓ Core models registered. Run 'make ollama-list' to verify."
-	@echo ""
-	@echo "=== Queuing full LoRA retraining cycle via history-service ==="
-	docker compose exec history-service python training_trigger.py --force-all
-	@echo "✓ Retraining queued for all users. Training will begin during the next training window."
-	@echo "  Monitor progress: make logs-history"
-	@echo ""
-	@echo "  Note: Mimic personas (mimic_<member>) must be created individually."
-	@echo "  Copy modelfiles/mimic.Modelfile, fill in the member name, then:"
-	@echo "  make model-create MODEL=mimic_<member> SLOT=swappable"
-
-## Register or re-register a single model from its Modelfile.
-## Uses the cached GGUF blob if already downloaded — no re-fetch.
-## Usage: make model-create MODEL=librechat_chat SLOT=swappable
-##        make model-create MODEL=autocomplete SLOT=permanent
+## Download all GGUF model files from HuggingFace.
+## Skips files that are already present — safe to re-run.
+## Run this before the first `make up`.
 ##
-## If MODEL=mimic (the base template), this automatically queues a full LoRA
-## retraining cycle for all users via history-service — no separate step needed.
-model-create:
-	@test -n "$(MODEL)" || (echo "Error: MODEL is required. Usage: make model-create MODEL=<name> SLOT=<permanent|swappable>"; exit 1)
-	@test -n "$(SLOT)" || (echo "Error: SLOT is required. Usage: make model-create MODEL=<name> SLOT=<permanent|swappable>"; exit 1)
-	@test -f modelfiles/$(MODEL).Modelfile || (echo "Error: modelfiles/$(MODEL).Modelfile not found."; exit 1)
-	@echo "=== Creating model '$(MODEL)' on ollama-$(SLOT) ==="
-	docker compose exec ollama-$(SLOT) ollama create $(MODEL) -f /modelfiles/$(MODEL).Modelfile
-	@echo "✓ Model '$(MODEL)' registered on ollama-$(SLOT)."
-	@if [ "$(MODEL)" = "mimic" ]; then \
-		echo ""; \
-		echo "=== Queuing full LoRA retraining cycle via history-service ==="; \
-		docker compose exec history-service python training_trigger.py --force-all; \
-		echo "✓ Retraining queued for all users. Training will begin during the next training window."; \
-		echo "  Monitor progress: make logs-history"; \
-	fi
-
-## Remove a registered model from an Ollama instance.
-## The underlying GGUF blob stays cached in the volume — no disk space freed.
-## Usage: make model-remove MODEL=librechat_chat SLOT=swappable
-model-remove:
-	@test -n "$(MODEL)" || (echo "Error: MODEL is required. Usage: make model-remove MODEL=<name> SLOT=<permanent|swappable>"; exit 1)
-	@test -n "$(SLOT)" || (echo "Error: SLOT is required. Usage: make model-remove MODEL=<name> SLOT=<permanent|swappable>"; exit 1)
-	@echo "=== Removing model '$(MODEL)' from ollama-$(SLOT) ==="
-	docker compose exec ollama-$(SLOT) ollama rm $(MODEL)
-	@echo "✓ Model '$(MODEL)' removed from ollama-$(SLOT). GGUF blob remains cached."
-
-## Force a full re-download of a model's GGUF weights and re-register it.
-## Use this to:
-##   - Switch to a different model/quant (edit the FROM line in the Modelfile first)
-##   - Force a clean re-fetch if the cached blob is corrupt or incomplete
-##   - Test a new model without nuking the entire stack
-## Usage: make model-redownload MODEL=librechat_chat SLOT=swappable
+## Options:
+##   SLOT=permanent|swappable|all   Download only models for a specific slot (default: all)
+##   DRY_RUN=1                      Print what would be downloaded without downloading
+##   MODELS_DIR=/path/to/models     Override model storage directory (default: ./models)
 ##
-## If MODEL=mimic (the base template), this automatically queues a full LoRA
-## retraining cycle for all users via history-service — no separate step needed.
-model-redownload:
-	@test -n "$(MODEL)" || (echo "Error: MODEL is required. Usage: make model-redownload MODEL=<name> SLOT=<permanent|swappable>"; exit 1)
-	@test -n "$(SLOT)" || (echo "Error: SLOT is required. Usage: make model-redownload MODEL=<name> SLOT=<permanent|swappable>"; exit 1)
-	@test -f modelfiles/$(MODEL).Modelfile || (echo "Error: modelfiles/$(MODEL).Modelfile not found."; exit 1)
-	@echo "=== Force re-downloading model '$(MODEL)' on ollama-$(SLOT) ==="
-	@echo "    FROM source: $$(grep '^FROM' modelfiles/$(MODEL).Modelfile)"
-	-docker compose exec ollama-$(SLOT) ollama rm $(MODEL) 2>/dev/null
-	docker compose exec ollama-$(SLOT) ollama create --no-cache $(MODEL) -f /modelfiles/$(MODEL).Modelfile
-	@echo "✓ Model '$(MODEL)' re-downloaded and registered on ollama-$(SLOT)."
-	@if [ "$(MODEL)" = "mimic" ]; then \
-		echo ""; \
-		echo "=== Queuing full LoRA retraining cycle via history-service ==="; \
-		docker compose exec history-service python training_trigger.py --force-all; \
-		echo "✓ Retraining queued for all users. Training will begin during the next training window."; \
-		echo "  Monitor progress: make logs-history"; \
-	fi
+## Set HF_TOKEN environment variable for private or gated HuggingFace repos.
+##
+## To add or change a model:
+##   1. Edit the MODELS list in scripts/download_models.py
+##   2. Update models.ini (for swappable slot) or docker-compose.yml (for permanent slot)
+##   3. Run: make models-download
+##   4. Run: make restart-llama-swappable  (or restart-llama-permanent)
+models-download:
+	@python3 -c "import huggingface_hub" 2>/dev/null || pip3 install -q -r scripts/requirements.txt
+	python3 scripts/download_models.py \
+		$(if $(MODELS_DIR),--models-dir $(MODELS_DIR),) \
+		$(if $(SLOT),--slot $(SLOT),) \
+		$(if $(DRY_RUN),--dry-run,)
 
 # ── Destructive ────────────────────────────────────────────
 
 ## ⚠️  DESTRUCTIVE: Stop everything and remove ALL named volumes.
-## This wipes Ollama model weights, LibreChat history, ChromaDB data.
-## You will need to re-pull models and re-ingest lore data afterwards.
+## This wipes LibreChat history, ChromaDB data, and training state.
+## GGUF model files in ./models are NOT deleted — they are bind-mounted,
+## not stored in named volumes. Re-run `make models-download` is NOT needed.
+## You will need to re-ingest lore data afterwards.
 nuke:
-	@echo "⚠️  WARNING: This will delete ALL volumes including Ollama model weights,"
-	@echo "   LibreChat conversation history, and ChromaDB lore data."
+	@echo "⚠️  WARNING: This will delete ALL named volumes including"
+	@echo "   LibreChat conversation history and ChromaDB lore data."
+	@echo "   GGUF model files in ./models are preserved."
 	@echo "   Press Ctrl+C within 5 seconds to cancel..."
 	@sleep 5
 	docker compose down -v

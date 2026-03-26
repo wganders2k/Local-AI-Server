@@ -1,4 +1,4 @@
-# Discord Bot — Design Document v1.0
+# Discord Bot — Design Document v1.1
 
 **Scope:** This document details the design parameters specifically for the Discord bot component of the Mimic Bot system. For the full system architecture (hardware, proxy, LibreChat, RAG pipeline), refer to `Design.md`.
 
@@ -106,7 +106,7 @@ MENTION_TO_MODEL: dict[str, str] = {
 }
 ```
 
-This dict is the single source of truth. Adding a new persona requires only a new entry here + a new Ollama Modelfile registration.
+This dict is the single source of truth. Adding a new persona requires only a new entry here + a new section in `models.ini` + a `make restart-llama-swappable`.
 
 ### 5.3 Single Bot vs. Multi-Bot Architecture
 
@@ -131,7 +131,7 @@ One Discord bot token, one `discord-bot` container. The bot parses the mention t
 4. Check proxy queue depth → reject if > MAX_QUEUE_DEPTH
 5. Send typing indicator to channel
 6. Build prompt (see Section 7)
-7. POST to proxy: /api/chat with {model, messages}
+7. POST to proxy: /v1/chat/completions with {model, messages}
 8. Receive response (streaming or blocking)
 9. Post response to channel
 10. Stop typing indicator
@@ -204,15 +204,22 @@ All ephemeral messages are visible only to the requesting user (`ephemeral=True`
 
 ### 7.1 Mimic Prompt
 
-The mimic model's system prompt is baked into the Ollama Modelfile (see Design.md §5.1). The bot constructs the user message as:
+The mimic model's system prompt is injected per-request by the bot (since llama-server's router mode uses per-request system prompts rather than baked-in Modelfile prompts). The bot constructs the full message list:
 
 ```python
+MIMIC_SYSTEM_PROMPTS: dict[str, str] = {
+    "mimic_user1": """You are mimic_user1, a bot that mimics user1's Discord personality...""",
+    # ... one entry per persona
+}
+
 def build_mimic_messages(
+    model: str,
     user_message: str,
     conversation_history: list[dict],
     lore_context: str | None = None,
 ) -> list[dict]:
-    messages = list(conversation_history)  # rolling window (see §7.3)
+    messages = [{"role": "system", "content": MIMIC_SYSTEM_PROMPTS[model]}]
+    messages.extend(conversation_history)  # rolling window (see §7.3)
     
     user_content = user_message
     if lore_context:
@@ -222,11 +229,17 @@ def build_mimic_messages(
     return messages
 ```
 
-The system prompt is **not** re-sent by the bot — it is embedded in the Modelfile and applied by Ollama automatically.
-
 ### 7.2 Lore Prompt
 
 ```python
+LORE_SYSTEM_PROMPT = """
+You are the nullposting lore assistant. You have access to a curated database of
+server history, in-jokes, memes, and member events. When answering questions,
+cite your sources from the retrieved context. Be factual and concise.
+If the retrieved context does not contain the answer, say so clearly rather than
+guessing. Never invent lore, events, or quotes.
+"""
+
 def build_lore_messages(
     user_message: str,
     rag_chunks: list[str],
@@ -234,6 +247,7 @@ def build_lore_messages(
     context_block = "\n\n".join(rag_chunks) if rag_chunks else "No relevant lore found."
     
     return [
+        {"role": "system", "content": LORE_SYSTEM_PROMPT},
         {
             "role": "user",
             "content": (
@@ -274,7 +288,7 @@ conversation_history: dict[tuple[int, str], deque] = defaultdict(
 
 - Posted as plain text, no embeds
 - No attribution prefix (the bot's Discord username/avatar serves as attribution)
-- Truncated to **2000 characters** (Discord message limit) — mimic responses are capped at 512 tokens (~400 words) in the Modelfile, so truncation should be rare
+- Truncated to **2000 characters** (Discord message limit) — mimic responses are capped at 512 tokens (~400 words) in `models.ini`, so truncation should be rare
 - If response exceeds 2000 chars: split at last sentence boundary before the limit
 
 ### 8.2 Lore Responses
@@ -355,21 +369,21 @@ The proxy exposes a `/status` endpoint (or the bot tracks in-flight requests loc
 
 ## 10. Proxy API Contract
 
-The bot communicates with the orchestration proxy using the **Ollama `/api/chat` format:**
+The bot communicates with the orchestration proxy using the **OpenAI-compatible API** exposed by llama-server. The proxy forwards requests transparently to the appropriate llama-server instance.
 
 ### 10.1 Request
 
 ```http
-POST http://proxy:11436/api/chat
+POST http://proxy:11436/v1/chat/completions
 Content-Type: application/json
 
 {
   "model": "mimic_user3",
   "messages": [
+    {"role": "system", "content": "You are mimic_user3..."},
     {"role": "user", "content": "rate my strats"}
   ],
-  "stream": false,
-  "options": {}
+  "stream": false
 }
 ```
 
@@ -379,12 +393,24 @@ Content-Type: application/json
 
 ```json
 {
+  "id": "chatcmpl-...",
+  "object": "chat.completion",
   "model": "mimic_user3",
-  "message": {
-    "role": "assistant",
-    "content": "lmao those aren't strats, that's just dying slower"
-  },
-  "done": true
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "lmao those aren't strats, that's just dying slower"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 42,
+    "completion_tokens": 15,
+    "total_tokens": 57
+  }
 }
 ```
 
@@ -414,8 +440,6 @@ discord-bot:
     - MAX_QUEUE_DEPTH=3
     - RATE_LIMIT_PER_USER=5
     - LORE_TOP_K=5
-  volumes:
-    - ./discord-bot:/app   # dev: live reload; remove for prod
 ```
 
 ### 11.1 Dockerfile
@@ -459,15 +483,7 @@ discord-bot/
 ├── rate_limiter.py         # Per-user rate limiting logic
 ├── history.py              # Conversation history management (deque per channel/persona)
 ├── formatters.py           # Response formatting, disclaimer stripping, embed builders
-├── config.py               # Environment variable loading and defaults
-└── modelfiles/             # Ollama Modelfile templates (reference copies)
-    ├── mimic_user1.Modelfile
-    ├── mimic_user2.Modelfile
-    ├── mimic_user3.Modelfile
-    ├── mimic_user4.Modelfile
-    ├── mimic_user5.Modelfile
-    ├── mimic_user6.Modelfile
-    └── lore.Modelfile
+└── config.py               # Environment variable loading and defaults
 ```
 
 ---
@@ -476,22 +492,23 @@ discord-bot/
 
 Each mimic persona is defined by two artefacts:
 
-1. **Ollama Modelfile** — sets base model, quantisation, inference parameters, and system prompt
-2. **Bot config entry** — maps Discord mention → model name
+1. **`models.ini` section** — sets GGUF path, inference parameters, and alias
+2. **Bot system prompt** — injected per-request in `build_mimic_messages()` (see §7.1)
+3. **Bot config entry** — maps Discord mention → model name in `MENTION_TO_MODEL`
 
 ### 13.1 Persona Parameter Summary
 
 | Persona | Model | Quant | VRAM | Temp | Ctx | Max Tokens | Thinking |
 |---|---|---|---|---|---|---|---|
-| mimic_user1 | Qwen3.5-35B-A3B-Uncensored | IQ4_XS | ~18 GB | 0.85 | 8192 | 512 | false |
-| mimic_user2 | Qwen3.5-35B-A3B-Uncensored | IQ4_XS | ~18 GB | 0.85 | 8192 | 512 | false |
-| mimic_user3 | Qwen3.5-35B-A3B-Uncensored | IQ4_XS | ~18 GB | 0.85 | 8192 | 512 | false |
-| mimic_user4 | Qwen3.5-35B-A3B-Uncensored | IQ4_XS | ~18 GB | 0.85 | 8192 | 512 | false |
-| mimic_user5 | Qwen3.5-35B-A3B-Uncensored | IQ4_XS | ~18 GB | 0.85 | 8192 | 512 | false |
-| mimic_user6 | Qwen3.5-35B-A3B-Uncensored | IQ4_XS | ~18 GB | 0.85 | 8192 | 512 | false |
+| mimic_user1 | Qwen3.5-35B-A3B-Uncensored | IQ4_XS | ~18 GB | 0.85 | 8192 | 512 | disabled |
+| mimic_user2 | Qwen3.5-35B-A3B-Uncensored | IQ4_XS | ~18 GB | 0.85 | 8192 | 512 | disabled |
+| mimic_user3 | Qwen3.5-35B-A3B-Uncensored | IQ4_XS | ~18 GB | 0.85 | 8192 | 512 | disabled |
+| mimic_user4 | Qwen3.5-35B-A3B-Uncensored | IQ4_XS | ~18 GB | 0.85 | 8192 | 512 | disabled |
+| mimic_user5 | Qwen3.5-35B-A3B-Uncensored | IQ4_XS | ~18 GB | 0.85 | 8192 | 512 | disabled |
+| mimic_user6 | Qwen3.5-35B-A3B-Uncensored | IQ4_XS | ~18 GB | 0.85 | 8192 | 512 | disabled |
 | lore | Gemma3-12B | Q6_K | ~9.5 GB | 0.3 | 16384 | 1024 | N/A |
 
-> All mimic personas share the same base model and quant — only the system prompt differs. This means swapping between any two mimic personas is a **system prompt swap only**, not a model reload. The proxy's `current_model` key distinguishes them by name, but Ollama may cache the base weights and only swap the KV context. Verify this behaviour during Phase 1 testing.
+> All mimic personas share the same GGUF — only the system prompt and alias differ. llama-server's router mode loads the GGUF once and serves all mimic aliases from it. Swapping between `mimic_user1` and `mimic_user2` is a context switch, not a model reload.
 
 ### 13.2 Per-Persona System Prompt Template
 
@@ -505,7 +522,7 @@ You keep responses short (1-3 sentences) unless the context calls for more.
 You match the energy of whoever is talking to you.
 ```
 
-Customise the italicised description per member during Phase 1 testing. In Phase 3, this system prompt is replaced by a LoRA-merged model that has the personality baked into weights.
+Customise per member during Phase 1 testing. In Phase 3, this system prompt is supplemented by a LoRA-merged model that has the personality baked into weights.
 
 ---
 
@@ -539,13 +556,13 @@ The typing indicator is active from step 1 through Discord post, masking all lat
 - [ ] Generate bot token and add to `.env`
 - [ ] Implement `bot.py` with `on_message` handler and mention detection
 - [ ] Implement `router.py` with `MENTION_TO_MODEL` dict
-- [ ] Implement `proxy_client.py` with httpx async POST to `/api/chat`
+- [ ] Implement `proxy_client.py` with httpx async POST to `/v1/chat/completions`
 - [ ] Wire typing indicator keep-alive in request handler
 - [ ] Implement `rate_limiter.py` with per-user sliding window
 - [ ] Implement `formatters.py` with disclaimer stripping and lore embed builder
 - [ ] Implement `history.py` with per-channel/per-persona deque
-- [ ] Register all 6 mimic Modelfiles in Ollama swappable instance
-- [ ] Register lore Modelfile in Ollama swappable instance
+- [ ] Add system prompts for all 6 mimic personas to `config.py`
+- [ ] Verify all mimic aliases are present in `models.ini` and `proxy/config.py`
 - [ ] Test single mimic request end-to-end
 - [ ] Test lore request end-to-end
 - [ ] Test lore+mimic compound chain
@@ -568,7 +585,7 @@ Discord image attachments shared by members are automatically captioned by the `
 - When a user asks `@lore` about something that was originally an image (e.g. "what was that meme about the tournament?"), the lore assistant can retrieve and reference it
 - Captions are flagged `caption_excluded_from_training: true` and are never used in LoRA training — they are synthetic descriptions, not the user's voice
 
-The image captioner uses the same `Qwen3.5-35B-A3B-Uncensored` base as the mimic personas (registered as `image-caption` in Ollama), ensuring no refusals on Discord content. It runs exclusively during the configured off-hours window (default 3–6 AM) and never contends with live bot requests.
+The image captioner uses the same `Qwen3.5-35B-A3B-Uncensored` base as the mimic personas (alias `image-caption` in `models.ini`), ensuring no refusals on Discord content. It runs exclusively during the configured off-hours window (default 3–6 AM) and never contends with live bot requests.
 
 See `history-service/README.md` §Image Captioning Pipeline for full details.
 
@@ -580,11 +597,11 @@ When Phase 3 LoRA-merged models are ready, the bot requires **zero code changes.
 
 1. Train LoRA adapter on Qwen3.5-35B-A3B-Uncensored base using member message history
 2. Merge adapter into full model: `mimic_<member>_v2.gguf`
-3. Update Modelfile: change `FROM` line to point to merged GGUF
-4. `ollama rm mimic_<member>` + `ollama create mimic_<member> -f mimic_<member>_v2.Modelfile`
-5. Bot continues using the same model name — no proxy changes, no bot code changes
+3. Update `models.ini`: change the `model` path for the relevant `[mimic_<member>]` section to point to the merged GGUF
+4. Run `make restart-llama-swappable` — the server picks up the new GGUF path from `models.ini`
+5. Bot continues using the same model alias — no proxy changes, no bot code changes
 
-The `MENTION_TO_MODEL` dict and all routing logic remain identical. The only change is the underlying weights.
+The `MENTION_TO_MODEL` dict and all routing logic remain identical. The only change is the underlying GGUF file referenced in `models.ini`.
 
 ---
 

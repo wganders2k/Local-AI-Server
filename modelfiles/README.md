@@ -1,50 +1,115 @@
-# Modelfiles
+# Model Configuration
 
-Ollama Modelfile definitions for all models in the stack. These files are the source-of-truth for model configuration — parameters, system prompts, and the GGUF source (`FROM` line).
+Model definitions for all models in the stack have moved to **`models.ini`** in the repo root.
 
-## Files
+## Overview
 
-| File | Ollama Name | Slot | Source |
-|---|---|---|---|
-| `autocomplete.Modelfile` | `autocomplete` | permanent (`:11435`) | Ollama registry |
-| `brain.Modelfile` | `brain` | swappable (`:11434`) | HuggingFace |
-| `mimic.Modelfile` | `mimic_<member>` | swappable (`:11434`) | HuggingFace |
-| `lore.Modelfile` | `lore` | swappable (`:11434`) | Ollama registry |
-| `librechat_chat.Modelfile` | `librechat_chat` | swappable (`:11434`) | HuggingFace |
-| `image-caption.Modelfile` | `image-caption` | swappable (`:11434`) | HuggingFace |
+The inference backend is **llama.cpp** (`llama-server`), which uses a preset config file (`models.ini`) to define all available models for the swappable slot. The permanent slot (autocomplete) is configured directly in `docker-compose.yml`.
 
-## Mimic Personas
+| Config location | Slot | Purpose |
+|---|---|---|
+| `docker-compose.yml` (`--model` flag) | permanent (`:11435`) | Autocomplete model — loaded at startup, never evicted |
+| `models.ini` | swappable (`:11434`) | All other models — loaded on demand by the router |
 
-`mimic.Modelfile` is a **template**. For each Discord member you want to mimic:
+## models.ini Format
 
-1. Copy the template: `cp modelfiles/mimic.Modelfile modelfiles/mimic_<member>.Modelfile`
-2. Replace `<member>` in the filename and inside the `SYSTEM` block with the actual member name
-3. Register it: `make model-create MODEL=mimic_<member> SLOT=swappable`
+Each `[section]` in `models.ini` defines one named model:
 
-## Model Management
-
-See `Makefile` targets — run `make help` for the full list. Key targets:
-
-```bash
-make models-init                                    # Register all models (first-time setup or post-nuke)
-make model-create MODEL=librechat_chat SLOT=swappable   # Re-register from Modelfile (uses cached GGUF)
-make model-redownload MODEL=librechat_chat SLOT=swappable  # Force full re-fetch of GGUF weights
-make model-remove MODEL=brain SLOT=swappable        # Remove a registered model
+```ini
+[brain]
+model           = /models/unsloth/Qwen3.5-35B-A3B-GGUF/Qwen3.5-35B-A3B-UD-IQ4_NL.gguf
+alias           = brain
+n_gpu_layers    = -1
+ctx_size        = 40960
+n_predict       = -1
+temperature     = 0.2
+top_k           = 10
+top_p           = 0.9
+reasoning_format = none
 ```
 
-## Switching Models
+The `alias` field is the model name used in API requests (`"model": "brain"`). The `model` field is the path to the GGUF file inside the container (mounted from `MODELS_DIR` on the host).
 
-To try a different model or quant for any slot:
+## Model Files
 
-1. Edit the `FROM` line in the relevant Modelfile (e.g. change quant tag or HuggingFace repo)
-2. Run `make model-redownload MODEL=<name> SLOT=<permanent|swappable>`
+GGUF files live on the host at:
+```
+./models/<publisher>/<model-name>/filename.gguf
+```
 
-Ollama will fetch the new GGUF from the updated source. The proxy references models by name only — no proxy changes needed.
+Download all required GGUFs with:
+```bash
+make models-download
+```
 
-## How Ollama Resolves the FROM Line
+This runs `scripts/download_models.py`, which fetches each GGUF from HuggingFace and saves it to the correct path. Already-downloaded files are skipped.
 
-- `FROM qwen2.5-coder:1.5b` → pulls from the Ollama model registry
-- `FROM hf.co/owner/repo:tag` → pulls the GGUF directly from HuggingFace Hub
-- `FROM /path/to/local.gguf` → loads from a local file path (useful for LoRA-merged models in Phase 3)
+## Current Models
 
-The GGUF blob is cached in the Ollama volume (`/root/.ollama/models/blobs/`). `model-create` reuses the cache; `model-redownload` forces a fresh fetch.
+| Alias | GGUF | Slot | VRAM |
+|---|---|---|---|
+| `autocomplete` | `unsloth/Qwen3.5-2B-GGUF` IQ4_NL | permanent | ~1.21 GB |
+| `brain` | `unsloth/Qwen3.5-35B-A3B-GGUF` UD-IQ4_NL | swappable | ~17.8 GB |
+| `mimic_user1` … `mimic_user6` | `HauhauCS/Qwen3.5-35B-A3B-Uncensored` IQ4_XS | swappable | ~18 GB (shared GGUF) |
+| `lore` | `bartowski/gemma-3-12b-it-GGUF` Q6_K | swappable | ~9.5 GB |
+| `librechat_chat` | `unsloth/Qwen3.5-14B-GGUF` UD-IQ4_XS | swappable | ~9.5 GB |
+| `image-caption` | `HauhauCS/Qwen3.5-35B-A3B-Uncensored` IQ4_XS | swappable | ~18 GB (shared GGUF) |
+
+## Adding a Mimic Persona
+
+Mimic personas share the same GGUF — only the alias and system prompt differ. To add a new persona:
+
+1. Add a new section to `models.ini`:
+   ```ini
+   [mimic_alice]
+   model           = /models/HauhauCS/Qwen3.5-35B-A3B-Uncensored/Qwen3.5-35B-A3B-Uncensored-IQ4_XS.gguf
+   alias           = mimic_alice
+   n_gpu_layers    = -1
+   ctx_size        = 8192
+   n_predict       = 512
+   temperature     = 0.85
+   top_k           = 40
+   top_p           = 0.9
+   repeat_penalty  = 1.3
+   reasoning_format = none
+   ```
+
+2. Add `mimic_alice` to `SWAPPABLE_MODELS` in `proxy/config.py`.
+
+3. Add the persona to `MENTION_TO_MODEL` in the Discord bot's `router.py`.
+
+4. Restart the swappable server to pick up the new preset:
+   ```bash
+   make restart-llama-swappable
+   ```
+
+No model download needed — the GGUF is already present from the mimic base.
+
+## Changing a Model or Quant
+
+1. Edit `models.ini` — update the `model` path and/or parameters for the relevant section.
+2. Update `scripts/download_models.py` — add or update the entry with the new `repo_id` and `filename`.
+3. Download the new GGUF:
+   ```bash
+   make models-download
+   ```
+4. Restart the relevant server:
+   ```bash
+   make restart-llama-swappable   # for swappable slot models
+   make restart-llama-permanent   # for the autocomplete model
+   ```
+
+The proxy references models by alias only — no proxy changes needed when swapping underlying GGUFs.
+
+## Switching the Permanent (Autocomplete) Model
+
+The permanent slot model is configured in `docker-compose.yml` via the `--model` flag on the `llama-permanent` service. To change it:
+
+1. Update `scripts/download_models.py` with the new model entry (slot: `"permanent"`).
+2. Run `make models-download`.
+3. Edit the `--model` flag in `docker-compose.yml` to point to the new GGUF path.
+4. Run `make restart-llama-permanent`.
+
+## Legacy Modelfiles
+
+The `.Modelfile` files in this directory are **no longer used**. They are retained for historical reference only. The `models.ini` preset config in the repo root is the current source of truth for all model configuration.

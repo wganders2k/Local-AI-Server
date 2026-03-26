@@ -1,6 +1,6 @@
 # Local AI Server
 
-Monorepo for a personal AI server stack running on an Ubuntu machine with an RTX 3090. Hosts a Discord bot with mimic personas and a lore assistant, a self-hosted chat UI (LibreChat), and a VS Code coding assistant — all orchestrated through a single FastAPI proxy that manages VRAM allocation across two Ollama instances.
+Monorepo for a personal AI server stack running on an Ubuntu machine with an RTX 3090. Hosts a Discord bot with mimic personas and a lore assistant, a self-hosted chat UI (LibreChat), and a VS Code coding assistant — all orchestrated through a single FastAPI proxy that manages VRAM allocation across two llama-server instances.
 
 ## Architecture
 
@@ -13,10 +13,11 @@ Monorepo for a personal AI server stack running on an Ubuntu machine with an RTX
 │  └───────────────────────────────────────────────────────────┘  │
 │               │                          │                       │
 │  ┌──────────────────┐       ┌───────────────────────────┐      │
-│  │  Ollama :11435   │       │      Ollama :11434         │      │
-│  │  (PERMANENT)     │       │      (SWAPPABLE)           │      │
-│  │  autocomplete    │       │  brain / mimic / lore /    │      │
-│  │  1.5B Q8_0       │       │  librechat (one at a time) │      │
+│  │ llama-server      │       │    llama-server :11434     │      │
+│  │ :11435            │       │    (SWAPPABLE — router)    │      │
+│  │ (PERMANENT)       │       │                            │      │
+│  │ autocomplete      │       │  brain / mimic / lore /    │      │
+│  │ Qwen3.5-2B IQ4_NL│       │  librechat (one at a time) │      │
 │  └──────────────────┘       └───────────────────────────┘      │
 └──────────────────────────────────────────────────────────────────┘
          ▲                    ▲                    ▲
@@ -35,15 +36,24 @@ Local-AI-Server/
 ├── DiscordBot-Design.md    # Discord bot design document
 ├── docker-compose.yml      # All services defined here
 ├── Makefile                # Common server operations (see below)
+├── models.ini              # llama-server model presets (swappable slot)
 ├── .env.example            # Environment variable template — copy to .env
 ├── .gitignore
+│
+├── scripts/                # Utility scripts
+│   ├── download_models.py  # Download all GGUFs from HuggingFace
+│   └── requirements.txt    # Python deps for scripts (huggingface_hub)
+│
+├── models/                 # GGUF model files (gitignored, populated by make models-download)
+│   └── <publisher>/<model>/filename.gguf
 │
 ├── proxy/                  # FastAPI orchestration middleware (:11436)
 ├── discord-bot/            # discord.py bot
 ├── history-service/        # Background message collection + LoRA retraining trigger
 ├── rag/                    # ChromaDB + embedding pipeline (CPU-only)
 ├── lora-training/          # Phase 3: Unsloth QLoRA fine-tuning scripts
-└── librechat/              # LibreChat config (librechat.yaml)
+├── librechat/              # LibreChat config (librechat.yaml)
+└── modelfiles/             # Legacy Ollama Modelfiles (historical reference only)
 ```
 
 ## Quick Start
@@ -54,22 +64,30 @@ Local-AI-Server/
 git clone https://github.com/wganders2k/Local-AI-Server.git
 cd Local-AI-Server
 cp .env.example .env
-# Edit .env — set DISCORD_TOKEN and optionally ANTHROPIC_API_KEY
+# Edit .env — set DISCORD_TOKEN and optionally ANTHROPIC_API_KEY and HF_TOKEN
 ```
 
-### 2. Start all services
+### 2. Download model files
+
+```bash
+make models-download
+```
+
+This downloads all GGUF files from HuggingFace into `./models/<publisher>/<model>/`. Large models (Brain ~17.8 GB, LibreChat ~9.5 GB) will take time on first download. Already-downloaded files are skipped on subsequent runs.
+
+### 3. Start all services
 
 ```bash
 make up
 ```
 
-### 3. Verify GPU access
+### 4. Verify GPU access
 
 ```bash
 make check-gpu
 ```
 
-### 4. Check service health
+### 5. Check service health
 
 ```bash
 make status
@@ -87,82 +105,58 @@ make status
 | `make logs-bot` | Tail Discord bot logs |
 | `make logs-history` | Tail history-service logs (LoRA training progress) |
 | `make logs-proxy` | Tail proxy logs |
+| `make logs-llama` | Tail both llama-server logs |
 | `make status` | Show container health |
-| `make check-gpu` | Verify GPU visible in Ollama containers |
-| `make ollama-ps` | Show models currently loaded in VRAM |
-| `make ollama-list` | List all registered Ollama models |
+| `make check-gpu` | Verify GPU visible in llama-server containers |
+| `make llama-ps` | Show models available in both llama-server instances |
 | `make restart-bot` | Restart Discord bot only |
+| `make restart-llama-swappable` | Restart swappable slot (picks up models.ini changes) |
 | `make shell-bot` | Open shell inside Discord bot container |
-| `make nuke` | ⚠️ Wipe everything including volumes |
+| `make nuke` | ⚠️ Wipe all volumes (model files in ./models are preserved) |
 
 Run `make help` for the full list.
 
 ## Model Management
 
-Ollama model definitions live in [`modelfiles/`](modelfiles/). Each `.Modelfile` defines the GGUF source (`FROM` line), inference parameters, and system prompt for one named model. These are version-controlled — changing a model means editing its Modelfile and re-registering.
+Model configuration lives in two places:
+
+- **`models.ini`** — defines all swappable slot models (brain, mimic personas, lore, librechat, image-caption). Each `[section]` is a named model with its GGUF path, inference parameters, and alias.
+- **`docker-compose.yml`** — defines the permanent slot model (autocomplete) via the `--model` flag on the `llama-permanent` service.
+
+GGUF files are stored on the host at `./models/<publisher>/<model>/filename.gguf` and bind-mounted read-only into both llama-server containers.
 
 ### First-time setup (after `make up`)
 
 ```bash
-make models-init
+make models-download
 ```
 
-This registers all core models. Ollama will pull the GGUF weights from HuggingFace or the Ollama registry as defined in each Modelfile. Large models (Brain ~17.8 GB, LibreChat ~9.5 GB) will take time on first download.
-
-After registering the mimic base model, `models-init` automatically queues a full LoRA retraining cycle for all users via the history-service. On a fresh stack with no message history this is a no-op; on a partial reset it ensures any existing per-user adapters are rebuilt against the current base. Training dispatches during the next training window (default: 3–6 AM) — monitor with `make logs-history`.
-
-### Re-register a model (uses cached weights)
-
-```bash
-make model-create MODEL=librechat_chat SLOT=swappable
-```
-
-Use this after editing a Modelfile's parameters or system prompt — the GGUF is already cached so it's fast.
-
-If `MODEL=mimic`, retraining is automatically queued for all users — no separate step needed.
-
-### Switch to a different model or quant
-
-1. Edit the `FROM` line in `modelfiles/<name>.Modelfile`
-2. Run `make model-redownload MODEL=<name> SLOT=<permanent|swappable>`
-
-Ollama fetches the new GGUF from the updated source. The proxy references models by name only — no proxy changes needed.
-
-If `MODEL=mimic`, retraining is automatically queued for all users after the re-download completes.
-
-### Force a clean re-fetch (corrupt blob, sanity check)
-
-```bash
-make model-redownload MODEL=brain SLOT=swappable
-```
-
-Removes the registered model and re-creates it with `--no-cache`, forcing Ollama to re-fetch the GGUF even if a blob is cached.
-
-### Post-nuke recovery
-
-```bash
-make up
-make models-init
-```
-
-`make nuke` wipes all volumes including model weights. After bringing services back up, `models-init` re-downloads everything from scratch and queues LoRA retraining.
+Downloads all GGUFs defined in `scripts/download_models.py`. Safe to re-run — already-downloaded files are skipped.
 
 ### Adding a mimic persona
 
-```bash
-cp modelfiles/mimic.Modelfile modelfiles/mimic_alice.Modelfile
-# Edit mimic_alice.Modelfile — replace <member> with alice in the SYSTEM block
-make model-create MODEL=mimic_alice SLOT=swappable
-```
+1. Add a new `[mimic_<member>]` section to `models.ini` (copy an existing mimic section, change the alias)
+2. Add `mimic_<member>` to `SWAPPABLE_MODELS` in `proxy/config.py`
+3. Add the persona to `MENTION_TO_MODEL` in the Discord bot's `router.py`
+4. Restart the swappable server: `make restart-llama-swappable`
 
-See [`modelfiles/README.md`](modelfiles/README.md) for full details.
+No download needed — all mimic personas share the same GGUF.
+
+### Switching to a different model or quant
+
+1. Edit the `model` path in `models.ini` (or `--model` flag in `docker-compose.yml` for permanent slot)
+2. Update `scripts/download_models.py` with the new `repo_id` and `filename`
+3. Run `make models-download`
+4. Restart: `make restart-llama-swappable` (or `restart-llama-permanent`)
+
+See [`modelfiles/README.md`](modelfiles/README.md) for full model management details.
 
 ## Services
 
 | Service | Port | Description |
 |---|---|---|
-| `ollama-permanent` | `:11435` | Permanent autocomplete model slot |
-| `ollama-swappable` | `:11434` | Swappable model slot (brain / mimic / lore / librechat) |
+| `llama-permanent` | `:11435` | Permanent autocomplete model slot |
+| `llama-swappable` | `:11434` | Swappable model slot (brain / mimic / lore / librechat) |
 | `proxy` | `:11436` | FastAPI orchestration proxy |
 | `discord-bot` | — | Discord bot (no exposed port) |
 | `librechat` | `:3080` | LibreChat web UI |
@@ -175,7 +169,7 @@ See [`modelfiles/README.md`](modelfiles/README.md) for full details.
 
 | Phase | Status | Description |
 |---|---|---|
-| Phase 1 | 🔨 In progress | Core stack: Ollama + proxy + Discord bot + LibreChat |
+| Phase 1 | 🔨 In progress | Core stack: llama-server + proxy + Discord bot + LibreChat |
 | Phase 2 | ⏳ Planned | RAG pipeline: Discord history ingestion + lore retrieval |
 | Phase 3 | ⏳ Planned | LoRA fine-tuning: per-member persona models |
 | Phase 4 | ⏳ Optional | Hardening: rate limits, auth, priority queuing |
@@ -184,5 +178,5 @@ See `Design.md` §10 for the full development timeline.
 
 ## Secrets
 
-Never commit `.env`. It contains `DISCORD_TOKEN` and optionally `ANTHROPIC_API_KEY`.  
+Never commit `.env`. It contains `DISCORD_TOKEN`, optionally `ANTHROPIC_API_KEY`, and optionally `HF_TOKEN` for private HuggingFace repos.  
 Use `.env.example` as the template.
