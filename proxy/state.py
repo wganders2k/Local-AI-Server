@@ -6,7 +6,7 @@ logger = logging.getLogger(__name__)
 
 class OrchestratorState:
     """
-    Tracks which model is currently loaded in the swappable Ollama slot
+    Tracks which model is currently loaded in the swappable llama-server slot
     and serialises all access to it via a single asyncio.Lock.
 
     The lock is intentionally coarse — one request at a time through the
