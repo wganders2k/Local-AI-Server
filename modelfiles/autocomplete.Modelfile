@@ -1,7 +1,11 @@
 # autocomplete.Modelfile
 # Permanent slot (:11435) — VS Code / Cursor autocomplete
 # Never swapped. num_parallel 4 set at the Ollama instance level.
-FROM qwen2.5-coder:1.5b
+#
+# Source: HuggingFace — unsloth/Qwen3.5-2B-GGUF (IQ4_NL quant)
+# Quant: IQ4_NL (~1.21 GB VRAM) — importance-weighted 4-bit, smaller footprint than Q8_0
+# Register with: ollama create autocomplete -f autocomplete.Modelfile
+FROM hf.co/unsloth/Qwen3.5-2B-GGUF:IQ4_NL
 
 PARAMETER num_ctx 4096
 PARAMETER num_predict 256

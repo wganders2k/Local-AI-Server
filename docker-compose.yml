@@ -12,7 +12,9 @@ services:
     environment:
       - NVIDIA_VISIBLE_DEVICES=0
       - OLLAMA_NUM_PARALLEL=4
-      - OLLAMA_KEEP_ALIVE=-1
+      - OLLAMA_KEEP_ALIVE=-1        # Guarantees autocomplete model never drops from VRAM
+      - OLLAMA_FLASH_ATTENTION=1    # Free performance win — enable globally
+      - OLLAMA_KV_CACHE_TYPE=q8_0  # q8_0 minimum — q4_0 degrades completion quality
     ports:
       - "11435:11434"
     volumes:
@@ -44,6 +46,10 @@ services:
       - NVIDIA_VISIBLE_DEVICES=0
       - OLLAMA_NUM_PARALLEL=1
       - OLLAMA_KEEP_ALIVE=300        # 5-min idle timeout
+      - OLLAMA_FLASH_ATTENTION=1     # Free performance win — enable globally
+      - OLLAMA_KV_CACHE_TYPE=q8_0   # q8_0 minimum — q4_0 degrades quality
+      - OLLAMA_MAX_VRAM=22000        # MB — Total VRAM (24,300) minus autocomplete (~1,500) minus 1 GB buffer
+                                     # Prevents OOM: the two containers are blind to each other's VRAM usage
     ports:
       - "11434:11434"
     volumes:
