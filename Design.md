@@ -10,7 +10,7 @@
 ## 1. Guiding Principles
 
 - **One physical GPU, zero concurrency.** All VRAM-resident models are sequential. No two non-autocomplete models ever share the swappable slot simultaneously.
-- **Autocomplete is sacred.** The 1.5B coder autocomplete lives permanently on `:11435` and is never touched by orchestration.
+- **Autocomplete is sacred.** The 2B autocomplete lives permanently on `:11435` and is never touched by orchestration.
 - **Two distinct model personalities.** Mimic personas use an abliterated base with no content refusals. The lore assistant uses a sterile, instruction-following base. Neither bleeds into the other.
 - **Swap-friendly by design.** The smaller the Discord model footprint, the faster the swap. Qwen3.5-9B at Q6_K (~7.4 GB) is significantly better than NeMo 12B (~10.5 GB) here.
 - **Prototype-first.** Phase 1 uses system prompt personas with no LoRA. LoRA-merged models slot in during Phase 2 with zero orchestration changes.
@@ -24,7 +24,7 @@
 
 | Slot | Purpose | Model | Quant | VRAM |
 |---|---|---|---|---|
-| Permanent (:11435) | Autocomplete | `qwen2.5-coder:1.5b` | Q8_0 | ~1.5 GB |
+| Permanent (:11435) | Autocomplete | `autocomplete` (Qwen3.5-2B) | IQ4_NL | ~1.21 GB |
 | Swappable (:11434) | Brain (coding) | `qwen3.5:35b-a3b` | UD-IQ4_NL | ~17.8 GB |
 | Swappable (:11434) | Mimic personas (×6) | `Qwen3.5-35B-A3B-Uncensored` | IQ4_XS | ~18 GB |
 | Swappable (:11434) | Image captioner | `Qwen3.5-35B-A3B-Uncensored` | IQ4_XS | ~18 GB (shared weights with mimic) |
@@ -121,6 +121,72 @@ If you have an Anthropic API key, routing LibreChat to Claude (Sonnet or Haiku) 
 
 ## 4. Architecture Overview
 
+---
+
+## 4a. Inference Backend Strategy: Ollama → llama.cpp Migration Path
+
+### Current Backend: Ollama (Phases 1 & 2)
+
+Ollama is the correct backend for Phases 1 and 2. It provides swap-on-demand model loading (a model is loaded into VRAM simply by naming it in a request — no explicit load API needed), declarative per-model configuration via Modelfiles, `FROM hf.co/...` direct HuggingFace GGUF pulls, and the `thinking false` parameter that suppresses Qwen3.5's chain-of-thought tokens cleanly. These are all load-bearing features of the current architecture.
+
+### Why Not vLLM (Hard No)
+
+vLLM is ruled out on two independent grounds:
+
+1. **MoE architecture:** Qwen3.5-35B-A3B is a sparse Mixture-of-Experts model. vLLM's support for quantised GGUF MoEs is unoptimised and highly resource-intensive compared to llama.cpp's tuned MoE-specific CUDA kernels. Running a quantised MoE through vLLM would consume significantly more VRAM and deliver worse throughput than llama.cpp for the same model.
+
+2. **GGUF-only availability:** The uncensored mimic base (`HauhauCS/Qwen3.5-35B-A3B-Uncensored`) is only available as GGUF — no safetensors release exists. vLLM's GGUF support is experimental. The entire model stack is GGUF-based (Unsloth quants, HauhauCS uncensored), making vLLM a non-starter.
+
+### Why Not llama.cpp Directly (Yet)
+
+`llama-server` (llama.cpp) would give full control over every inference parameter — KV cache quantisation per-layer, tensor split, `--flash-attn`, `--mlock`, etc. However, it comes at a significant architecture cost:
+
+- **No swap-on-demand.** llama-server is one-model-per-process. Swapping models requires killing and restarting the server process, adding ~2–3s process startup overhead on top of model load time. The proxy would need to become a process manager, not just a request router.
+- **No Modelfile system.** System prompts, per-model parameters, and chat templates must be managed in server startup flags or injected per-request.
+- **No `thinking false`.** Qwen3.5's chain-of-thought suppression requires manual sampler configuration.
+
+The complexity cost is not justified until Phase 3.
+
+### Phase 3 Migration Trigger: LoRA Hot-Swapping
+
+**Phase 3 is the explicit trigger event for migrating the swappable slot from Ollama to `llama-server`.**
+
+The reason: Ollama forces a **full base-model VRAM flush and reload** when swapping between Modelfile adapters (LoRA). This destroys the core performance benefit of LoRA — the ability to hot-swap persona adapters without reloading the 18 GB base model. With Ollama, a mimic persona swap in Phase 3 would cost the same ~5s as a full model swap, making LoRA adapters pointless from a latency perspective.
+
+`llama-server` supports **dynamic LoRA adapter loading** (`--lora` flag, hot-swappable per-request) with zero base-model reload. Once the base weights are in VRAM, swapping between `mimic_user1` and `mimic_user2` adapters is near-instantaneous.
+
+**Migration impact on the proxy:** Minimal. `llama-server` exposes the same OpenAI-compatible API on the same port. The proxy's `_forward()` function is unchanged. The swap logic changes from "name a model in the request body" to "set the active LoRA adapter via a management call before forwarding" — a contained change to `_swap_model()` only.
+
+### Ollama Daemon Configuration (2-Container Sidecar)
+
+`OLLAMA_KV_CACHE_TYPE` is a **global daemon environment variable** — it cannot be set per-model in a Modelfile. The 2-container sidecar setup (permanent + swappable as separate Docker services) turns this limitation into an advantage: each container gets its own daemon environment, allowing independent configuration.
+
+Both containers are configured with:
+
+| Variable | Permanent (`:11435`) | Swappable (`:11434`) | Notes |
+|---|---|---|---|
+| `OLLAMA_FLASH_ATTENTION` | `1` | `1` | Free performance win — enable globally |
+| `OLLAMA_KV_CACHE_TYPE` | `q8_0` | `q8_0` | q8_0 minimum — q4_0 degrades output quality |
+| `OLLAMA_KEEP_ALIVE` | `-1` | `300` | Permanent: model never drops. Swappable: 5-min idle timeout |
+| `OLLAMA_MAX_VRAM` | *(not set)* | `22000` (MB) | Swappable only — see below |
+
+**`OLLAMA_MAX_VRAM` on the swappable container:** The two Ollama containers share `NVIDIA_VISIBLE_DEVICES=0` but are blind to each other's VRAM usage — Docker does not enforce GPU memory isolation between containers. Without a cap, the swappable container could attempt to load a model that fills all 24 GB, causing an OOM crash that evicts the autocomplete model from the permanent container.
+
+`OLLAMA_MAX_VRAM=22000` is calculated as:
+
+```
+Total GPU VRAM:          24,300 MB
+Autocomplete footprint:  − 1,240 MB  (Qwen3.5-2B IQ4_NL)
+Safety buffer:           − 1,000 MB
+─────────────────────────────────────
+OLLAMA_MAX_VRAM:         ≈ 22,000 MB
+```
+
+This guarantees the autocomplete model's VRAM reservation is never touched by the swappable slot.
+
+---
+
+
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │                      Ubuntu Server (RTX 3090)                     │
@@ -142,9 +208,9 @@ If you have an Anthropic API key, routing LibreChat to Claude (Sonnet or Haiku) 
 │  │  Ollama :11435   │       │      Ollama :11434         │      │
 │  │  (PERMANENT)     │       │      (SWAPPABLE)           │      │
 │  │                  │       │                            │      │
-│  │ qwen2.5-coder    │       │ ← Brain (17.8 GB)          │      │
-│  │ 1.5b Q8_0        │       │   OR                       │      │
-│  │ ~1.5 GB VRAM     │       │ ← Mimic persona            │      │
+│  │ Qwen3.5-2B       │       │ ← Brain (17.8 GB)          │      │
+│  │ IQ4_NL           │       │   OR                       │      │
+│  │ ~1.21 GB VRAM    │       │ ← Mimic persona            │      │
 │  │ num_parallel 4   │       │   (Qwen3.5-9B-Uncensored   │      │
 │  │ keep_alive -1    │       │    Q6_K ~7.4 GB)           │      │
 │  │                  │       │   OR                       │      │
@@ -212,7 +278,7 @@ class OrchestratorState:
     current_model: str | None = None
     lock: asyncio.Lock = asyncio.Lock()
 
-AUTOCOMPLETE_MODELS = {"qwen2.5-coder:1.5b"}  # always routed to :11435, never swapped
+AUTOCOMPLETE_MODELS = {"autocomplete"}  # always routed to :11435, never swapped
 SWAPPABLE_MODELS = {
     "brain",
     "mimic_user1", "mimic_user2", "mimic_user3",
@@ -259,7 +325,7 @@ LibreChat requests queue behind any in-progress Discord or Brain generation unde
 > | `chromadb` | `chromadb/chroma:latest` | — | Vector store |
 > | `history-service` | `./history-service` | — | Background; set `TRAINING_TRIGGER_ENABLED=true` in Phase 3 |
 
-> **Why two separate Ollama instances share the same `NVIDIA_VISIBLE_DEVICES=0`?** Ollama manages its own VRAM allocation. Both instances can reference the same GPU — the proxy enforces that only one swappable model is loaded at a time. The permanent instance holds exactly one model forever. Docker resource constraints don't need GPU isolation here since we're self-policing via the proxy lock.
+> **Why two separate Ollama instances share the same `NVIDIA_VISIBLE_DEVICES=0`?** Ollama manages its own VRAM allocation. Both instances can reference the same GPU — the proxy enforces that only one swappable model is loaded at a time. The permanent instance holds exactly one model forever. Docker resource constraints don't need GPU isolation here since we're self-policing via the proxy lock. `OLLAMA_MAX_VRAM=22000` on the swappable container provides a hard ceiling to prevent OOM eviction of the autocomplete model — see §4a for the calculation.
 
 > **LibreChat MongoDB:** LibreChat requires MongoDB for conversation history, user accounts, and settings persistence. A lightweight `mongo:7` sidecar is sufficient — no external MongoDB needed.
 
@@ -622,19 +688,24 @@ LoRA Training Pipeline       │         │           │ ███████
 |---|---|---|
 | Ollama Instances | ✅ Stable | No changes |
 | Orchestration Middleware | ✅ Stable | No changes — proxy is model-name-agnostic by design |
-| Ollama Modelfiles | 🔄 Extend | Re-register `mimic_*` Modelfiles pointing to LoRA-merged GGUFs; zero proxy changes |
+| Ollama Modelfiles | ⚠️ Superseded | Ollama is replaced on the swappable slot — see migration note below |
 | Discord Bot | ✅ Stable | No changes — bot references model names, not weights |
 | LibreChat + MongoDB | ✅ Stable | No changes |
 | Discord Data Preprocessor | ✅ Stable | Re-run ingestion as new lore accumulates (manual or cron) |
 | RAG Service (ChromaDB) | ✅ Stable | Re-embed on new significant events; no structural changes |
 | History Service | 🔄 Extend | Enable training trigger; wire to lora-training scripts; automated retraining now active |
-| LoRA Training Pipeline | 🔨 Build | Unsloth QLoRA fine-tuning on Qwen3.5-9B-Uncensored per member; GGUF merge and re-registration |
+| LoRA Training Pipeline | 🔨 Build | Unsloth QLoRA fine-tuning on Qwen3.5-9B-Uncensored per member; GGUF output for llama-server |
+
+> **⚠️ Phase 3 Backend Migration: Ollama → llama-server on the swappable slot.**
+> Ollama forces a full base-model VRAM flush and reload when swapping between Modelfile adapters. This eliminates the latency benefit of LoRA — a persona swap would cost the same ~5s as a full model swap, making LoRA adapters pointless. Phase 3 replaces the `ollama-swappable` container with a `llama-server` (llama.cpp) container. llama-server supports dynamic LoRA adapter loading (`--lora` flag) with zero base-model reload — once the 18 GB base is in VRAM, swapping between `mimic_user1` and `mimic_user2` adapters is near-instantaneous. The proxy's `_forward()` function is unchanged; only `_swap_model()` is updated to issue a LoRA adapter switch call instead of an Ollama model name request. See §4a for full rationale.
 
 **Tasks:**
-- [ ] Build `lora-training/train.py` and `merge.py` scripts (Unsloth QLoRA)
+- [ ] Build `lora-training/train.py` and `merge.py` scripts (Unsloth QLoRA → GGUF output)
 - [ ] Enable training trigger in history-service (set `TRAINING_TRIGGER_ENABLED=true`)
-- [ ] Verify end-to-end automated flow: threshold hit → training queued → train → merge → Modelfile re-registered
-- [ ] A/B test merged vs. system-prompt personas
+- [ ] Replace `ollama-swappable` container with `llama-server` container in Docker Compose
+- [ ] Update `_swap_model()` in proxy to issue llama-server LoRA adapter switch instead of Ollama model load
+- [ ] Verify end-to-end automated flow: threshold hit → training queued → train → GGUF output → adapter registered
+- [ ] A/B test LoRA adapter personas vs. system-prompt personas
 - [ ] Tune `RETRAIN_THRESHOLD` and training window based on observed training times
 
 > **LoRA training note:** Unsloth supports Qwen3.5 fine-tuning natively as of March 2026. The uncensored base weights are the correct starting point for LoRA — you're training style on top of an already-unlocked model, which means the adapter doesn't need to fight the base model's refusal tendencies.
