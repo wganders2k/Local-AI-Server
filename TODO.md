@@ -121,3 +121,9 @@ If my downloads show "Missing Files," it's because the path *inside* the contain
 **My Power Delivery Plan:**
 *   My current 850W solution is solid, but I'll double-check if I need more robust cabling for additional PCIe power leads.
 *   I plan to migrate this PSU to my gaming PC and retire my old 650W to improve the safety and longevity of my new parts.
+
+**Storage Upgrade Pathway**
+*   My primary plex media drive is nearing capacity. 
+*   **For Capcity** I plan to buy 20TB Seagate recertified drives from https://serverpartdeals.com/products/seagate-exos-st20000nm002c-20tb-7-2k-rpm-sata-6gb-s-512e-3-5-recertified-hard-drive
+*   **For Performance** I plan to buy a 4TB 2.5in SATA SSD to do caching (law and order)
+*   MergerFS + snapRAID
