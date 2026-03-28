@@ -58,28 +58,21 @@ MODELS = [
         "filename":  "Qwen3.5-35B-A3B-UD-IQ4_NL.gguf",
         "local_dir": "unsloth/Qwen3.5-35B-A3B-GGUF",
         "slot":      "swappable",
-        "notes":     "Brain (coding assistant) — ~17.8 GB VRAM",
+        "notes":     "Brain (coding assistant) + LibreChat chat (shared GGUF, different params) — ~17.8 GB VRAM",
     },
     {
         "repo_id":   "HauhauCS/Qwen3.5-35B-A3B-Uncensored-HauhauCS-Aggressive",
-        "filename":  "Qwen3.5-35B-A3B-Uncensored-IQ4_XS.gguf",
+        "filename":  "Qwen3.5-35B-A3B-Uncensored-HauhauCS-Aggressive-IQ4_XS.gguf",
         "local_dir": "HauhauCS/Qwen3.5-35B-A3B-Uncensored",
         "slot":      "swappable",
         "notes":     "Mimic personas + image captioning — ~18 GB VRAM (shared GGUF)",
     },
     {
-        "repo_id":   "bartowski/gemma-3-12b-it-GGUF",
-        "filename":  "gemma-3-12b-it-Q6_K.gguf",
-        "local_dir": "bartowski/gemma-3-12b-it-GGUF",
+        "repo_id":   "unsloth/gemma-3-12b-it-GGUF",
+        "filename":  "gemma-3-12b-it-UD-Q8_K_XL.gguf",
+        "local_dir": "unsloth/gemma-3-12b-it-GGUF",
         "slot":      "swappable",
-        "notes":     "Lore assistant — ~9.5 GB VRAM",
-    },
-    {
-        "repo_id":   "unsloth/Qwen3.5-14B-GGUF",
-        "filename":  "Qwen3.5-14B-UD-IQ4_XS.gguf",
-        "local_dir": "unsloth/Qwen3.5-14B-GGUF",
-        "slot":      "swappable",
-        "notes":     "LibreChat local chat model — ~9.5 GB VRAM",
+        "notes":     "Lore assistant — ~14.4 GB VRAM",
     },
 ]
 
@@ -99,6 +92,7 @@ def download_model(entry: dict, models_dir: Path, dry_run: bool, hf_token: str |
     Skips download if the file already exists at the target path.
     """
     target_dir = models_dir / entry["local_dir"]
+    target_dir.mkdir(parents=True, exist_ok=True)
     target_path = target_dir / entry["filename"]
 
     print(f"\n{'─' * 60}")
@@ -116,7 +110,6 @@ def download_model(entry: dict, models_dir: Path, dry_run: bool, hf_token: str |
         print(f"  [DRY RUN] Would download to {target_path}")
         return True
 
-    target_dir.mkdir(parents=True, exist_ok=True)
 
     try:
         print(f"  ↓ Downloading...")

@@ -29,7 +29,7 @@
 | Swappable (:11434) | Mimic personas (×6) | `Qwen3.5-35B-A3B-Uncensored` | IQ4_XS | ~18 GB |
 | Swappable (:11434) | Image captioner | `Qwen3.5-35B-A3B-Uncensored` | IQ4_XS | ~18 GB (shared weights with mimic) |
 | Swappable (:11434) | Lore assistant | `gemma3:12b` | Q6_K | ~9.5 GB |
-| Swappable (:11434) | LibreChat local model | `qwen3.5:14b` | UD-IQ4_XS | ~9.5 GB |
+| Swappable (:11434) | LibreChat local model | `qwen3.5:35b-a3b` | UD-IQ4_NL | ~17.8 GB (shared GGUF with brain) |
 
 **VRAM utilisation by mode:**
 
@@ -38,8 +38,8 @@
 | Coding (Brain + Autocomplete) | ~19.3 GB | ~5.0 GB |
 | Mimic active (+ Autocomplete) | ~8.9 GB | ~15.4 GB |
 | Lore active (+ Autocomplete) | ~11.0 GB | ~13.3 GB |
-| Coding KV cache at 32k ctx | ~21.0 GB | ~3.3 GB |
-| LibreChat local (+ Autocomplete) | ~11.0 GB | ~13.3 GB |
+| Coding KV cache at 32k ctx (brain ctx-size=32768) | ~20.9 GB | ~3.4 GB |
+| LibreChat local (+ Autocomplete) | ~19.3 GB | ~5.0 GB |
 | LibreChat via Claude API | ~1.5 GB (autocomplete only) | ~22.8 GB |
 
 > **KV Cache:** q8_0 for all models (`--cache-type-k q8_0`). Brain: `--parallel 1`, context 32k–40k. Mimic: `--parallel 1` (router mode; concurrency managed by proxy lock). Lore: `--parallel 1`, context 16k. LibreChat local: `--parallel 1`, context 16k.
@@ -79,13 +79,17 @@ LibreChat is a general-purpose personal chat interface — think of it as a self
 1. **Claude via Anthropic API key** — zero local VRAM cost, best quality, requires internet + paid API usage.
 2. **Local llama-server model via proxy** — fully offline, competes for the swappable slot, free after hardware cost.
 
-### 3a.2 Recommended Local Model: `qwen3.5:14b` at UD-IQ4_XS (~9.5 GB)
+### 3a.2 Local Model: `qwen3.5:35b-a3b` at UD-IQ4_NL (~17.8 GB) — shared GGUF with Brain
 
-For a general-purpose chat model that fits comfortably on the 3090 alongside the permanent autocomplete slot, **`qwen3.5:14b` at UD-IQ4_XS (~9.5 GB)** is the recommended choice.
+The LibreChat local model uses the **same GGUF as the Brain coding assistant** (`unsloth/Qwen3.5-35B-A3B-GGUF`, `Qwen3.5-35B-A3B-UD-IQ4_NL.gguf`) — no additional download required. The `[librechat_chat]` preset in `models.ini` points to the same file with different inference parameters tuned for casual conversation rather than precise code generation.
 
-**Why Qwen3.5-14B:** Current-generation successor to Qwen2.5-14B. At the same 14B parameter count, Qwen3.5-14B delivers meaningfully better instruction following, multi-step reasoning, and long-context coherence. Standard instruction-tuned model with no uncensored modifications, appropriate for general personal use.
+**Why the same model as Brain:** The 35B-A3B MoE architecture delivers strong conversational quality at a VRAM footprint comparable to a dense 9B model. Since the GGUF is already on disk for Brain, there is zero additional storage cost. The only difference between Brain and LibreChat chat is the system prompt and sampling parameters — Brain uses tight, deterministic settings (`temperature 0.2`, `top_k 10`) while LibreChat uses warmer, more natural settings (`temperature 0.75`, `top_k 40`, `repeat_penalty 1.1`).
+
+**System prompt:** LibreChat chat uses a casual, conversational system prompt — friendly and concise, not a coding assistant. The system prompt is baked into `modelfiles/librechat_chat.Modelfile` (for reference) and injected per-request by LibreChat.
 
 **Thinking mode:** Disabled via `reasoning_format = none` in `models.ini`. Fast conversational responses are the goal.
+
+**VRAM:** ~17.8 GB — same as Brain. When LibreChat local is active, the VRAM profile is identical to Brain being loaded. The 16k context window (vs Brain's 40k) keeps KV cache overhead lower for typical chat sessions.
 
 **Claude via API as the preferred option when available:** If you have an Anthropic API key, routing LibreChat to Claude is the better default for general chat — it offloads all inference to Anthropic's servers, keeps the swappable slot free for Discord/coding, and provides frontier-model quality. The local model is the fallback for offline use or cost control.
 
@@ -95,7 +99,7 @@ LibreChat is configured via `librechat/librechat.yaml`. Two endpoints are define
 - **Local model:** Points to `http://proxy:11436/v1` (OpenAI-compatible), model `librechat_chat`
 - **Claude:** Points to Anthropic API using `ANTHROPIC_API_KEY`
 
-> **Note on thinking mode:** Qwen3.5-14B supports optional thinking/reasoning mode. For LibreChat general chat, it is disabled in `models.ini` via `reasoning_format = none` — thinking adds latency and token overhead that is not useful for conversational queries.
+> **Note on thinking mode:** Qwen3.5-35B-A3B supports optional thinking/reasoning mode. For LibreChat general chat, it is disabled in `models.ini` via `reasoning_format = none` — thinking adds latency and token overhead that is not useful for conversational queries.
 
 ---
 
@@ -145,7 +149,7 @@ Two separate `llama-server` instances share `NVIDIA_VISIBLE_DEVICES=0`:
 
 The permanent instance holds exactly one model forever. The swappable instance uses router mode to load/evict models on demand. The proxy enforces that only one swappable model is active at a time via `asyncio.Lock`.
 
-**VRAM safety:** The permanent instance's model is loaded at startup and stays resident. The swappable instance's models are configured in `models.ini` with explicit `ctx_size` and `n_gpu_layers` values that keep total VRAM under ~22 GB, leaving the autocomplete model's ~1.21 GB reservation untouched.
+**VRAM safety:** The permanent instance's model is loaded at startup and stays resident. The swappable instance's models are configured in `models.ini` with explicit `n_ctx` and `n_gpu_layers` values that keep total VRAM under ~22 GB, leaving the autocomplete model's ~1.21 GB reservation untouched.
 
 ### Model Files
 
@@ -202,8 +206,8 @@ The proxy's `_forward()` function is unchanged throughout all phases.
 │                              │    ~9.5 GB)                │      │
 │                              │   OR                       │      │
 │                              │ ← LibreChat local          │      │
-│                              │   (qwen3.5-14b UD-IQ4_XS   │      │
-│                              │    ~9.5 GB)                │      │
+│                              │   (qwen3.5-35b-a3b UD-IQ4_NL│     │
+│                              │    ~17.8 GB, shared GGUF)  │      │
 │                              └───────────────────────────┘      │
 └──────────────────────────────────────────────────────────────────┘
          ▲                    ▲                    ▲
@@ -285,7 +289,7 @@ async def route_request(model: str, payload: dict):
         return await forward(":11434", payload)
 ```
 
-**Swap cost:** llama-server's router evicts the current model and loads the new one on first request. Mimic swaps (Qwen3.5-35B-A3B IQ4_XS, ~18 GB from NVMe) take approximately **5–8 seconds** cold load. Lore swaps (~9.5 GB) take approximately **4–6 seconds**. LibreChat local model swaps (~9.5 GB) take approximately **4–6 seconds**. The typing indicator in the Discord bot masks Discord latency; LibreChat shows a streaming cursor which masks its swap latency.
+**Swap cost:** llama-server's router evicts the current model and loads the new one on first request. Mimic swaps (Qwen3.5-35B-A3B IQ4_XS, ~18 GB from NVMe) take approximately **5–8 seconds** cold load. Lore swaps (~9.5 GB) take approximately **4–6 seconds**. LibreChat local model swaps (~17.8 GB, same GGUF as Brain) take approximately **5–8 seconds** — or near-zero if Brain was the last loaded model (same file, no eviction needed). The typing indicator in the Discord bot masks Discord latency; LibreChat shows a streaming cursor which masks its swap latency.
 
 **Contention between LibreChat and Discord/VS Code:**
 LibreChat requests queue behind any in-progress Discord or Brain generation under the same lock. Since LibreChat is personal/interactive use, the user is already expecting a short wait. If LibreChat is actively in a long conversation while a Discord request arrives, the Discord request queues — the same behaviour as Brain contention. This is acceptable for single-user personal use.
@@ -308,7 +312,7 @@ LibreChat requests queue behind any in-progress Discord or Brain generation unde
 > | `chromadb` | `chromadb/chroma:latest` | — | Vector store |
 > | `history-service` | `./history-service` | — | Background; set `TRAINING_TRIGGER_ENABLED=true` in Phase 3 |
 
-> **Why two separate llama-server instances share the same `NVIDIA_VISIBLE_DEVICES=0`?** llama-server manages its own VRAM allocation. Both instances can reference the same GPU — the proxy enforces that only one swappable model is loaded at a time. The permanent instance holds exactly one model forever. VRAM safety is maintained by careful `ctx_size` configuration in `models.ini` rather than a hard cap env var.
+> **Why two separate llama-server instances share the same `NVIDIA_VISIBLE_DEVICES=0`?** llama-server manages its own VRAM allocation. Both instances can reference the same GPU — the proxy enforces that only one swappable model is loaded at a time. The permanent instance holds exactly one model forever. VRAM safety is maintained by careful `n_ctx` configuration in `models.ini` rather than a hard cap env var.
 
 > **Model files:** GGUF files are stored on the host at `MODELS_DIR` (default: `./models`) and bind-mounted read-only into both llama-server containers. They are **not** stored in named Docker volumes — `make nuke` does not delete downloaded model weights.
 
@@ -715,18 +719,18 @@ LoRA Training Pipeline       │         │           │ ███████
 
 ## 11. Key Configuration Parameters
 
-| Parameter | Mimic (Qwen3.5-35B-A3B) | Lore (Gemma3-12B) | Brain (Qwen3.5-35B) | LibreChat (Qwen3.5-14B) |
+| Parameter | Mimic (Qwen3.5-35B-A3B) | Lore (Gemma3-12B) | Brain (Qwen3.5-35B) | LibreChat (Qwen3.5-35B-A3B) |
 |---|---|---|---|---|
-| temperature | 0.85 | 0.3 | 0.2 | 0.7 |
+| temperature | 0.85 | 0.3 | 0.2 | 0.75 |
 | top_k | 40 | 20 | 10 | 40 |
-| top_p | 0.9 | 0.8 | 0.9 | 0.9 |
-| repeat_penalty | 1.3 | — | — | — |
-| ctx_size | 8192 | 16384 | 40960 | 16384 |
+| top_p | 0.9 | 0.8 | 0.9 | 0.92 |
+| repeat_penalty | 1.3 | — | — | 1.1 |
+| n_ctx | 8192 | 16384 | 32768 | 16384 |
 | n_predict | 512 | 1024 | -1 | -1 |
 | reasoning_format | none | — | none | none |
 | parallel | 1 | 1 | 1 | 1 |
 
-> All parameters are set in `models.ini`. The `reasoning_format = none` field suppresses Qwen3.5's chain-of-thought tokens. Gemma3 does not have a thinking mode.
+> All parameters are set in `models.ini`. The `reasoning_format = none` field suppresses Qwen3.5's chain-of-thought tokens. Gemma3 does not have a thinking mode. LibreChat uses the same GGUF as Brain (`Qwen3.5-35B-A3B-UD-IQ4_NL`) with warmer sampling parameters for casual conversation.
 
 > **System prompts:** All system prompts are injected per-request by the Discord bot (see `DiscordBot-Design.md` §7). They are not baked into `models.ini` — this allows per-persona customisation without restarting the server.
 
