@@ -177,8 +177,3 @@ See [`modelfiles/README.md`](modelfiles/README.md) for full model management det
 | Phase 4 | ⏳ Optional | Hardening: rate limits, auth, priority queuing |
 
 See `Design.md` §10 for the full development timeline.
-
-## Secrets
-
-Never commit `.env`. It contains `DISCORD_TOKEN`, optionally `ANTHROPIC_API_KEY`, and optionally `HF_TOKEN` for private HuggingFace repos.  
-Use `.env.example` as the template.
