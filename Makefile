@@ -6,7 +6,7 @@
 # Usage:  make <target>
 #
 # All targets run from the repo root alongside docker-compose.yml.
-# Requires: docker, docker compose (v2), git, python3
+# Requires: docker, docker compose (v2), git, python3, python3-venv
 # ============================================================
 
 .PHONY: help up down restart build pull \
@@ -201,6 +201,7 @@ shell-rag:
 ## Download all GGUF model files from HuggingFace.
 ## Skips files that are already present — safe to re-run.
 ## Run this before the first `make up`.
+## A Python venv is automatically created in scripts/.venv/ on first run.
 ##
 ## Options:
 ##   SLOT=permanent|swappable|all   Download only models for a specific slot (default: all)
@@ -214,9 +215,20 @@ shell-rag:
 ##   2. Update models.ini (for swappable slot) or docker-compose.yml (for permanent slot)
 ##   3. Run: make models-download
 ##   4. Run: make restart-llama-swappable  (or restart-llama-permanent)
+VENV := scripts/.venv
+PYTHON := $(VENV)/bin/python3
+PIP := $(VENV)/bin/pip
+
 models-download:
-	@python3 -c "import huggingface_hub" 2>/dev/null || pip3 install -q -r scripts/requirements.txt
-	python3 scripts/download_models.py \
+	@# Create venv if it doesn't exist
+	@if [ ! -d "$(VENV)" ]; then \
+		echo "Creating virtual environment..."; \
+		python3 -m venv $(VENV); \
+	fi
+	@# Install requirements inside the venv
+	@$(PIP) install -q -r scripts/requirements.txt
+	@# Run the script using the venv's python
+	$(PYTHON) scripts/download_models.py \
 		$(if $(MODELS_DIR),--models-dir $(MODELS_DIR),) \
 		$(if $(SLOT),--slot $(SLOT),) \
 		$(if $(DRY_RUN),--dry-run,)

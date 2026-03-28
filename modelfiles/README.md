@@ -20,7 +20,7 @@ Each `[section]` in `models.ini` defines one named model:
 model           = /models/unsloth/Qwen3.5-35B-A3B-GGUF/Qwen3.5-35B-A3B-UD-IQ4_NL.gguf
 alias           = brain
 n_gpu_layers    = -1
-ctx_size        = 40960
+n_ctx        = 40960
 n_predict       = -1
 temperature     = 0.2
 top_k           = 10
@@ -65,7 +65,7 @@ Mimic personas share the same GGUF — only the alias and system prompt differ. 
    model           = /models/HauhauCS/Qwen3.5-35B-A3B-Uncensored/Qwen3.5-35B-A3B-Uncensored-IQ4_XS.gguf
    alias           = mimic_alice
    n_gpu_layers    = -1
-   ctx_size        = 8192
+   n_ctx        = 8192
    n_predict       = 512
    temperature     = 0.85
    top_k           = 40
