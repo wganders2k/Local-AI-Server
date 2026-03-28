@@ -26,6 +26,6 @@ SWAPPABLE_MODELS: set[str] = {
     "mimic_user5",
     "mimic_user6",
     "lore",
-    "librechat_chat",
+    "chat",
     "image-caption",
 }

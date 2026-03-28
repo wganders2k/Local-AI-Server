@@ -10,9 +10,9 @@
 # ============================================================
 
 .PHONY: help up down restart build pull \
-        logs logs-proxy logs-bot logs-llama logs-librechat logs-rag logs-history \
+        logs logs-proxy logs-bot logs-llama logs-openwebui logs-rag logs-history \
         status \
-        restart-bot restart-proxy restart-librechat restart-rag \
+        restart-bot restart-proxy restart-openwebui restart-rag \
         shell-bot shell-proxy shell-rag \
         llama-ps llama-models \
         check-gpu \
@@ -36,7 +36,7 @@ help:
 	@echo "  logs-proxy          Tail proxy logs only"
 	@echo "  logs-bot            Tail discord-bot logs only"
 	@echo "  logs-llama          Tail both llama-server instance logs"
-	@echo "  logs-librechat      Tail LibreChat logs only"
+	@echo "  logs-openwebui      Tail Open WebUI logs only"
 	@echo "  logs-rag            Tail RAG service logs only"
 	@echo "  logs-history        Tail history-service logs only"
 	@echo ""
@@ -49,7 +49,7 @@ help:
 	@echo "  ── Per-service restart ─────────────────────────────────"
 	@echo "  restart-bot         Restart discord-bot only"
 	@echo "  restart-proxy       Restart proxy only"
-	@echo "  restart-librechat   Restart LibreChat only"
+	@echo "  restart-openwebui   Restart Open WebUI only"
 	@echo "  restart-rag         Restart RAG service only"
 	@echo ""
 	@echo "  ── Shells ─────────────────────────────────────────────"
@@ -118,9 +118,9 @@ logs-bot:
 logs-llama:
 	docker compose logs -f llama-permanent llama-swappable
 
-## Tail LibreChat logs only
-logs-librechat:
-	docker compose logs -f librechat
+## Tail Open WebUI logs only
+logs-openwebui:
+	docker compose logs -f open-webui
 
 ## Tail RAG service logs only
 logs-rag:
@@ -166,9 +166,9 @@ restart-bot:
 restart-proxy:
 	docker compose restart proxy
 
-## Restart LibreChat only
-restart-librechat:
-	docker compose restart librechat
+## Restart Open WebUI only
+restart-openwebui:
+	docker compose restart open-webui
 
 ## Restart RAG service only
 restart-rag:
@@ -236,13 +236,13 @@ models-download:
 # ── Destructive ────────────────────────────────────────────
 
 ## ⚠️  DESTRUCTIVE: Stop everything and remove ALL named volumes.
-## This wipes LibreChat history, ChromaDB data, and training state.
+## This wipes Open WebUI data, ChromaDB data, and training state.
 ## GGUF model files in /srv/models are NOT deleted — they are bind-mounted,
 ## not stored in named volumes. Re-run `make models-download` is NOT needed.
 ## You will need to re-ingest lore data afterwards.
 nuke:
 	@echo "⚠️  WARNING: This will delete ALL named volumes including"
-	@echo "   LibreChat conversation history and ChromaDB lore data."
+	@echo "   Open WebUI data and ChromaDB lore data."
 	@echo "   GGUF model files in /srv/models are preserved."
 	@echo "   Press Ctrl+C within 5 seconds to cancel..."
 	@sleep 5
