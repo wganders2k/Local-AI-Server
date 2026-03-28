@@ -14,7 +14,7 @@ services:
     ports:
       - "11435:8080"
     volumes:
-      - ${MODELS_DIR:-./models}:/models:ro
+      - ${MODELS_DIR:-/srv/models}:/models:ro
     command: >
       --model /models/unsloth/Qwen3.5-2B-GGUF/Qwen3.5-2B-IQ4_NL.gguf
       --alias autocomplete
@@ -54,7 +54,7 @@ services:
     ports:
       - "11434:8080"
     volumes:
-      - ${MODELS_DIR:-./models}:/models:ro
+      - ${MODELS_DIR:-/srv/models}:/srv/models:ro
       - ./models.ini:/models.ini:ro
     command: >
       --models-preset /models.ini
@@ -226,14 +226,14 @@ services:
   #     - lora_outputs:/app/lora-outputs
   #     - ./models.ini:/models.ini         # Preset config for post-training re-registration
   #     - ./lora-training:/lora-training:ro  # Training scripts (read-only mount)
-  #     - ${MODELS_DIR:-./models}:/models  # Model storage for LoRA-merged GGUF output
+  #     - ${MODELS_DIR:-/srv/models}:/models  # Model storage for LoRA-merged GGUF output
 
 # ──────────────────────────────────────────────────────────
 # Named volumes
 # All persistent data lives here. Survives container restarts
 # and rebuilds. Use `make nuke` to wipe everything (destructive).
 # Note: GGUF model files are NOT in a named volume — they live
-# on the host at MODELS_DIR (default: ./models) and are bind-
+# on the host at MODELS_DIR (default: /srv/models) and are bind-
 # mounted read-only. This means `make nuke` does NOT delete
 # downloaded model weights.
 # ──────────────────────────────────────────────────────────

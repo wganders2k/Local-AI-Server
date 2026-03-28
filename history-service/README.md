@@ -413,7 +413,7 @@ history-service:
   volumes:
     - history_data:/app/data
     - lora_outputs:/app/lora-outputs
-    - ./models.ini:/models.ini         # Preset config updated after training
+    - /models.ini:/models.ini         # Preset config updated after training
     - ./lora-training:/lora-training:ro  # Training scripts (read-only mount)
 ```
 

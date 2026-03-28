@@ -74,7 +74,7 @@ help:
 	@echo ""
 	@echo "  ── Destructive ────────────────────────────────────────"
 	@echo "  nuke                ⚠️  Stop everything AND remove all volumes"
-	@echo "                        Note: GGUF model files in ./models are NOT deleted."
+	@echo "                        Note: GGUF model files in /srv/models are NOT deleted."
 	@echo ""
 
 # ── Lifecycle ──────────────────────────────────────────────
@@ -206,7 +206,7 @@ shell-rag:
 ## Options:
 ##   SLOT=permanent|swappable|all   Download only models for a specific slot (default: all)
 ##   DRY_RUN=1                      Print what would be downloaded without downloading
-##   MODELS_DIR=/path/to/models     Override model storage directory (default: ./models)
+##   MODELS_DIR=/path/to/models     Override model storage directory (default: /srv/models)
 ##
 ## Set HF_TOKEN environment variable for private or gated HuggingFace repos.
 ##
@@ -237,13 +237,13 @@ models-download:
 
 ## ⚠️  DESTRUCTIVE: Stop everything and remove ALL named volumes.
 ## This wipes LibreChat history, ChromaDB data, and training state.
-## GGUF model files in ./models are NOT deleted — they are bind-mounted,
+## GGUF model files in /srv/models are NOT deleted — they are bind-mounted,
 ## not stored in named volumes. Re-run `make models-download` is NOT needed.
 ## You will need to re-ingest lore data afterwards.
 nuke:
 	@echo "⚠️  WARNING: This will delete ALL named volumes including"
 	@echo "   LibreChat conversation history and ChromaDB lore data."
-	@echo "   GGUF model files in ./models are preserved."
+	@echo "   GGUF model files in /srv/models are preserved."
 	@echo "   Press Ctrl+C within 5 seconds to cancel..."
 	@sleep 5
 	docker compose down -v

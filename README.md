@@ -75,7 +75,7 @@ cp .env.example .env
 make models-download
 ```
 
-This downloads all GGUF files from HuggingFace into `./models/<publisher>/<model>/`. Large models (Brain ~17.8 GB, LibreChat ~9.5 GB) will take time on first download. Already-downloaded files are skipped on subsequent runs.
+This downloads all GGUF files from HuggingFace into `/srv/models/<publisher>/<model>/`. Large models (Brain ~17.8 GB, LibreChat ~9.5 GB) will take time on first download. Already-downloaded files are skipped on subsequent runs.
 
 ### 3. Start all services
 
@@ -114,7 +114,7 @@ make status
 | `make restart-bot` | Restart Discord bot only |
 | `make restart-llama-swappable` | Restart swappable slot (picks up models.ini changes) |
 | `make shell-bot` | Open shell inside Discord bot container |
-| `make nuke` | ⚠️ Wipe all volumes (model files in ./models are preserved) |
+| `make nuke` | ⚠️ Wipe all volumes (model files in /srv/models are preserved) |
 
 Run `make help` for the full list.
 
@@ -125,7 +125,7 @@ Model configuration lives in two places:
 - **`models.ini`** — defines all swappable slot models (brain, mimic personas, lore, librechat, image-caption). Each `[section]` is a named model with its GGUF path, inference parameters, and alias.
 - **`docker-compose.yml`** — defines the permanent slot model (autocomplete) via the `--model` flag on the `llama-permanent` service.
 
-GGUF files are stored on the host at `./models/<publisher>/<model>/filename.gguf` and bind-mounted read-only into both llama-server containers.
+GGUF files are stored on the host at `/srv/models/<publisher>/<model>/filename.gguf` and bind-mounted read-only into both llama-server containers.
 
 ### First-time setup (after `make up`)
 
