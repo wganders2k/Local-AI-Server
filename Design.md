@@ -14,7 +14,7 @@
 - **Two distinct model personalities.** Mimic personas use an abliterated base with no content refusals. The lore assistant uses a sterile, instruction-following base. Neither bleeds into the other.
 - **Swap-friendly by design.** The smaller the Discord model footprint, the faster the swap. Qwen3.5-9B at Q6_K (~7.4 GB) is significantly better than NeMo 12B (~10.5 GB) here.
 - **Prototype-first.** Phase 1 uses system prompt personas with no LoRA. LoRA-merged models slot in during Phase 2 with zero orchestration changes.
-- **LibreChat is a first-class consumer.** LibreChat routes through the same orchestration proxy as Discord and VS Code. When using a local model, it competes for the swappable slot under the same lock. When using Claude via API key, it bypasses the proxy entirely — zero VRAM impact.
+- **Open WebUI is a first-class consumer.** Open WebUI routes through the same orchestration proxy as Discord and VS Code. When using a local model, it competes for the swappable slot under the same lock. When using Claude via API key, it bypasses the proxy entirely — zero VRAM impact.
 
 ---
 
@@ -29,7 +29,7 @@
 | Swappable (:11434) | Mimic personas (×6) | `Qwen3.5-35B-A3B-Uncensored` | IQ4_XS | ~18 GB |
 | Swappable (:11434) | Image captioner | `Qwen3.5-35B-A3B-Uncensored` | IQ4_XS | ~18 GB (shared weights with mimic) |
 | Swappable (:11434) | Lore assistant | `gemma3:12b` | Q6_K | ~9.5 GB |
-| Swappable (:11434) | LibreChat local model | `qwen3.5:35b-a3b` | UD-IQ4_NL | ~17.8 GB (shared GGUF with brain) |
+| Swappable (:11434) | Open WebUI local model | `qwen3.5:35b-a3b` | UD-IQ4_NL | ~17.8 GB (shared GGUF with brain) |
 
 **VRAM utilisation by mode:**
 
@@ -39,10 +39,10 @@
 | Mimic active (+ Autocomplete) | ~8.9 GB | ~15.4 GB |
 | Lore active (+ Autocomplete) | ~11.0 GB | ~13.3 GB |
 | Coding KV cache at 32k ctx (brain ctx-size=32768) | ~20.9 GB | ~3.4 GB |
-| LibreChat local (+ Autocomplete) | ~19.3 GB | ~5.0 GB |
-| LibreChat via Claude API | ~1.5 GB (autocomplete only) | ~22.8 GB |
+| Open WebUI local (+ Autocomplete) | ~19.3 GB | ~5.0 GB |
+| Open WebUI via Claude API | ~1.5 GB (autocomplete only) | ~22.8 GB |
 
-> **KV Cache:** q8_0 for all models (`--cache-type-k q8_0`). Brain: `--parallel 1`, context 32k–40k. Mimic: `--parallel 1` (router mode; concurrency managed by proxy lock). Lore: `--parallel 1`, context 16k. LibreChat local: `--parallel 1`, context 16k.
+> **KV Cache:** q8_0 for all models (`--cache-type-k q8_0`). Brain: `--parallel 1`, context 32k–40k. Mimic: `--parallel 1` (router mode; concurrency managed by proxy lock). Lore: `--parallel 1`, context 16k. Open WebUI local: `--parallel 1`, context 16k.
 
 ---
 
@@ -70,36 +70,36 @@ Gemma 3 12B fits comfortably at Q6_K on the 3090 — ~9.5 GB with 13+ GB headroo
 
 ---
 
-## 3a. LibreChat Model Selection
+## 3a. Open WebUI Model Selection
 
 ### 3a.1 Use Case
 
-LibreChat is a general-purpose personal chat interface — think of it as a self-hosted ChatGPT replacement. It supports multi-turn conversation, system prompts, and multiple model backends. The two viable backends for this setup are:
+Open WebUI is a general-purpose personal chat interface — think of it as a self-hosted ChatGPT replacement. It supports multi-turn conversation, system prompts, and multiple model backends. The two viable backends for this setup are:
 
 1. **Claude via Anthropic API key** — zero local VRAM cost, best quality, requires internet + paid API usage.
 2. **Local llama-server model via proxy** — fully offline, competes for the swappable slot, free after hardware cost.
 
-### 3a.2 Local Model: `qwen3.5:35b-a3b` at UD-IQ4_NL (~17.8 GB) — shared GGUF with Brain
+### 3a.2 Local Model: `chat` at UD-IQ4_NL (~17.8 GB) — shared GGUF with Brain
 
-The LibreChat local model uses the **same GGUF as the Brain coding assistant** (`unsloth/Qwen3.5-35B-A3B-GGUF`, `Qwen3.5-35B-A3B-UD-IQ4_NL.gguf`) — no additional download required. The `[librechat_chat]` preset in `models.ini` points to the same file with different inference parameters tuned for casual conversation rather than precise code generation.
+The Open WebUI local model uses the **same GGUF as the Brain coding assistant** (`unsloth/Qwen3.5-35B-A3B-GGUF`, `Qwen3.5-35B-A3B-UD-IQ4_NL.gguf`) — no additional download required. The `[chat]` preset in `models.ini` points to the same file with different inference parameters tuned for casual conversation rather than precise code generation.
 
-**Why the same model as Brain:** The 35B-A3B MoE architecture delivers strong conversational quality at a VRAM footprint comparable to a dense 9B model. Since the GGUF is already on disk for Brain, there is zero additional storage cost. The only difference between Brain and LibreChat chat is the system prompt and sampling parameters — Brain uses tight, deterministic settings (`temperature 0.2`, `top_k 10`) while LibreChat uses warmer, more natural settings (`temperature 0.75`, `top_k 40`, `repeat_penalty 1.1`).
-
-**System prompt:** LibreChat chat uses a casual, conversational system prompt — friendly and concise, not a coding assistant. The system prompt is baked into `modelfiles/librechat_chat.Modelfile` (for reference) and injected per-request by LibreChat.
+**Why the same model as Brain:** The 35B-A3B MoE architecture delivers strong conversational quality at a VRAM footprint comparable to a dense 9B model. Since the GGUF is already on disk for Brain, there is zero additional storage cost. The only difference between Brain and Open WebUI chat is the system prompt and sampling parameters — Brain uses tight, deterministic settings (`temperature 0.2`, `top_k 10`) while Open WebUI uses warmer, more natural settings (`temperature 0.75`, `top_k 40`, `repeat_penalty 1.1`).
 
 **Thinking mode:** Disabled via `reasoning_format = none` in `models.ini`. Fast conversational responses are the goal.
 
-**VRAM:** ~17.8 GB — same as Brain. When LibreChat local is active, the VRAM profile is identical to Brain being loaded. The 16k context window (vs Brain's 40k) keeps KV cache overhead lower for typical chat sessions.
+**VRAM:** ~17.8 GB — same as Brain. When Open WebUI local is active, the VRAM profile is identical to Brain being loaded. The 16k context window (vs Brain's 40k) keeps KV cache overhead lower for typical chat sessions.
 
-**Claude via API as the preferred option when available:** If you have an Anthropic API key, routing LibreChat to Claude is the better default for general chat — it offloads all inference to Anthropic's servers, keeps the swappable slot free for Discord/coding, and provides frontier-model quality. The local model is the fallback for offline use or cost control.
+**Claude via API as the preferred option when available:** If you have an Anthropic API key, routing Open WebUI to Claude is the better default for general chat — it offloads all inference to Anthropic's servers, keeps the swappable slot free for Discord/coding, and provides frontier-model quality. The local model is the fallback for offline use or cost control.
 
-### 3a.3 LibreChat Configuration
+### 3a.3 Open WebUI Configuration
 
-LibreChat is configured via `librechat/librechat.yaml`. Two endpoints are defined:
-- **Local model:** Points to `http://proxy:11436/v1` (OpenAI-compatible), model `librechat_chat`
-- **Claude:** Points to Anthropic API using `ANTHROPIC_API_KEY`
+Open WebUI is configured entirely via environment variables in `docker-compose.yml`. Two backends are available:
+- **Local model:** `OPENAI_API_BASE_URL=http://proxy:11436/v1` (OpenAI-compatible), model alias `chat`
+- **Claude:** `ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}` — Open WebUI has built-in Anthropic support; set the key in `.env` to enable it
 
-> **Note on thinking mode:** Qwen3.5-35B-A3B supports optional thinking/reasoning mode. For LibreChat general chat, it is disabled in `models.ini` via `reasoning_format = none` — thinking adds latency and token overhead that is not useful for conversational queries.
+No config file is required. Open WebUI uses SQLite internally — no MongoDB sidecar needed.
+
+> **Note on thinking mode:** Qwen3.5-35B-A3B supports optional thinking/reasoning mode. For Open WebUI general chat, it is disabled in `models.ini` via `reasoning_format = none` — thinking adds latency and token overhead that is not useful for conversational queries.
 
 ---
 
@@ -114,7 +114,7 @@ LibreChat is configured via `librechat/librechat.yaml`. Two endpoints are define
 `llama-server` is the inference backend for all models from Phase 1. It provides:
 
 - **Router mode** (`--models-preset models.ini`) — swap-on-demand model loading. The router loads a model into VRAM on first request and evicts it when a different model is requested. No explicit load API needed.
-- **OpenAI-compatible API** — `/v1/chat/completions`, `/v1/completions`, `/v1/models`. All clients (Discord bot, LibreChat, VS Code) speak standard OpenAI format.
+- **OpenAI-compatible API** — `/v1/chat/completions`, `/v1/completions`, `/v1/models`. All clients (Discord bot, Open WebUI, VS Code) speak standard OpenAI format.
 - **Per-model preset config** — `models.ini` defines GGUF path, inference parameters, and alias for each model. Changing a model requires only editing `models.ini` and restarting the server.
 - **`reasoning_format = none`** — suppresses Qwen3.5's chain-of-thought tokens cleanly per-model in the preset.
 - **`--flash-attn` and `--cache-type-k q8_0`** — applied globally at server startup for all models.
@@ -205,7 +205,7 @@ The proxy's `_forward()` function is unchanged throughout all phases.
 │                              │   (gemma3-12b Q6_K         │      │
 │                              │    ~9.5 GB)                │      │
 │                              │   OR                       │      │
-│                              │ ← LibreChat local          │      │
+│                              │ ← Open WebUI local         │      │
 │                              │   (qwen3.5-35b-a3b UD-IQ4_NL│     │
 │                              │    ~17.8 GB, shared GGUF)  │      │
 │                              └───────────────────────────┘      │
@@ -213,8 +213,8 @@ The proxy's `_forward()` function is unchanged throughout all phases.
          ▲                    ▲                    ▲
          │                    │                    │
 ┌────────┴──────┐  ┌──────────┴──────┐  ┌─────────┴──────────┐
-│ VS Code /     │  │   LibreChat     │  │   Discord Bot      │
-│ Cursor        │  │   :3080         │  │   (discord.py)     │
+│ VS Code /     │  │   Open WebUI    │  │   Discord Bot      │
+│ Cursor        │  │   :3000         │  │   (discord.py)     │
 │ (autocomplete │  │ (local model    │  │                    │
 │  + chat)      │  │  via proxy OR   │  │                    │
 └───────────────┘  │  Claude API     │  └────────────────────┘
@@ -222,7 +222,7 @@ The proxy's `_forward()` function is unchanged throughout all phases.
                    └─────────────────┘
 ```
 
-> **LibreChat + Claude API path:** When LibreChat is configured to use Claude, requests go directly from the LibreChat container to `api.anthropic.com` — they never touch the proxy or llama-server. The proxy is only in the path when LibreChat is configured to use the local model (`librechat_chat`).
+> **Open WebUI + Claude API path:** When Open WebUI is configured to use Claude, requests go directly from the Open WebUI container to `api.anthropic.com` — they never touch the proxy or llama-server. The proxy is only in the path when Open WebUI is configured to use the local model (`chat`).
 
 ---
 
@@ -230,7 +230,7 @@ The proxy's `_forward()` function is unchanged throughout all phases.
 
 All models are defined in [`models.ini`](models.ini). The proxy references models by alias only — it doesn't know or care what GGUF is behind them. This means swapping the underlying GGUF (e.g. from prototype system-prompt persona to LoRA-merged model) requires only updating the `model` path in `models.ini` and restarting `llama-swappable` — no proxy code changes.
 
-GGUF files are downloaded to `/srv/models/<publisher>/<model>/filename.gguf` via `make models-download`. See [`modelfiles/README.md`](modelfiles/README.md) for full model management instructions.
+GGUF files are downloaded to `/srv/models/<publisher>/<model>/filename.gguf` via `make models-download`.
 
 ### 5.1 Mimic Persona Configuration
 
@@ -250,9 +250,9 @@ Defined as `[lore]` in `models.ini`. System prompt injected per-request by the D
 
 Defined as `[brain]` in `models.ini`. Used by VS Code / Cursor chat via the proxy.
 
-### 5.4 LibreChat Local Chat
+### 5.4 Open WebUI Local Chat
 
-Defined as `[librechat_chat]` in `models.ini`. Used by LibreChat when the local model backend is selected.
+Defined as `[chat]` in `models.ini`. Used by Open WebUI when the local model backend is selected.
 
 ### 5.5 Image Caption
 
@@ -275,7 +275,7 @@ SWAPPABLE_MODELS = {
     "mimic_user1", "mimic_user2", "mimic_user3",
     "mimic_user4", "mimic_user5", "mimic_user6",
     "lore",
-    "librechat_chat",
+    "chat",
     "image-caption",
 }
 
@@ -289,10 +289,10 @@ async def route_request(model: str, payload: dict):
         return await forward(":11434", payload)
 ```
 
-**Swap cost:** llama-server's router evicts the current model and loads the new one on first request. Mimic swaps (Qwen3.5-35B-A3B IQ4_XS, ~18 GB from NVMe) take approximately **5–8 seconds** cold load. Lore swaps (~9.5 GB) take approximately **4–6 seconds**. LibreChat local model swaps (~17.8 GB, same GGUF as Brain) take approximately **5–8 seconds** — or near-zero if Brain was the last loaded model (same file, no eviction needed). The typing indicator in the Discord bot masks Discord latency; LibreChat shows a streaming cursor which masks its swap latency.
+**Swap cost:** llama-server's router evicts the current model and loads the new one on first request. Mimic swaps (Qwen3.5-35B-A3B IQ4_XS, ~18 GB from NVMe) take approximately **5–8 seconds** cold load. Lore swaps (~9.5 GB) take approximately **4–6 seconds**. Open WebUI local model swaps (~17.8 GB, same GGUF as Brain) take approximately **5–8 seconds** — or near-zero if Brain was the last loaded model (same file, no eviction needed). The typing indicator in the Discord bot masks Discord latency; Open WebUI shows a streaming cursor which masks its swap latency.
 
-**Contention between LibreChat and Discord/VS Code:**
-LibreChat requests queue behind any in-progress Discord or Brain generation under the same lock. Since LibreChat is personal/interactive use, the user is already expecting a short wait. If LibreChat is actively in a long conversation while a Discord request arrives, the Discord request queues — the same behaviour as Brain contention. This is acceptable for single-user personal use.
+**Contention between Open WebUI and Discord/VS Code:**
+Open WebUI requests queue behind any in-progress Discord or Brain generation under the same lock. Since Open WebUI is personal/interactive use, the user is already expecting a short wait. If Open WebUI is actively in a long conversation while a Discord request arrives, the Discord request queues — the same behaviour as Brain contention. This is acceptable for single-user personal use.
 
 ---
 
@@ -306,8 +306,7 @@ LibreChat requests queue behind any in-progress Discord or Brain generation unde
 > | `llama-swappable` | `ghcr.io/ggerganov/llama.cpp:server-cuda` | `:11434` | All other models, router mode via `--models-preset /models.ini` |
 > | `proxy` | `./proxy` | `:11436` | FastAPI orchestration proxy |
 > | `discord-bot` | `./discord-bot` | — | Depends on proxy + chromadb |
-> | `librechat` | `ghcr.io/danny-avila/librechat:latest` | `:3080` | Mounts `librechat/librechat.yaml` |
-> | `librechat-mongodb` | `mongo:7` | — | Conversation history + settings |
+> | `open-webui` | `ghcr.io/open-webui/open-webui:main` | `:3000` | No sidecar needed — SQLite built-in |
 > | `rag-service` | `./rag` | — | Depends on chromadb |
 > | `chromadb` | `chromadb/chroma:latest` | — | Vector store |
 > | `history-service` | `./history-service` | — | Background; set `TRAINING_TRIGGER_ENABLED=true` in Phase 3 |
@@ -316,7 +315,7 @@ LibreChat requests queue behind any in-progress Discord or Brain generation unde
 
 > **Model files:** GGUF files are stored on the host at `MODELS_DIR` (default: `/srv/models`) and bind-mounted read-only into both llama-server containers. They are **not** stored in named Docker volumes — `make nuke` does not delete downloaded model weights.
 
-> **LibreChat configuration (`librechat.yaml`):** Defines two endpoints: one pointing to `http://proxy:11436/v1` (OpenAI-compatible) with model `librechat_chat`, and one pointing to the Anthropic API with your preferred Claude model. LibreChat's UI lets you switch between them per-conversation.
+> **Open WebUI configuration:** Configured entirely via environment variables in `docker-compose.yml`. Two backends: local model via `OPENAI_API_BASE_URL=http://proxy:11436/v1` (model alias `chat`), and Claude via `ANTHROPIC_API_KEY`. No config file or MongoDB sidecar required — Open WebUI uses SQLite internally. All data persists in the `open_webui_data` named volume.
 
 ---
 
@@ -367,20 +366,20 @@ Developer: [asks Brain a question in VS Code chat]
            [releases lock — Brain stays loaded until Discord request evicts it]
 ```
 
-### 8.4 LibreChat Local Chat Request
+### 8.4 Open WebUI Local Chat Request
 ```
-User: [sends message in LibreChat with local model selected]
-      [LibreChat sends OpenAI-format request to proxy :11436 with model: librechat_chat]
+User: [sends message in Open WebUI with local model selected]
+      [Open WebUI sends OpenAI-format request to proxy :11436 with model: chat]
       [acquires proxy lock]
-      [llama-server router loads librechat_chat if not current: ~6s]
-      [streaming inference begins — LibreChat streams tokens to browser]
+      [llama-server router loads chat if not current: ~6s]
+      [streaming inference begins — Open WebUI streams tokens to browser]
       [releases lock after full response]
 
-Note: If Claude API backend is selected in LibreChat, this entire flow is bypassed.
+Note: If Claude API backend is selected in Open WebUI, this entire flow is bypassed.
       The request goes directly to api.anthropic.com — proxy and llama-server are not involved.
 ```
 
-> **Contention note:** If a Discord request arrives while Brain is active, it queues behind the Brain's current generation. Brain is never evicted mid-response. Discord users see a typing indicator and wait. This is acceptable for a hobby bot — if concurrent throughput becomes a real need, a second GPU eliminates the problem entirely. LibreChat contention follows the same rules: an in-progress LibreChat generation will not be interrupted by a Discord request.
+> **Contention note:** If a Discord request arrives while Brain is active, it queues behind the Brain's current generation. Brain is never evicted mid-response. Discord users see a typing indicator and wait. This is acceptable for a hobby bot — if concurrent throughput becomes a real need, a second GPU eliminates the problem entirely. Open WebUI contention follows the same rules: an in-progress Open WebUI generation will not be interrupted by a Discord request.
 
 ---
 
@@ -573,7 +572,7 @@ The following software components are built and evolved across the four phases:
 | **Orchestration Middleware** | FastAPI proxy on `:11436` — swap tracking, async lock, request queue, source tagging |
 | **models.ini** | llama-server preset config — model aliases, GGUF paths, inference parameters |
 | **Discord Bot** | `discord.py` bot — mention routing, typing indicators, lore+mimic chain dispatch |
-| **LibreChat** | Self-hosted chat UI container + MongoDB sidecar — local model and Claude API backends |
+| **Open WebUI** | Self-hosted chat UI container — local model and Claude API backends, SQLite built-in |
 | **Discord Data Preprocessor** | Export parser + chunker that feeds raw Discord history into ChromaDB |
 | **RAG Service** | ChromaDB + `all-MiniLM-L6-v2` embedding pipeline — CPU-only, no VRAM impact |
 | **History Service** | Background service — per-user JSONL message history collection (Discord API) + LoRA retraining trigger |
@@ -591,7 +590,7 @@ llama-server Instances       │ ████████│           │      
 Orchestration Middleware     │ ████████│           │               │           │
 models.ini                   │ ████████│           │ ░░░ LoRA paths│           │
 Discord Bot                  │ ████████│           │               │ ░░░ harden│
-LibreChat + MongoDB          │ ████████│           │               │ ░░░ auth  │
+Open WebUI                   │ ████████│           │               │ ░░░ auth  │
 Discord Data Preprocessor    │         │ ██████████│               │           │
 RAG Service (ChromaDB)       │         │ ██████████│               │           │
 History Service              │         │ ██████████│ ░░░ train trig│           │
@@ -613,9 +612,9 @@ LoRA Training Pipeline       │         │           │ ███████
 |---|---|---|
 | llama-server Instances | 🔨 Build | Stand up both permanent and swappable containers via Docker Compose |
 | Orchestration Middleware | 🔨 Build | FastAPI proxy with swap tracking, async lock, and source tagging |
-| models.ini | 🔨 Build | Define all model presets: brain, mimic_*, lore, librechat_chat, image-caption |
+| models.ini | 🔨 Build | Define all model presets: brain, mimic_*, lore, chat, image-caption |
 | Discord Bot | 🔨 Build | Mention routing, typing indicators, basic mimic + lore dispatch |
-| LibreChat + MongoDB | 🔨 Build | Container + sidecar, both Claude API and local model endpoints configured |
+| Open WebUI | 🔨 Build | Container, both Claude API and local model endpoints configured |
 | Discord Data Preprocessor | ⏳ Not started | Needed in Phase 2 |
 | RAG Service | ⏳ Not started | Needed in Phase 2 |
 | LoRA Training Pipeline | ⏳ Not started | Needed in Phase 3 |
@@ -630,9 +629,9 @@ LoRA Training Pipeline       │         │           │ ███████
 - [ ] Wire Discord bot with mention routing and typing indicators
 - [ ] Test basic swap cycle: mimic → lore → mimic
 - [ ] Validate VRAM budget under real swap load
-- [ ] Stand up LibreChat container + MongoDB sidecar
-- [ ] Configure LibreChat with both Claude API endpoint and local model endpoint
-- [ ] Test LibreChat swap contention with a concurrent Discord request
+- [ ] Stand up Open WebUI container
+- [ ] Configure Open WebUI with both Claude API endpoint and local model endpoint
+- [ ] Test Open WebUI swap contention with a concurrent Discord request
 
 ---
 
@@ -646,7 +645,7 @@ LoRA Training Pipeline       │         │           │ ███████
 | Orchestration Middleware | ✅ Stable | No changes — proxy handles lore requests identically |
 | models.ini | ✅ Stable | No changes |
 | Discord Bot | ✅ Stable | Lore+mimic chain dispatch already wired in Phase 1; RAG context injection is the only addition |
-| LibreChat + MongoDB | ✅ Stable | No changes |
+| Open WebUI | ✅ Stable | No changes |
 | Discord Data Preprocessor | 🔨 Build | Parse Discord history export, chunk by conversation thread, embed and load into ChromaDB |
 | RAG Service (ChromaDB) | 🔨 Build | Stand up ChromaDB container, wire retrieval into lore assistant context at inference time |
 | History Service | 🔨 Build | Stand up history-service; begin incremental Discord API pulls; training trigger disabled until Phase 3 |
@@ -672,7 +671,7 @@ LoRA Training Pipeline       │         │           │ ███████
 | Orchestration Middleware | ✅ Stable | No changes — proxy is model-name-agnostic by design |
 | models.ini | ⚠️ Update | Update `model` paths for mimic personas to point to LoRA-merged GGUFs |
 | Discord Bot | ✅ Stable | No changes — bot references model aliases, not weights |
-| LibreChat + MongoDB | ✅ Stable | No changes |
+| Open WebUI | ✅ Stable | No changes |
 | Discord Data Preprocessor | ✅ Stable | Re-run ingestion as new lore accumulates (manual or cron) |
 | RAG Service (ChromaDB) | ✅ Stable | Re-embed on new significant events; no structural changes |
 | History Service | 🔄 Extend | Enable training trigger; wire to lora-training scripts; automated retraining now active |
@@ -702,7 +701,7 @@ LoRA Training Pipeline       │         │           │ ███████
 | Orchestration Middleware | 🔄 Extend | Add per-user rate limiting, queue depth cap, optional Brain priority preemption |
 | models.ini | ✅ Stable | No changes |
 | Discord Bot | 🔄 Extend | Ephemeral error messages on queue rejection; disclaimer post-processing strip |
-| LibreChat + MongoDB | 🔄 Extend | Enable built-in user authentication if exposing beyond localhost |
+| Open WebUI | 🔄 Extend | Enable user authentication if exposing beyond localhost |
 | Discord Data Preprocessor | ✅ Stable | No changes |
 | RAG Service (ChromaDB) | ✅ Stable | No changes |
 | History Service | ✅ Stable | No changes |
@@ -713,13 +712,13 @@ LoRA Training Pipeline       │         │           │ ███████
 - [ ] Queue depth cap (reject if >3 requests queued, return Discord ephemeral error)
 - [ ] Graceful Brain priority: Brain requests can optionally preempt queued Discord requests with configurable precedence
 - [ ] Disclaimer stripping in post-processing (catch the occasional baked-in lore assistant disclaimer)
-- [ ] LibreChat authentication (enable LibreChat's built-in user auth if exposing beyond localhost)
+- [ ] Open WebUI authentication (enable Open WebUI's built-in user auth if exposing beyond localhost)
 
 ---
 
 ## 11. Key Configuration Parameters
 
-| Parameter | Mimic (Qwen3.5-35B-A3B) | Lore (Gemma3-12B) | Brain (Qwen3.5-35B) | LibreChat (Qwen3.5-35B-A3B) |
+| Parameter | Mimic (Qwen3.5-35B-A3B) | Lore (Gemma3-12B) | Brain (Qwen3.5-35B) | Chat (Qwen3.5-35B-A3B) |
 |---|---|---|---|---|
 | temperature | 0.85 | 0.3 | 0.2 | 0.75 |
 | top_k | 40 | 20 | 10 | 40 |
@@ -730,7 +729,7 @@ LoRA Training Pipeline       │         │           │ ███████
 | reasoning_format | none | — | none | none |
 | parallel | 1 | 1 | 1 | 1 |
 
-> All parameters are set in `models.ini`. The `reasoning_format = none` field suppresses Qwen3.5's chain-of-thought tokens. Gemma3 does not have a thinking mode. LibreChat uses the same GGUF as Brain (`Qwen3.5-35B-A3B-UD-IQ4_NL`) with warmer sampling parameters for casual conversation.
+> All parameters are set in `models.ini`. The `reasoning_format = none` field suppresses Qwen3.5's chain-of-thought tokens. Gemma3 does not have a thinking mode. Open WebUI uses the same GGUF as Brain (`Qwen3.5-35B-A3B-UD-IQ4_NL`) with warmer sampling parameters for casual conversation.
 
 > **System prompts:** All system prompts are injected per-request by the Discord bot (see `DiscordBot-Design.md` §7). They are not baked into `models.ini` — this allows per-persona customisation without restarting the server.
 
@@ -749,7 +748,7 @@ LoRA Training Pipeline       │         │           │ ███████
 | llama.cpp regression in future update | Low | Pin llama.cpp image tag in Docker Compose; test updates in staging first |
 | ChromaDB retrieves wrong lore (hallucinated context) | Medium | Lore assistant system prompt: "say I don't know if context is insufficient"; `top_k` tuning |
 | Swap latency annoys Discord users | Medium | Typing indicator; warm-up keep_alive (swap on first mention, keep alive 10 min) |
-| LibreChat local model contends with Discord during active chat session | Medium | Switch LibreChat to Claude API backend during heavy Discord usage; or accept queue wait |
+| Open WebUI local model contends with Discord during active chat session | Medium | Switch Open WebUI to Claude API backend during heavy Discord usage; or accept queue wait |
 | Anthropic API key exposed in Docker environment | Low | Use Docker secrets or `.env` file excluded from version control; never hardcode in Compose |
-| LibreChat conversation history lost on container restart | Low | MongoDB volume persists data; ensure `librechat_mongo` volume is backed up |
+| Open WebUI conversation history lost on container restart | Low | SQLite DB persists in `open_webui_data` volume; ensure volume is backed up |
 | HuggingFace repo unavailable during model download | Low | GGUFs are cached locally after first download; `make models-download` is idempotent |

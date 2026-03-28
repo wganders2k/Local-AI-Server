@@ -133,40 +133,30 @@ services:
   #     - LORE_TOP_K=${LORE_TOP_K:-5}
 
   # ──────────────────────────────────────────────────────────
-  # LibreChat (:3080)
+  # Open WebUI (:3000)
   # Self-hosted chat UI. Supports local model via proxy
   # and Claude via Anthropic API key (set ANTHROPIC_API_KEY).
+  # No sidecar needed — uses built-in SQLite database.
+  # First user to register becomes admin.
   # ──────────────────────────────────────────────────────────
-  # librechat:
-  #   image: ghcr.io/danny-avila/librechat:latest
+  # open-webui:
+  #   image: ghcr.io/open-webui/open-webui:main
   #   restart: unless-stopped
   #   ports:
-  #     - "3080:3080"
+  #     - "3000:8080"
   #   depends_on:
   #     proxy:
   #       condition: service_healthy
-  #     librechat-mongodb:
-  #       condition: service_started
   #   volumes:
-  #     - ./librechat/librechat.yaml:/app/librechat.yaml:ro
-  #     - librechat_uploads:/app/client/public/images
+  #     - open_webui_data:/app/backend/data
   #   environment:
-  #     - MONGO_URI=mongodb://librechat-mongodb:27017/LibreChat
+  #     # Local model endpoint via proxy (OpenAI-compatible)
+  #     - OPENAI_API_BASE_URL=http://proxy:11436/v1
+  #     - OPENAI_API_KEY=local
   #     # Anthropic API key — leave blank to disable Claude backend
   #     - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-  #     # Local model endpoint via proxy (OpenAI-compatible)
-  #     - OPENAI_BASE_URL=http://proxy:11436/v1
-  #     - OPENAI_API_KEY=local
-
-  # ──────────────────────────────────────────────────────────
-  # LibreChat — MongoDB sidecar
-  # Persists conversation history, user accounts, settings.
-  # ──────────────────────────────────────────────────────────
-  # librechat-mongodb:
-  #   image: mongo:7
-  #   restart: unless-stopped
-  #   volumes:
-  #     - librechat_mongo:/data/db
+  #     # Disable Open WebUI's built-in Ollama integration (not used)
+  #     - OLLAMA_BASE_URL=
 
   # ──────────────────────────────────────────────────────────
   # RAG Service
@@ -238,8 +228,7 @@ services:
 # downloaded model weights.
 # ──────────────────────────────────────────────────────────
 volumes:
-  librechat_uploads:      # LibreChat uploaded files
-  librechat_mongo:        # LibreChat conversation history + settings
+  open_webui_data:        # Open WebUI database, settings, and uploads
   chroma_data:            # ChromaDB lore embeddings
   history_data:           # Per-user JSONL message history + training state
   lora_outputs:           # Merged GGUF outputs from LoRA training
