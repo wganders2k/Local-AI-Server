@@ -3,7 +3,7 @@
 download_models.py — Download all GGUF model files for the Local AI Server stack.
 
 Downloads models from HuggingFace Hub into:
-  /models/<publisher>/<repo>/filename.gguf
+  /srv/models/<publisher>/<repo>/filename.gguf
 
 Usage:
   python scripts/download_models.py [--models-dir /path/to/models] [--dry-run]
@@ -13,7 +13,7 @@ Requirements:
 
 Environment variables:
   HF_TOKEN       — HuggingFace token (required for gated/private repos)
-  MODELS_DIR     — Override default model storage directory (default: ./models)
+  MODELS_DIR     — Override default model storage directory (default: /srv/models)
 """
 
 import argparse
@@ -147,8 +147,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--models-dir",
-        default=os.environ.get("MODELS_DIR", "./models"),
-        help="Root directory for model storage (default: ./models or $MODELS_DIR)",
+        default=os.environ.get("MODELS_DIR", "/srv/models"),
+        help="Root directory for model storage (default: /srv/models or $MODELS_DIR)",
     )
     parser.add_argument(
         "--dry-run",

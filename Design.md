@@ -153,7 +153,7 @@ The permanent instance holds exactly one model forever. The swappable instance u
 
 ### Model Files
 
-GGUF files live on the host at `./models/<publisher>/<model>/filename.gguf` and are bind-mounted read-only into both containers. Download all GGUFs with:
+GGUF files live on the host at `/srv/models/<publisher>/<model>/filename.gguf` and are bind-mounted read-only into both containers. Download all GGUFs with:
 
 ```bash
 make models-download
@@ -230,7 +230,7 @@ The proxy's `_forward()` function is unchanged throughout all phases.
 
 All models are defined in [`models.ini`](models.ini). The proxy references models by alias only — it doesn't know or care what GGUF is behind them. This means swapping the underlying GGUF (e.g. from prototype system-prompt persona to LoRA-merged model) requires only updating the `model` path in `models.ini` and restarting `llama-swappable` — no proxy code changes.
 
-GGUF files are downloaded to `./models/<publisher>/<model>/filename.gguf` via `make models-download`. See [`modelfiles/README.md`](modelfiles/README.md) for full model management instructions.
+GGUF files are downloaded to `/srv/models/<publisher>/<model>/filename.gguf` via `make models-download`. See [`modelfiles/README.md`](modelfiles/README.md) for full model management instructions.
 
 ### 5.1 Mimic Persona Configuration
 
@@ -314,7 +314,7 @@ LibreChat requests queue behind any in-progress Discord or Brain generation unde
 
 > **Why two separate llama-server instances share the same `NVIDIA_VISIBLE_DEVICES=0`?** llama-server manages its own VRAM allocation. Both instances can reference the same GPU — the proxy enforces that only one swappable model is loaded at a time. The permanent instance holds exactly one model forever. VRAM safety is maintained by careful `n_ctx` configuration in `models.ini` rather than a hard cap env var.
 
-> **Model files:** GGUF files are stored on the host at `MODELS_DIR` (default: `./models`) and bind-mounted read-only into both llama-server containers. They are **not** stored in named Docker volumes — `make nuke` does not delete downloaded model weights.
+> **Model files:** GGUF files are stored on the host at `MODELS_DIR` (default: `/srv/models`) and bind-mounted read-only into both llama-server containers. They are **not** stored in named Docker volumes — `make nuke` does not delete downloaded model weights.
 
 > **LibreChat configuration (`librechat.yaml`):** Defines two endpoints: one pointing to `http://proxy:11436/v1` (OpenAI-compatible) with model `librechat_chat`, and one pointing to the Anthropic API with your preferred Claude model. LibreChat's UI lets you switch between them per-conversation.
 

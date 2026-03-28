@@ -34,7 +34,7 @@ The `alias` field is the model name used in API requests (`"model": "brain"`). T
 
 GGUF files live on the host at:
 ```
-./models/<publisher>/<model-name>/filename.gguf
+/srv/models/<publisher>/<model-name>/filename.gguf
 ```
 
 Download all required GGUFs with:
