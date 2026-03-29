@@ -151,58 +151,59 @@ async def _forward(
     target_base_url: str,
     request: Request,
     model: str | None = None,
+    lock: asyncio.Lock | None = None,  # Accept the lock
 ) -> Response:
     """
-    Forward the incoming request to `target_base_url`, preserving method,
-    headers, and body. Streams the response back to the caller.
-
-    Strips the Host header — httpx sets it correctly for the target.
-    The proxy is a transparent forwarder: it does not inspect or modify
-    request/response content. Both sides speak OpenAI-compatible API.
-
-    Logs:
-    - Request: model name, endpoint path
-    - Response: first ~120 bytes of generated content, total elapsed time
+    Forward the incoming request to target_base_url and stream the response.
+    Safely releases the lock when the stream is completely finished or if an error occurs.
     """
-    body = await request.body()
-    headers = {
-        k: v for k, v in request.headers.items()
-        if k.lower() not in ("host", "content-length")
-    }
+    # 1. Wrap ALL setup in a try block to guarantee lock release on early disconnects
+    try:
+        body = await request.body()
+        headers = {
+            k: v for k, v in request.headers.items()
+            if k.lower() not in ("host", "content-length")
+        }
 
-    req = _http_client.build_request(
-        method=request.method,
-        url=f"{target_base_url}{request.url.path}",
-        headers=headers,
-        content=body,
-        params=request.query_params,
-    )
+        req = _http_client.build_request(
+            method=request.method,
+            url=f"{target_base_url}{request.url.path}",
+            headers=headers,
+            content=body,
+            params=request.query_params,
+        )
 
-    label = model or request.url.path
-    t_start = time.monotonic()
+        label = model or request.url.path
+        t_start = time.monotonic()
 
-    response = await _http_client.send(req, stream=True)
+        response = await _http_client.send(req, stream=True)
+        
+    except BaseException:
+        # BaseException catches asyncio.CancelledError if the client aborts early
+        if lock:
+            lock.release()
+        raise
 
     t_first_byte = time.monotonic()
-    logger.info(
-        f"[{label}] {request.method} {request.url.path} → "
-        f"HTTP {response.status_code} "
-        f"(first byte in {t_first_byte - t_start:.2f}s)"
-    )
+    logger.info(f"[{label}] HTTP {response.status_code} (first byte in {t_first_byte - t_start:.2f}s)")
 
     async def _stream_with_timing():
-        first = True
-        async for chunk in response.aiter_bytes():
-            if first and chunk:
-                preview = _sanitise_preview(chunk)
-                logger.info(f"[{label}] response preview: {preview}")
-                first = False
-            yield chunk
-        t_done = time.monotonic()
-        logger.info(
-            f"[{label}] completed in {t_done - t_start:.2f}s total "
-            f"({t_done - t_first_byte:.2f}s streaming)"
-        )
+        try:
+            first = True
+            async for chunk in response.aiter_bytes():
+                if first and chunk:
+                    preview = _sanitise_preview(chunk)
+                    logger.info(f"[{label}] response preview: {preview}")
+                    first = False
+                yield chunk
+            t_done = time.monotonic()
+            logger.info(f"[{label}] completed in {t_done - t_start:.2f}s total")
+        finally:
+            # THIS IS CRITICAL: Release the lock when the stream naturally ends
+            # or if the client disconnects mid-stream.
+            if lock:
+                lock.release()
+            await response.aclose()
 
     return StreamingResponse(
         content=_stream_with_timing(),
@@ -236,21 +237,6 @@ async def status() -> dict:
     methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
 )
 async def proxy(path: str, request: Request) -> Response:
-    """
-    Main routing handler. All llama-server API calls pass through here.
-
-    The proxy speaks OpenAI-compatible API on both the client-facing side
-    and the backend side. llama-server's router mode handles model loading
-    automatically — no explicit warm-up or swap call is needed.
-
-    Routing logic:
-      1. Parse the model name from the request body (if present).
-      2. If it's an autocomplete model → forward to permanent slot, no lock.
-      3. If it's a swappable model → acquire lock, update state, forward.
-         llama-server's router loads/evicts the model automatically.
-      4. If the model is unknown or absent → forward to swappable slot as a
-         fallback (handles management calls like /v1/models, /health).
-    """
     body_bytes = await request.body()
     model = _extract_model(body_bytes)
 
@@ -260,27 +246,34 @@ async def proxy(path: str, request: Request) -> Response:
         return await _forward(LLAMA_PERMANENT, request, model=model)
 
     # ── Swappable path: serialise via lock ───────────────────────────────────
-    # llama-server's router mode handles the actual model load/eviction.
-    # The proxy lock ensures only one request at a time reaches the swappable
-    # slot, preventing concurrent requests from triggering simultaneous swaps.
     if model in SWAPPABLE_MODELS or model is not None:
         state.increment_queue()
+        
         try:
-            async with state.lock:
-                # Decrement once we hold the lock — we're no longer waiting
-                state.decrement_queue()
-                if model in SWAPPABLE_MODELS:
-                    # Track which model is active for /status reporting.
-                    # The actual load/eviction is handled by llama-server's router.
-                    if state.current_model != model:
-                        logger.info(
-                            f"Model switch: {state.current_model} → {model} "
-                            f"(swappable slot evict + load)"
-                        )
-                        state.record_swap(model)
-                return await _forward(LLAMA_SWAPPABLE, request, model=model)
-        except Exception:
+            await state.lock.acquire()
+        except BaseException:
+            # Client disconnected while waiting their turn in the queue
+            state.decrement_queue()
             raise
+
+        # We now have the lock. 
+        state.decrement_queue()
+        
+        try:
+            if model in SWAPPABLE_MODELS:
+                if state.current_model != model:
+                    logger.info(
+                        f"Model switch: {state.current_model} → {model} "
+                        f"(swappable slot evict + load)"
+                    )
+                    state.record_swap(model)
+        except BaseException:
+            # If our internal state logic fails for any reason, don't leak the lock
+            state.lock.release()
+            raise
+
+        # 2. Hand off control to _forward, passing the lock!
+        return await _forward(LLAMA_SWAPPABLE, request, model=model, lock=state.lock)
 
     # ── Fallback: no model in body (e.g. /v1/models, /health) ────────────────
     logger.debug(f"No model in request body, forwarding to swappable: /{path}")

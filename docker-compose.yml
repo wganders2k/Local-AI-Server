@@ -58,6 +58,7 @@ services:
       - ./models.ini:/models.ini:ro
     command: >
       --models-preset /models.ini
+      --models-max 1
       --host 0.0.0.0
       --port 8080
       -fa on
@@ -139,24 +140,25 @@ services:
   # No sidecar needed — uses built-in SQLite database.
   # First user to register becomes admin.
   # ──────────────────────────────────────────────────────────
-  # open-webui:
-  #   image: ghcr.io/open-webui/open-webui:main
-  #   restart: unless-stopped
-  #   ports:
-  #     - "3000:8080"
-  #   depends_on:
-  #     proxy:
-  #       condition: service_healthy
-  #   volumes:
-  #     - open_webui_data:/app/backend/data
-  #   environment:
-  #     # Local model endpoint via proxy (OpenAI-compatible)
-  #     - OPENAI_API_BASE_URL=http://proxy:11436/v1
-  #     - OPENAI_API_KEY=local
-  #     # Anthropic API key — leave blank to disable Claude backend
-  #     - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-  #     # Disable Open WebUI's built-in Ollama integration (not used)
-  #     - OLLAMA_BASE_URL=
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    restart: unless-stopped
+    ports:
+      - "3000:8080"
+    depends_on:
+      proxy:
+        condition: service_healthy
+    volumes:
+      - open_webui_data:/app/backend/data
+    environment:
+      # Local model endpoint via proxy (OpenAI-compatible)
+      - OPENAI_API_BASE_URL=http://proxy:11436/v1
+      - OPENAI_API_KEY=local
+      # Anthropic API key — leave blank to disable Claude backend
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      # Disable Open WebUI's built-in Ollama integration (not used)
+      - OLLAMA_BASE_URL=
+      - HF_TOKEN=${HF_TOKEN:-}
 
   # ──────────────────────────────────────────────────────────
   # RAG Service
