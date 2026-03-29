@@ -4,6 +4,9 @@ import os
 LLAMA_PERMANENT = os.environ.get("LLAMA_PERMANENT", "http://localhost:11435")
 LLAMA_SWAPPABLE = os.environ.get("LLAMA_SWAPPABLE", "http://localhost:11434")
 
+# System prompts config path
+SYSTEM_PROMPTS_PATH = os.environ.get("SYSTEM_PROMPTS_PATH", "../system_prompts.ini")
+
 # Models that always route to the permanent slot — never swapped, never locked.
 # The autocomplete model is loaded at llama-server startup and stays resident.
 # Using a stable alias ("autocomplete") decouples the proxy from the underlying
@@ -29,3 +32,4 @@ SWAPPABLE_MODELS: set[str] = {
     "chat",
     "image-caption",
 }
+

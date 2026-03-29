@@ -3,19 +3,23 @@ import json
 import logging
 import time
 from contextlib import asynccontextmanager
+import sys
 
 import httpx
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import StreamingResponse
 
-from config import AUTOCOMPLETE_MODELS, LLAMA_PERMANENT, LLAMA_SWAPPABLE, SWAPPABLE_MODELS
-from state import state
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger(__name__)
+
+from config import AUTOCOMPLETE_MODELS, LLAMA_PERMANENT, LLAMA_SWAPPABLE, SWAPPABLE_MODELS
+from state import state
+from system_prompts import system_prompts
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # HTTP client — shared across all requests, reuses connections
@@ -146,6 +150,45 @@ async def _peek_and_stream(response: httpx.Response, label: str):
             first = False
         yield chunk
 
+async def _inject_system_prompt(
+    body_bytes: bytes,
+    model: str | None
+) -> bytes:
+    """
+    Inject system prompt into the request body if one exists for the model.
+    Handles both OpenAI chat format and llama-server format.
+    """
+    if not model or not system_prompts.has(model):
+        return body_bytes
+
+    try:
+        body_json = json.loads(body_bytes)
+    except (json.JSONDecodeError, AttributeError):
+        return body_bytes
+
+    # OpenAI chat format: {"messages": [{"role": "system", ...}, ...]}
+    if "messages" in body_json:
+        messages = body_json["messages"]
+        # Check if system prompt already exists
+        has_system = any(m.get("role") == "system" for m in messages)
+        if not has_system:
+            system_prompt = system_prompts.get(model)
+            if system_prompt:
+                messages.insert(0, {"role": "system", "content": system_prompt})
+                logger.info(f"Injected system prompt for model: {model}")
+        return json.dumps(body_json, ensure_ascii=False).encode("utf-8")
+
+    # llama-server format: {"prompt": "...", "system": "..."}
+    if "system" in body_json:
+        existing_system = body_json.get("system", "")
+        new_system = system_prompts.get(model)
+        if new_system:
+            # Prepend to existing system prompt
+            body_json["system"] = f"{new_system}\n{existing_system}".strip()
+            logger.info(f"Injected system prompt for model: {model}")
+        return json.dumps(body_json, ensure_ascii=False).encode("utf-8")
+
+    return body_bytes
 
 async def _forward(
     target_base_url: str,
@@ -160,6 +203,10 @@ async def _forward(
     # 1. Wrap ALL setup in a try block to guarantee lock release on early disconnects
     try:
         body = await request.body()
+        body = await _inject_system_prompt(body, model)
+        # Log the system prompt that was injected into the request body
+        if model and system_prompts.has(model):
+            logger.info(f"System prompt injected for model '{model}': {system_prompts.get(model)}")
         headers = {
             k: v for k, v in request.headers.items()
             if k.lower() not in ("host", "content-length")

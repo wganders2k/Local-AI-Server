@@ -97,10 +97,12 @@ services:
     environment:
       - LLAMA_PERMANENT=http://llama-permanent:8080
       - LLAMA_SWAPPABLE=http://llama-swappable:8080
+      - MODELS_INI_PATH=/models.ini
     volumes:
       - /usr/bin/nvidia-smi:/usr/bin/nvidia-smi:ro
       - /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.580.126.09:/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1:ro
-    devices:
+      - ./models.ini:/models.ini:ro  # Mount models.ini for proxy to read
+      - ./system_prompts.ini:/system_prompts.ini:ro
       - /dev/nvidia0:/dev/nvidia0
       - /dev/nvidiactl:/dev/nvidiactl
       - /dev/nvidia-uvm:/dev/nvidia-uvm
