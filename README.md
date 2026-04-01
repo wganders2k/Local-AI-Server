@@ -33,7 +33,7 @@ For Discord bot specifics, see [`DiscordBot-Design.md`](DiscordBot-Design.md).
 ## Repository Structure
 
 ```
-Local-AI-Server/
+local-ai-server/
 ├── Design.md               # Full system design document
 ├── DiscordBot-Design.md    # Discord bot design document
 ├── docker-compose.yml      # All services defined here
@@ -63,8 +63,8 @@ Local-AI-Server/
 ### 1. Clone and configure
 
 ```bash
-git clone https://github.com/wganders2k/Local-AI-Server.git
-cd Local-AI-Server
+git clone https://github.com/wganders2k/local-ai-server.git
+cd local-ai-server
 cp .env.example .env
 # Edit .env — set DISCORD_TOKEN and optionally ANTHROPIC_API_KEY and HF_TOKEN
 ```
