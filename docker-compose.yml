@@ -1,5 +1,4 @@
 services:
-
   # ──────────────────────────────────────────────────────────
   # llama-server — Permanent slot (:11435)
   # Hosts the autocomplete model (Qwen3.5-2B IQ4_NL) forever.
@@ -12,33 +11,29 @@ services:
     environment:
       - NVIDIA_VISIBLE_DEVICES=0
     ports:
-      - "11435:8080"
+      - 11435:8080
     volumes:
       - ${MODELS_DIR:-/srv/models}:/models:ro
     command: >
-      --model /models/unsloth/Qwen3.5-2B-GGUF/Qwen3.5-2B-IQ4_NL.gguf
-      --alias autocomplete
-      --host 0.0.0.0
-      --port 8080
-      --n-gpu-layers -1
-      --ctx-size 4096
-      --n-predict 256
-      -fa on
-      --cache-type-k q8_0
-      --parallel 4
-      --log-prefix
+      --model /models/unsloth/Qwen3.5-2B-GGUF/Qwen3.5-2B-IQ4_NL.gguf --alias
+      autocomplete --host 0.0.0.0 --port 8080 --n-gpu-layers -1 --ctx-size 4096
+      --n-predict 256 -fa on --cache-type-k q8_0 --parallel 4 --log-prefix
     deploy:
       resources:
         reservations:
           devices:
-            - capabilities: [gpu]
+            - capabilities:
+                - gpu
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      test:
+        - CMD
+        - curl
+        - -f
+        - http://localhost:8080/health
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 30s
-
   # ──────────────────────────────────────────────────────────
   # llama-server — Swappable slot (:11434)
   # Router mode: hosts all non-autocomplete models.
@@ -52,32 +47,29 @@ services:
     environment:
       - NVIDIA_VISIBLE_DEVICES=0
     ports:
-      - "11434:8080"
+      - 11434:8080
     volumes:
       - ${MODELS_DIR:-/srv/models}:/srv/models:ro
-      - ./models.ini:/models.ini:ro
+      - /home/peacow/local-ai-server/models.ini:/models.ini:ro
     command: >
-      --models-preset /models.ini
-      --models-max 1
-      --host 0.0.0.0
-      --port 8080
-      -fa on
-      --cache-type-k q8_0
-      --parallel 1
-      --log-prefix
-      --threads-batch 12
+      --models-preset /models.ini --models-max 1 --host 0.0.0.0 --port 8080 -fa
+      on --cache-type-k q8_0 --parallel 1 --log-prefix --threads-batch 12
     deploy:
       resources:
         reservations:
           devices:
-            - capabilities: [gpu]
+            - capabilities:
+                - gpu
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      test:
+        - CMD
+        - curl
+        - -f
+        - http://localhost:8080/health
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 30s
-
   # ──────────────────────────────────────────────────────────
   # FastAPI Orchestration Proxy (:11436)
   # Routes requests to the correct llama-server instance.
@@ -88,7 +80,7 @@ services:
     build: ./proxy
     restart: unless-stopped
     ports:
-      - "11436:11436"
+      - 11436:11436
     depends_on:
       llama-permanent:
         condition: service_healthy
@@ -101,18 +93,21 @@ services:
     volumes:
       - /usr/bin/nvidia-smi:/usr/bin/nvidia-smi:ro
       - /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.580.126.09:/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1:ro
-      - ./models.ini:/models.ini:ro  # Mount models.ini for proxy to read
-      - ./system_prompts.ini:/system_prompts.ini:ro
+      - /home/peacow/local-ai-server/models.ini:/models.ini:ro
+      - /home/peacow/local-ai-server/system_prompts.ini:/system_prompts.ini:ro
       - /dev/nvidia0:/dev/nvidia0
       - /dev/nvidiactl:/dev/nvidiactl
       - /dev/nvidia-uvm:/dev/nvidia-uvm
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:11436/health"]
+      test:
+        - CMD
+        - curl
+        - -f
+        - http://localhost:11436/health
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 10s
-
   # ──────────────────────────────────────────────────────────
   # Discord Bot
   # Mention routing, typing indicators, lore+mimic chain.
@@ -146,22 +141,19 @@ services:
     image: ghcr.io/open-webui/open-webui:main
     restart: unless-stopped
     ports:
-      - "3000:8080"
+      - 3000:8080
     depends_on:
       proxy:
         condition: service_healthy
     volumes:
       - open_webui_data:/app/backend/data
     environment:
-      # Local model endpoint via proxy (OpenAI-compatible)
       - OPENAI_API_BASE_URL=http://proxy:11436/v1
       - OPENAI_API_KEY=local
-      # Anthropic API key — leave blank to disable Claude backend
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-      # Disable Open WebUI's built-in Ollama integration (not used)
       - OLLAMA_BASE_URL=
       - HF_TOKEN=${HF_TOKEN:-}
-
+      - DEFAULT_USER_ROLE=pending
   # ──────────────────────────────────────────────────────────
   # RAG Service
   # Handles Discord history ingestion and lore retrieval.
@@ -222,17 +214,18 @@ services:
   #     - ./lora-training:/lora-training:ro  # Training scripts (read-only mount)
   #     - ${MODELS_DIR:-/srv/models}:/models  # Model storage for LoRA-merged GGUF output
 
-# ──────────────────────────────────────────────────────────
-# Named volumes
-# All persistent data lives here. Survives container restarts
-# and rebuilds. Use `make nuke` to wipe everything (destructive).
-# Note: GGUF model files are NOT in a named volume — they live
-# on the host at MODELS_DIR (default: /srv/models) and are bind-
-# mounted read-only. This means `make nuke` does NOT delete
-# downloaded model weights.
-# ──────────────────────────────────────────────────────────
+  # ──────────────────────────────────────────────────────────
+  # Named volumes
+  # All persistent data lives here. Survives container restarts
+  # and rebuilds. Use `make nuke` to wipe everything (destructive).
+  # Note: GGUF model files are NOT in a named volume — they live
+  # on the host at MODELS_DIR (default: /srv/models) and are bind-
+  # mounted read-only. This means `make nuke` does NOT delete
+  # downloaded model weights.
+  # ──────────────────────────────────────────────────────────
 volumes:
-  open_webui_data:        # Open WebUI database, settings, and uploads
-  chroma_data:            # ChromaDB lore embeddings
-  history_data:           # Per-user JSONL message history + training state
-  lora_outputs:           # Merged GGUF outputs from LoRA training
+  open_webui_data: null
+  chroma_data: null
+  history_data: null
+  lora_outputs: null
+networks: {}
