@@ -1,8 +1,8 @@
 # Local AI Server
 
-(Disclaimer: documentation generated with AI assistance) 
+(Disclaimer: documentation generated with AI assistance)
 
-Monorepo for a personal AI server stack running on an Ubuntu machine with an RTX 3090. Hosts a Discord bot with mimic personas and a lore assistant, a self-hosted chat UI (LibreChat), and a VS Code coding assistant — all orchestrated through a single FastAPI proxy that manages VRAM allocation across two llama-server instances.
+Monorepo for a personal AI server stack running on an Ubuntu machine with an RTX 3090. Hosts a Discord bot with mimic personas and a lore assistant, a self-hosted chat UI (Open WebUI), and a VS Code coding assistant — all orchestrated through a single FastAPI proxy that manages VRAM allocation across two llama-server instances.
 
 ## Architecture
 
@@ -19,12 +19,12 @@ Monorepo for a personal AI server stack running on an Ubuntu machine with an RTX
 │  │ :11435            │       │    (SWAPPABLE — router)    │      │
 │  │ (PERMANENT)       │       │                            │      │
 │  │ autocomplete      │       │  brain / mimic / lore /    │      │
-│  │ Qwen3.5-2B IQ4_NL│       │  librechat (one at a time) │      │
+│  │ Qwen3.5-2B IQ4_NL│       │  chat (one at a time)      │      │
 │  └──────────────────┘       └───────────────────────────┘      │
 └──────────────────────────────────────────────────────────────────┘
          ▲                    ▲                    ▲
-    VS Code /             LibreChat            Discord Bot
-    Cursor                :3080
+    VS Code /             Open WebUI           Discord Bot
+    Cursor                :3000
 ```
 
 For full architecture detail, see [`Design.md`](Design.md).  
@@ -39,6 +39,7 @@ local-ai-server/
 ├── docker-compose.yml      # All services defined here
 ├── Makefile                # Common server operations (see below)
 ├── models.ini              # llama-server model presets (swappable slot)
+├── system_prompts.ini      # Per-persona system prompts
 ├── .env.example            # Environment variable template — copy to .env
 ├── .gitignore
 │
@@ -54,7 +55,7 @@ local-ai-server/
 ├── history-service/        # Background message collection + LoRA retraining trigger
 ├── rag/                    # ChromaDB + embedding pipeline (CPU-only)
 ├── lora-training/          # Phase 3: Unsloth QLoRA fine-tuning scripts
-├── librechat/              # LibreChat config (librechat.yaml)
+├── open-webui/             # Open WebUI config
 └── modelfiles/             # Legacy Ollama Modelfiles (historical reference only)
 ```
 
@@ -75,7 +76,7 @@ cp .env.example .env
 make models-download
 ```
 
-This downloads all GGUF files from HuggingFace into `/srv/models/<publisher>/<model>/`. Large models (Brain ~17.8 GB, LibreChat ~9.5 GB) will take time on first download. Already-downloaded files are skipped on subsequent runs.
+Downloads all GGUFs from HuggingFace into `/srv/models/<publisher>/<model>/`. Large models (Brain ~17.8 GB, Mimic ~18 GB) will take time on first run. Already-downloaded files are skipped.
 
 ### 3. Start all services
 
@@ -105,7 +106,7 @@ make status
 | `make pull` | `git pull` + rebuild changed images + restart |
 | `make logs` | Tail all logs |
 | `make logs-bot` | Tail Discord bot logs |
-| `make logs-history` | Tail history-service logs (LoRA training progress) |
+| `make logs-history` | Tail history-service logs |
 | `make logs-proxy` | Tail proxy logs |
 | `make logs-llama` | Tail both llama-server logs |
 | `make status` | Show container health |
@@ -122,18 +123,10 @@ Run `make help` for the full list.
 
 Model configuration lives in two places:
 
-- **`models.ini`** — defines all swappable slot models (brain, mimic personas, lore, librechat, image-caption). Each `[section]` is a named model with its GGUF path, inference parameters, and alias.
+- **`models.ini`** — defines all swappable slot models (brain, mimic personas, lore, chat, image-caption). Each `[section]` is a named preset with its GGUF path, inference parameters, and alias.
 - **`docker-compose.yml`** — defines the permanent slot model (autocomplete) via the `--model` flag on the `llama-permanent` service.
 
 GGUF files are stored on the host at `/srv/models/<publisher>/<model>/filename.gguf` and bind-mounted read-only into both llama-server containers.
-
-### First-time setup (after `make up`)
-
-```bash
-make models-download
-```
-
-Downloads all GGUFs defined in `scripts/download_models.py`. Safe to re-run — already-downloaded files are skipped.
 
 ### Adding a mimic persona
 
@@ -146,23 +139,20 @@ No download needed — all mimic personas share the same GGUF.
 
 ### Switching to a different model or quant
 
-1. Edit the `model` path in `models.ini` (or `--model` flag in `docker-compose.yml` for permanent slot)
+1. Edit the `model` path in `models.ini` (or `--model` flag in `docker-compose.yml` for the permanent slot)
 2. Update `scripts/download_models.py` with the new `repo_id` and `filename`
 3. Run `make models-download`
 4. Restart: `make restart-llama-swappable` (or `restart-llama-permanent`)
-
-See [`modelfiles/README.md`](modelfiles/README.md) for full model management details.
 
 ## Services
 
 | Service | Port | Description |
 |---|---|---|
 | `llama-permanent` | `:11435` | Permanent autocomplete model slot |
-| `llama-swappable` | `:11434` | Swappable model slot (brain / mimic / lore / librechat) |
+| `llama-swappable` | `:11434` | Swappable model slot (brain / mimic / lore / chat) |
 | `proxy` | `:11436` | FastAPI orchestration proxy |
 | `discord-bot` | — | Discord bot (no exposed port) |
-| `librechat` | `:3080` | LibreChat web UI |
-| `librechat-mongodb` | — | MongoDB sidecar for LibreChat |
+| `open-webui` | `:3000` | Open WebUI chat interface |
 | `history-service` | — | Background message collection + LoRA retraining trigger |
 | `rag-service` | — | RAG ingestion service |
 | `chromadb` | — | ChromaDB vector store |
@@ -171,7 +161,7 @@ See [`modelfiles/README.md`](modelfiles/README.md) for full model management det
 
 | Phase | Status | Description |
 |---|---|---|
-| Phase 1 | 🔨 In progress | Core stack: llama-server + proxy + Discord bot + LibreChat |
+| Phase 1 | 🔨 In progress | Core stack: llama-server + proxy + Discord bot + Open WebUI |
 | Phase 2 | ⏳ Planned | RAG pipeline: Discord history ingestion + lore retrieval |
 | Phase 3 | ⏳ Planned | LoRA fine-tuning: per-member persona models |
 | Phase 4 | ⏳ Optional | Hardening: rate limits, auth, priority queuing |
