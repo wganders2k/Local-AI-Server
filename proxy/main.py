@@ -21,12 +21,7 @@ from state import state
 from system_prompts import system_prompts
 
 
-# ──────────────────────────────────────────────────────────────────────────────
 # HTTP client — shared across all requests, reuses connections
-# ──────────────────────────────────────────────────────────────────────────────
-# Timeout is generous: model load + prefill on a large context can take several minutes.
-# 600s covers: ~20k token prefill (~13s), long generation (n-predict=-1), and model swap (~8s).
-# The client is created at startup and closed at shutdown via lifespan.
 _http_client: httpx.AsyncClient | None = None
 
 # How many bytes of the first response chunk to log as a preview.
@@ -53,15 +48,12 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Orchestration Proxy", lifespan=lifespan)
 
 
-# ──────────────────────────────────────────────────────────────────────────────
 # VRAM monitor — runs in background, logs GPU memory usage every 30s
-# ──────────────────────────────────────────────────────────────────────────────
 
 async def _vram_monitor(interval: int = 30) -> None:
     """
     Periodically query nvidia-smi for GPU memory usage and log it alongside
-    the currently loaded swappable model. Helps correlate VRAM consumption
-    with model load/evict events.
+    the currently loaded swappable model.
     """
     while True:
         try:
@@ -91,9 +83,7 @@ async def _vram_monitor(interval: int = 30) -> None:
         await asyncio.sleep(interval)
 
 
-# ──────────────────────────────────────────────────────────────────────────────
 # Internal helpers
-# ──────────────────────────────────────────────────────────────────────────────
 
 def _extract_model(body_bytes: bytes) -> str | None:
     """
@@ -152,12 +142,18 @@ async def _peek_and_stream(response: httpx.Response, label: str):
 
 async def _inject_system_prompt(
     body_bytes: bytes,
-    model: str | None
+    model: str | None,
+    headers: dict
 ) -> bytes:
     """
     Inject system prompt into the request body if one exists for the model.
     Handles both OpenAI chat format and llama-server format.
     """
+    user_agent = headers.get("user-agent", "").lower()
+    if "continue" in user_agent or "vscode" in user_agent:
+        # Skip injection so we don't break Continue's strict formatting
+        return body_bytes
+    
     if not model or not system_prompts.has(model):
         return body_bytes
 
@@ -194,7 +190,7 @@ async def _forward(
     target_base_url: str,
     request: Request,
     model: str | None = None,
-    lock: asyncio.Lock | None = None,  # Accept the lock
+    lock: asyncio.Lock | None = None,
 ) -> Response:
     """
     Forward the incoming request to target_base_url and stream the response.
@@ -203,7 +199,8 @@ async def _forward(
     # 1. Wrap ALL setup in a try block to guarantee lock release on early disconnects
     try:
         body = await request.body()
-        body = await _inject_system_prompt(body, model)
+        headers_dict = await request.headers
+        body = await _inject_system_prompt(body, model, headers_dict)
         # Log the system prompt that was injected into the request body
         if model and system_prompts.has(model):
             logger.info(f"System prompt injected for model '{model}': {system_prompts.get(model)}")
@@ -260,9 +257,7 @@ async def _forward(
     )
 
 
-# ──────────────────────────────────────────────────────────────────────────────
 # Routes
-# ──────────────────────────────────────────────────────────────────────────────
 
 @app.get("/health")
 async def health() -> dict:
@@ -287,12 +282,12 @@ async def proxy(path: str, request: Request) -> Response:
     body_bytes = await request.body()
     model = _extract_model(body_bytes)
 
-    # ── Fast path: autocomplete models bypass the lock entirely ──────────────
+    # Fast path: autocomplete models bypass the lock entirely
     if model in AUTOCOMPLETE_MODELS:
         logger.debug(f"Fast path: {model} → permanent slot")
         return await _forward(LLAMA_PERMANENT, request, model=model)
 
-    # ── Swappable path: serialise via lock ───────────────────────────────────
+    # Swappable path: serialise via lock
     if model in SWAPPABLE_MODELS or model is not None:
         state.increment_queue()
         
@@ -322,6 +317,6 @@ async def proxy(path: str, request: Request) -> Response:
         # 2. Hand off control to _forward, passing the lock!
         return await _forward(LLAMA_SWAPPABLE, request, model=model, lock=state.lock)
 
-    # ── Fallback: no model in body (e.g. /v1/models, /health) ────────────────
+    # Fallback: no model in body (e.g. /v1/models, /health)
     logger.debug(f"No model in request body, forwarding to swappable: /{path}")
     return await _forward(LLAMA_SWAPPABLE, request)

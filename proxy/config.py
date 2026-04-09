@@ -22,6 +22,7 @@ AUTOCOMPLETE_MODELS: set[str] = {
 # model is requested. The proxy serialises access via asyncio.Lock.
 SWAPPABLE_MODELS: set[str] = {
     "brain",
+    "agent",
     "mimic_user1",
     "mimic_user2",
     "mimic_user3",
