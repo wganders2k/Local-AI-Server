@@ -8,6 +8,11 @@
 # All targets run from the repo root alongside docker-compose.yml.
 # Requires: docker, docker compose (v2), git, python3, python3-venv
 # ============================================================
+# Load environment variables from .env if it exists
+ifneq (,$(wildcard ./.env))
+    include .env
+    export
+endif
 
 .PHONY: help up down restart build pull \
         logs logs-proxy logs-bot logs-llama logs-openwebui logs-rag logs-history \

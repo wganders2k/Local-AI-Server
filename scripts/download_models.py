@@ -51,6 +51,13 @@ MODELS = [
         "slot":      "permanent",
         "notes":     "Autocomplete model — ~1.21 GB VRAM",
     },
+    {
+        "repo_id":   "ggml-org/Qwen2.5-Coder-1.5B-Q8_0-GGUF",
+        "filename":  "qwen2.5-coder-1.5b-q8_0.gguf",
+        "local_dir": "ggml-org/Qwen2.5-Coder-1.5B-Q8_0-GGUF",
+        "slot":      "permanent",
+        "notes":     "Autocomplete model — ~1.65 GB VRAM",
+    },
 
     # ── Swappable slot (:11434) ──────────────────────────────────────────────
     {
@@ -58,7 +65,14 @@ MODELS = [
         "filename":  "Qwen3.5-35B-A3B-UD-IQ4_NL.gguf",
         "local_dir": "unsloth/Qwen3.5-35B-A3B-GGUF",
         "slot":      "swappable",
-        "notes":     "Brain (coding assistant) + LibreChat chat (shared GGUF, different params) — ~17.8 GB VRAM",
+        "notes":     "Brain (coding assistant) + openwebui chat (shared GGUF, different params) — ~17.8 GB VRAM",
+    },
+    {
+        "repo_id":   "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF",
+        "filename":  "Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf",
+        "local_dir": "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF",
+        "slot":      "swappable",
+        "notes":     "Agent (coding assistant)— ~17.8 GB VRAM",
     },
     {
         "repo_id":   "HauhauCS/Qwen3.5-35B-A3B-Uncensored-HauhauCS-Aggressive",

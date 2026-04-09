@@ -19,8 +19,6 @@ services:
       autocomplete --host 0.0.0.0 --port 8080 --n-gpu-layers -1 --ctx-size 4096
       --n-predict 256 -fa on --cache-type-k q8_0 --parallel 4 --log-prefix
       --temp 0.7 --top-p 0.9 --top-k 40 --repeat-penalty 1.1
-      --system-prompt "You are an AI coding assistant. Based on the provided code context and recent edits, complete the code precisely where the user is typing. Suggest only the necessary code to complete the current function or line."
-      --stop "###" --stop "</s>"
     deploy:
       resources:
         reservations:
