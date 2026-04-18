@@ -68,6 +68,13 @@ MODELS = [
         "notes":     "Brain (coding assistant) + openwebui chat (shared GGUF, different params) — ~17.8 GB VRAM",
     },
     {
+        "repo_id":   "unsloth/Qwen3.6-35B-A3B-GGUF",
+        "filename":  "Qwen3.6-35B-A3B-UD-IQ4_NL.gguf",
+        "local_dir": "unsloth/Qwen3.6-35B-A3B-GGUF",
+        "slot":      "swappable",
+        "notes":     "Brain 2.0 (coding assistant) + openwebui chat (shared GGUF, different params) — ~17.8 GB VRAM",
+    },
+    {
         "repo_id":   "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF",
         "filename":  "Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf",
         "local_dir": "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF",
