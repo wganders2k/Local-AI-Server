@@ -5,7 +5,7 @@ services:
   # Never swapped. Loaded at startup, stays resident.
   # ──────────────────────────────────────────────────────────
   llama-permanent:
-    image: ghcr.io/ggml-org/llama.cpp:server-cuda12
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
     restart: unless-stopped
     runtime: nvidia
     environment:
@@ -42,7 +42,7 @@ services:
   # model is requested. The proxy serialises access via lock.
   # ──────────────────────────────────────────────────────────
   llama-swappable:
-    image: ghcr.io/ggml-org/llama.cpp:server-cuda12
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
     restart: unless-stopped
     runtime: nvidia
     environment:
@@ -54,7 +54,7 @@ services:
       - /home/peacow/local-ai-server/models.ini:/models.ini:ro
     command: >
       --models-preset /models.ini --models-max 1 --host 0.0.0.0 --port 8080 -fa
-      on --cache-type-k q8_0 --parallel 1 --log-prefix --threads-batch 12
+      on --parallel 1 --log-prefix --threads-batch 12
     deploy:
       resources:
         reservations:
