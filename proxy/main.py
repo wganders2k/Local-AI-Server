@@ -17,7 +17,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 from config import AUTOCOMPLETE_MODELS, LLAMA_PERMANENT, LLAMA_SWAPPABLE, SWAPPABLE_MODELS
-from state import state
+from state import state, external_jobs
 
 # HTTP client — shared across all requests, reuses connections
 _http_client: httpx.AsyncClient | None = None
@@ -232,7 +232,55 @@ async def status() -> dict:
         "current_model": state.current_model,
         "queue_depth": state.queue_depth,
         "model_loaded_seconds_ago": round(age, 1) if age is not None else None,
+        "external_job_running": external_jobs.external_job_running,
+        "active_external_jobs": external_jobs.active_job_ids,
     }
+
+
+# === External Job VRAM Coordination Endpoints ===
+
+@app.post("/external-job/register")
+async def external_job_register(body: dict) -> dict:
+    """Register an external job (batch processing, ML inference, etc.)."""
+    job_id = body.get("job_id", "")
+    if not job_id:
+        return {"error": "job_id required"}
+    return external_jobs.register(job_id)
+
+
+@app.post("/external-job/unregister")
+async def external_job_unregister(body: dict) -> dict:
+    """Unregister an external job."""
+    job_id = body.get("job_id", "")
+    if not job_id:
+        return {"error": "job_id required"}
+    return external_jobs.unregister(job_id)
+
+
+@app.get("/external-job/status")
+async def external_job_status(job_id: str = "") -> dict:
+    """Check status of an external job (including yield state)."""
+    if not job_id:
+        return {
+            "external_job_running": external_jobs.external_job_running,
+            "active_jobs": external_jobs.active_job_ids,
+        }
+    return external_jobs.get_status(job_id)
+
+
+@app.post("/external-job/yield")
+async def external_job_yield(body: dict) -> dict:
+    """Handle yield/resume actions from external jobs."""
+    job_id = body.get("job_id", "")
+    action = body.get("action", "")
+    if not job_id:
+        return {"error": "job_id required"}
+    if action == "yield":
+        return external_jobs.clear_yield(job_id)
+    elif action == "resume":
+        return external_jobs.resume(job_id)
+    else:
+        return {"error": f"Unknown action: {action}"}
 
 
 @app.api_route(
@@ -252,6 +300,24 @@ async def proxy(path: str, request: Request) -> Response:
     if model in SWAPPABLE_MODELS or model is not None:
         state.increment_queue()
         
+        # Yield to external jobs if we need to load/switch a model
+        if model in SWAPPABLE_MODELS and external_jobs.external_job_running:
+            active_jobs = external_jobs.active_job_ids
+            if active_jobs:
+                logger.info(
+                    f"LLM model '{model}' requested — {len(active_jobs)} external job(s) running, "
+                    f"requesting yield: {active_jobs}"
+                )
+                # Signal all external jobs to yield
+                for job_id in active_jobs:
+                    external_jobs.request_yield(job_id)
+                # Wait for external jobs to acknowledge yield
+                try:
+                    await asyncio.wait_for(external_jobs.wait_for_yield(), timeout=120.0)
+                    logger.info("External job(s) yielded — proceeding with model load")
+                except asyncio.TimeoutError:
+                    logger.warning("External job(s) did not yield in time — proceeding anyway")
+
         try:
             await state.lock.acquire()
         except BaseException:
