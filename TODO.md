@@ -4,3 +4,9 @@
 
 ### Discord Bot
 * Need to break ground on the discord bot side of things, currently I am paralyzed by the scope of the task. Start small with the channel message monitoring, get the bot hooked up to the proxy, worry about fine-tuning (history-service) later.
+
+### OpenWebUI Search
+* Set up SearXNG + redis or similar search provider to improve chatbot utility
+
+### Proxy + Homepage integration
+* Add job history records recording and an additional endpoint to the LLM routing proxy to return homepage compatible JSON for enhanced transparency on system utilization.
