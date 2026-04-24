@@ -61,11 +61,25 @@ MODELS = [
 
     # ── Swappable slot (:11434) ──────────────────────────────────────────────
     {
-        "repo_id":   "unsloth/Qwen3.5-35B-A3B-GGUF",
-        "filename":  "Qwen3.5-35B-A3B-UD-IQ4_NL.gguf",
-        "local_dir": "unsloth/Qwen3.5-35B-A3B-GGUF",
+        "repo_id":   "unsloth/gemma-4-26B-A4B-it-GGUF",
+        "filename":  "gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf",
+        "local_dir": "unsloth/gemma-4-26B-A4B-it-GGUF",
         "slot":      "swappable",
-        "notes":     "Brain (coding assistant) + openwebui chat (shared GGUF, different params) — ~17.8 GB VRAM",
+        "notes":     "openwebui chat — ~17.6 GB VRAM",
+    },
+    # {
+    #     "repo_id":   "unsloth/Qwen3.5-35B-A3B-GGUF",
+    #     "filename":  "Qwen3.5-35B-A3B-UD-IQ4_NL.gguf",
+    #     "local_dir": "unsloth/Qwen3.5-35B-A3B-GGUF",
+    #     "slot":      "swappable",
+    #     "notes":     "legacy — ~17.8 GB VRAM",
+    # },
+    {
+        "repo_id":   "unsloth/Qwen3.6-27B-GGUF",
+        "filename":  "Qwen3.6-27B-Q4_K_M.gguf",
+        "local_dir": "unsloth/Qwen3.6-27B-GGUF",
+        "slot":      "swappable",
+        "notes":     "Brain (coding assistant) — ~16.8 GB VRAM",
     },
     {
         "repo_id":   "unsloth/Qwen3.6-35B-A3B-GGUF",
@@ -88,13 +102,13 @@ MODELS = [
         "slot":      "swappable",
         "notes":     "Mimic personas + image captioning — ~18 GB VRAM (shared GGUF)",
     },
-    {
-        "repo_id":   "unsloth/gemma-3-12b-it-GGUF",
-        "filename":  "gemma-3-12b-it-UD-Q8_K_XL.gguf",
-        "local_dir": "unsloth/gemma-3-12b-it-GGUF",
-        "slot":      "swappable",
-        "notes":     "Lore assistant — ~14.4 GB VRAM",
-    },
+    # {
+    #     "repo_id":   "unsloth/gemma-3-12b-it-GGUF",
+    #     "filename":  "gemma-3-12b-it-UD-Q8_K_XL.gguf",
+    #     "local_dir": "unsloth/gemma-3-12b-it-GGUF",
+    #     "slot":      "swappable",
+    #     "notes":     "Lore assistant — ~14.4 GB VRAM",
+    # },
 ]
 
 
