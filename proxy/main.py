@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 from config import AUTOCOMPLETE_MODELS, LLAMA_PERMANENT, LLAMA_SWAPPABLE, SWAPPABLE_MODELS
 from state import state, external_jobs
+from job_history import job_history
 
 # HTTP client — shared across all requests, reuses connections
 _http_client: httpx.AsyncClient | None = None
@@ -152,6 +153,10 @@ async def _forward(
         label = model or request.url.path
         t_start = time.monotonic()
 
+        # Track request start in job history
+        if model:
+            job_history.request_start(model)
+
         response = await _http_client.send(req, stream=True)
         
     except BaseException:
@@ -164,6 +169,8 @@ async def _forward(
 
     async def _stream_with_timing():
         full_content = []  # Buffer to store the text response
+        input_tokens = 0    # Track prompt/input tokens from usage field
+        output_tokens = 0   # Track completion tokens from usage field
         try:
             first = True
             async for chunk in response.aiter_bytes():
@@ -181,7 +188,7 @@ async def _forward(
                             data_str = line[6:].strip()
                             if data_str == "[DONE]":
                                 continue
-                            
+
                             data_json = json.loads(data_str)
                             # Extract content from 'chat/completions' or 'completions' formats
                             choices = data_json.get("choices", [])
@@ -190,6 +197,13 @@ async def _forward(
                                 content = delta.get("content") or choices[0].get("text", "")
                                 if content:
                                     full_content.append(content)
+                            # Extract token usage if present (usually in final chunk)
+                            usage = data_json.get("usage")
+                            if usage:
+                                if "completion_tokens" in usage:
+                                    output_tokens = usage["completion_tokens"]
+                                if "prompt_tokens" in usage:
+                                    input_tokens = usage["prompt_tokens"]
                 except Exception:
                     # If it's not JSON/SSE (like a direct error message), skip parsing
                     pass
@@ -198,13 +212,21 @@ async def _forward(
                 yield chunk 
 
             t_done = time.monotonic()
-            
+
             # Print the final combined response to logs
             if full_content:
                 combined_text = "".join(full_content)
                 logger.info(f"\n{'*'*60}\nFULL LLM RESPONSE ({label}):\n{combined_text}\n{'*'*60}")
-            
+
             logger.info(f"[{label}] completed in {t_done - t_start:.2f}s total")
+
+            # Record job history metrics
+            generation_time = t_done - t_first_byte
+            # Fallback: estimate tokens from character count if usage not available (~4 chars/token)
+            if output_tokens == 0 and full_content:
+                output_tokens = max(1, len("".join(full_content)) // 4)
+            if model:
+                job_history.request_end(model, input_tokens, output_tokens, generation_time)
         finally:
             if lock:
                 lock.release()
@@ -235,6 +257,29 @@ async def status() -> dict:
         "external_job_running": external_jobs.external_job_running,
         "active_external_jobs": external_jobs.active_job_ids,
     }
+
+
+@app.get("/history")
+async def history() -> list[dict]:
+    """
+    Return job history as Homepage-compatible JSON.
+
+    Groups recent requests to the same model into tasks and returns
+    metrics (request count, avg tokens/sec, total tokens, active status).
+    """
+    return job_history.get_homepage_json()
+
+
+@app.get("/history/summary")
+async def history_summary() -> list[dict]:
+    """
+    Return a minimal summary of the last 10 jobs.
+
+    Each entry contains only two fields:
+    - name: "model-name (X,XXX tk)"
+    - description: "HH:MM:SS (active|completed)"
+    """
+    return job_history.get_summary_json()
 
 
 # === External Job VRAM Coordination Endpoints ===
