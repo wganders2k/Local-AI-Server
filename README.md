@@ -8,21 +8,21 @@ Monorepo for a personal AI server stack running on an Ubuntu machine with an RTX
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│                      Ubuntu Server (RTX 3090)                     │
+│                      Ubuntu Server (RTX 3090)                    │
 │                                                                  │
-│  ┌───────────────────────────────────────────────────────────┐  │
-│  │              FastAPI Orchestration Proxy :11436            │  │
-│  └───────────────────────────────────────────────────────────┘  │
+│  ┌───────────────────────────────────────────────────────────┐   │
+│  │              FastAPI Orchestration Proxy :11436           │   │
+│  └───────────────────────────────────────────────────────────┘   │
 │               │                          │                       │
-│  ┌──────────────────┐       ┌───────────────────────────┐      │
-│  │ llama-server      │       │    llama-server :11434     │      │
-│  │ :11435            │       │    (SWAPPABLE — router)    │      │
-│  │ (PERMANENT)       │       │                            │      │
-│  │ autocomplete      │       │  brain / mimic / lore /    │      │
-│  │ Qwen3.5-2B IQ4_NL│       │  chat (one at a time)      │      │
-│  └──────────────────┘       └───────────────────────────┘      │
+│  ┌──────────────────┐       ┌───────────────────────────┐        │
+│  │ llama-server     │       │    llama-server :11434    │        │
+│  │ :11435           │       │    (SWAPPABLE — router)   │        │
+│  │ (PERMANENT)      │       │                           │        │
+│  │ autocomplete     │       │  brain / mimic / lore /   │        │
+│  │ Qwen3.5-2B IQ4_NL│       │  chat (one at a time)     │        │
+│  └──────────────────┘       └───────────────────────────┘        │
 └──────────────────────────────────────────────────────────────────┘
-         ▲                    ▲                    ▲
+        ▲                     ▲                    ▲
     VS Code /             Open WebUI           Discord Bot
     Cursor                :3000
 ```
