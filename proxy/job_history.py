@@ -26,6 +26,7 @@ class _Task:
         self.end_time: Optional[float] = None
         self._active_requests: int = 0
         self._group_window: float = group_window
+        self._last_activity: float = time.time()  # updated on every start/end
         # Accumulators for token tracking
         self._total_input_tokens: int = 0
         self._total_output_tokens: int = 0
@@ -56,26 +57,26 @@ class _Task:
     def request_start(self) -> None:
         self._active_requests += 1
         self.request_count += 1
+        self._last_activity = time.time()
 
     def request_end(self, input_tokens: int, output_tokens: int, generation_time: float) -> None:
         self._active_requests -= 1
         self._total_input_tokens += input_tokens
         self._total_output_tokens += output_tokens
         self._total_generation_time += generation_time
+        self._last_activity = time.time()
 
     def maybe_finalize(self) -> bool:
         """
         If no active requests and enough time has passed since the last
-        request ended, mark the task as finalized.
+        activity, mark the task as finalized.
 
         Returns True if the task was finalized.
         """
-        if self._active_requests > 0:
-            return False
         if self.end_time is not None:
             return True  # already finalized
-        # Check if enough time has passed since start (proxy for last activity)
-        if time.time() - self.start_time >= self._group_window:
+        # Use _last_activity instead of start_time for accurate windowing
+        if time.time() - self._last_activity >= self._group_window:
             self.end_time = time.time()
             logger.debug(
                 f"Finalized task for '{self.model}' "
@@ -274,6 +275,16 @@ class JobHistory:
             task = self._active.pop(model, None)
             if task:
                 self._completed.append(task)
+
+    def heartbeat(self) -> int:
+        """
+        Background heartbeat: finalize any tasks whose group window has elapsed.
+
+        Returns the number of tasks finalized.
+        """
+        with self._lock:
+            self._flush_finalizable()
+            return 0
 
 
 # Module-level singleton

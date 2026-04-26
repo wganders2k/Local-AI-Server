@@ -34,10 +34,17 @@ async def lifespan(app: FastAPI):
     logger.info("HTTP client initialised")
     # Start background VRAM monitor
     vram_task = asyncio.create_task(_vram_monitor())
+    # Start background job history heartbeat
+    heartbeat_task = asyncio.create_task(_job_history_heartbeat())
     yield
     vram_task.cancel()
+    heartbeat_task.cancel()
     try:
         await vram_task
+    except asyncio.CancelledError:
+        pass
+    try:
+        await heartbeat_task
     except asyncio.CancelledError:
         pass
     await _http_client.aclose()
@@ -72,10 +79,25 @@ async def _vram_monitor(interval: int = 30) -> None:
                 )
         except FileNotFoundError:
             logger.warning("nvidia-smi not found — VRAM monitoring disabled")
-            return  
+            return
         except Exception as exc:
             logger.warning(f"VRAM monitor error: {exc}")
         await asyncio.sleep(interval)
+
+
+async def _job_history_heartbeat(interval: int = 60) -> None:
+    """
+    Periodically pulse the job history to force-finalize any stale tasks
+    that were never properly closed (e.g. client disconnected mid-stream).
+    """
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            stale_count = job_history.heartbeat()
+            if stale_count > 0:
+                logger.info(f"Job history heartbeat: force-finalized {stale_count} stale task(s)")
+        except Exception as exc:
+            logger.warning(f"Job history heartbeat error: {exc}")
 
 
 # Internal helpers
@@ -171,6 +193,7 @@ async def _forward(
         full_content = []  # Buffer to store the text response
         input_tokens = 0    # Track prompt/input tokens from usage field
         output_tokens = 0   # Track completion tokens from usage field
+        request_end_called = False  # Track to avoid double-calling
         try:
             first = True
             async for chunk in response.aiter_bytes():
@@ -209,7 +232,7 @@ async def _forward(
                     pass
                 # ------------------------------
 
-                yield chunk 
+                yield chunk
 
             t_done = time.monotonic()
 
@@ -220,14 +243,17 @@ async def _forward(
 
             logger.info(f"[{label}] completed in {t_done - t_start:.2f}s total")
 
-            # Record job history metrics
-            generation_time = t_done - t_first_byte
-            # Fallback: estimate tokens from character count if usage not available (~4 chars/token)
-            if output_tokens == 0 and full_content:
-                output_tokens = max(1, len("".join(full_content)) // 4)
-            if model:
-                job_history.request_end(model, input_tokens, output_tokens, generation_time)
         finally:
+            # Always call request_end, even if client disconnects mid-stream
+            if model and not request_end_called:
+                t_done = time.monotonic()
+                generation_time = t_done - t_first_byte
+                # Fallback: estimate tokens from character count if usage not available (~4 chars/token)
+                if output_tokens == 0 and full_content:
+                    output_tokens = max(1, len("".join(full_content)) // 4)
+                job_history.request_end(model, input_tokens, output_tokens, generation_time)
+                request_end_called = True
+
             if lock:
                 lock.release()
             await response.aclose()
