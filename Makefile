@@ -22,6 +22,7 @@ endif
         llama-ps llama-models \
         check-gpu \
         models-download \
+        dce-export-full dce-export-channel dce-export-guild dce-help \
         nuke
 
 # Default target — show help
@@ -76,6 +77,15 @@ help:
 	@echo "    2. Add/update the entry in scripts/download_models.py"
 	@echo "    3. Run: make models-download"
 	@echo "    4. Run: make restart  (or restart-llama-swappable / restart-llama-permanent)"
+	@echo ""
+	@echo "  ── DiscordChatExporter ──────────────────────────────────"
+	@echo "  dce-help            Show DCE CLI help"
+	@echo "  dce-export-full     Export entire guild (first-time setup)"
+	@echo "  dce-export-guild    Export guild with date range"
+	@echo "                        Usage: make dce-export-guild AFTER=2026-03-29 BEFORE=2026-04-29"
+	@echo "  dce-export-channel  Export specific channel"
+	@echo "                        Usage: make dce-export-channel CHANNEL_ID=111222..."
+	@echo "                        Optional: AFTER=2026-03-29 BEFORE=2026-04-29"
 	@echo ""
 	@echo "  ── Destructive ────────────────────────────────────────"
 	@echo "  nuke                ⚠️  Stop everything AND remove all volumes"
@@ -253,3 +263,41 @@ nuke:
 	@sleep 5
 	docker compose down -v
 	@echo "✓ All containers and volumes removed."
+
+# ── DiscordChatExporter ──────────────────────────────────────
+# DCE is a CLI-only tool (not a long-running service).
+# Run via `docker compose --profile manual run --rm discord-chat-exporter`.
+# Output lands in /mnt/storage_cold/array/DiscordArchive/raw/
+
+## Show DCE CLI help
+dce-help:
+	docker compose --profile manual run --rm discord-chat-exporter --help
+
+## Export entire guild (first-time full setup)
+## Usage: make dce-export-full
+dce-export-full:
+	@echo "Exporting entire guild $(DISCORD_GUILD_ID)..."
+	docker compose --profile manual run --rm discord-chat-exporter \
+		exportguild --guild $(DISCORD_GUILD_ID) \
+		--format Json --output /out/
+
+## Export guild with date range (incremental pull)
+## Usage: make dce-export-guild AFTER=2026-03-29 BEFORE=2026-04-29
+dce-export-guild:
+	@if [ -z "$(AFTER)" ]; then echo "Error: AFTER is required (e.g. AFTER=2026-03-29)"; exit 1; fi
+	@echo "Exporting guild $(DISCORD_GUILD_ID) from $(AFTER)$(if $(BEFORE), to $(BEFORE),)..."
+	docker compose --profile manual run --rm discord-chat-exporter \
+		exportguild --guild $(DISCORD_GUILD_ID) \
+		--format Json --output /out/ \
+		--after $(AFTER) $(if $(BEFORE),--before $(BEFORE),)
+
+## Export specific channel
+## Usage: make dce-export-channel CHANNEL_ID=111222333444555666
+## Optional: AFTER=2026-03-29 BEFORE=2026-04-29
+dce-export-channel:
+	@if [ -z "$(CHANNEL_ID)" ]; then echo "Error: CHANNEL_ID is required"; exit 1; fi
+	@echo "Exporting channel $(CHANNEL_ID)$(if $(AFTER), from $(AFTER),)...)"
+	docker compose --profile manual run --rm discord-chat-exporter \
+		export --channel $(CHANNEL_ID) \
+		--format Json --output /out/ \
+		$(if $(AFTER),--after $(AFTER),) $(if $(BEFORE),--before $(BEFORE),)

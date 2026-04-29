@@ -17,7 +17,7 @@ services:
     command: > #--model /models/unsloth/Qwen3.5-2B-GGUF/Qwen3.5-2B-IQ4_NL.gguf 
       --model /models/ggml-org/Qwen2.5-Coder-1.5B-Q8_0-GGUF/qwen2.5-coder-1.5b-q8_0.gguf
       --alias autocomplete --host 0.0.0.0 --port 8080 --n-gpu-layers -1 --ctx-size 4096
-      --n-predict 256 -fa on --cache-type-k q8_0 --cache-type-v q8_0 --parallel 3 --log-prefix
+      --n-predict 256 -fa on --cache-type-k q4_0 --cache-type-v q4_0 --parallel 3 --log-prefix
       --temp 0.7 --top-p 0.9 --top-k 40 --repeat-penalty 1.1
     deploy:
       resources:
@@ -54,7 +54,7 @@ services:
       - /home/peacow/local-ai-server/models.ini:/models.ini:ro
     command: >
       --models-preset /models.ini --models-max 1 --host 0.0.0.0 --port 8080 -fa
-      on --parallel 1 --log-prefix --threads-batch 12
+      on --parallel 1 --log-prefix --threads-batch 12 --jinja
     deploy:
       resources:
         reservations:
@@ -113,23 +113,18 @@ services:
   # Discord Bot
   # Mention routing, typing indicators, lore+mimic chain.
   # ──────────────────────────────────────────────────────────
-  # discord-bot:
-  #   build: ./discord-bot
-  #   restart: unless-stopped
-  #   depends_on:
-  #     proxy:
-  #       condition: service_healthy
-  #     chromadb:
-  #       condition: service_started
-  #   environment:
-  #     - DISCORD_TOKEN=${DISCORD_TOKEN}
-  #     - PROXY_URL=http://proxy:11436
-  #     - CHROMA_HOST=chromadb
-  #     - CHROMA_PORT=8000
-  #     - MAX_QUEUE_DEPTH=${MAX_QUEUE_DEPTH:-3}
-  #     - RATE_LIMIT_PER_USER=${RATE_LIMIT_PER_USER:-5}
-  #     - TYPING_INDICATOR_INTERVAL=${TYPING_INDICATOR_INTERVAL:-5}
-  #     - LORE_TOP_K=${LORE_TOP_K:-5}
+  discord-bot:
+    build: ./discord-bot
+    restart: unless-stopped
+    depends_on:
+      proxy:
+        condition: service_healthy
+    environment:
+      - DISCORD_TOKEN=${DISCORD_TOKEN}
+      - PROXY_URL=${PROXY_URL}
+      - MAX_QUEUE_DEPTH=${MAX_QUEUE_DEPTH:-3}
+      - RATE_LIMIT_PER_USER=${RATE_LIMIT_PER_USER:-5}
+      - TYPING_INDICATOR_INTERVAL=${TYPING_INDICATOR_INTERVAL:-5}
 
   # ──────────────────────────────────────────────────────────
   # Open WebUI (:3000)
@@ -184,36 +179,35 @@ services:
   #     - chroma_data:/chroma/chroma
 
   # ──────────────────────────────────────────────────────────
+  # DiscordChatExporter — CLI-only, run via `docker compose run`
+  # Exports raw Discord message history to JSON Lines format.
+  # Not a long-running service. Invoked by history-service or
+  # manually. Output lands on cold storage bind mount.
+  # ──────────────────────────────────────────────────────────
+  discord-chat-exporter:
+    image: tyrrrz/discordchatexporter:latest
+    profiles: ["manual"]  # Never auto-starts; requires explicit `docker compose run`
+    environment:
+      - DISCORD_TOKEN=${DISCORD_TOKEN}
+    volumes:
+      - /mnt/storage_cold/array/DiscordArchive/raw:/out
+
+  # ──────────────────────────────────────────────────────────
   # History Service
-  # Background service: per-user Discord message history
-  # collection (JSONL) + LoRA retraining trigger.
-  # Not in the inference hot path — runs on a schedule.
-  # Phase 2: history collection only (TRAINING_TRIGGER_ENABLED=false)
-  # Phase 3: enable training trigger (TRAINING_TRIGGER_ENABLED=true)
+  # Orchestrator: evaluates channels, triggers DCE exports,
+  # merges raw JSONL into per-user archives.
+  # Port :11437. Not in the inference hot path.
   # ──────────────────────────────────────────────────────────
   # history-service:
   #   build: ./history-service
   #   restart: unless-stopped
-  #   depends_on:
-  #     proxy:
-  #       condition: service_healthy
+  #   ports:
+  #     - 11437:11437
   #   environment:
   #     - DISCORD_TOKEN=${DISCORD_TOKEN}
   #     - DISCORD_GUILD_ID=${DISCORD_GUILD_ID}
-  #     - PROXY_URL=http://proxy:11436
-  #     - LLAMA_SWAPPABLE=http://llama-swappable:8080
-  #     - RETRAIN_THRESHOLD=${RETRAIN_THRESHOLD:-200}
-  #     - INCREMENTAL_PULL_INTERVAL=${INCREMENTAL_PULL_INTERVAL:-15}
-  #     - FULL_PULL_CRON=${FULL_PULL_CRON:-"0 3 1 * *"}
-  #     - TRAINING_WINDOW_START=${TRAINING_WINDOW_START:-3}
-  #     - TRAINING_WINDOW_END=${TRAINING_WINDOW_END:-6}
-  #     - TRAINING_TRIGGER_ENABLED=${TRAINING_TRIGGER_ENABLED:-false}  # set true in Phase 3
   #   volumes:
-  #     - history_data:/app/data
-  #     - lora_outputs:/app/lora-outputs
-  #     - ./models.ini:/models.ini         # Preset config for post-training re-registration
-  #     - ./lora-training:/lora-training:ro  # Training scripts (read-only mount)
-  #     - ${MODELS_DIR:-/srv/models}:/models  # Model storage for LoRA-merged GGUF output
+  #     - /mnt/storage_cold/array/DiscordArchive:/archive
 
   # ──────────────────────────────────────────────────────────
   # Named volumes

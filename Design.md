@@ -414,36 +414,67 @@ This context is prepended to the lore assistant's user message before forwarding
 
 The `history-service` is a background maintenance process — it is **not** in the inference hot path. It runs on a schedule alongside the RAG service and handles two distinct jobs:
 
-### 9a.1 Message History Collection
+### 9a.1 Three-Tier Data Architecture
 
-Per-user message history is stored as JSONL files (`data/history/<user_id>.jsonl`), one record per message. The service uses two pull modes:
+The history pipeline uses a **three-tier data architecture** that separates raw exports from processed archives and filtered training datasets. This design allows iterating on filtering methods without re-pulling data from Discord.
 
-| Mode | Frequency | Method |
-|---|---|---|
-| **Incremental pull** | Every 15 min | Fetch new messages from recently active channels since last pull timestamp |
-| **Full rebuild** | Monthly / manual | Fetch entire server history, rebuild all JSONL files from scratch |
+| Tier | Location | Format | Owner | Description |
+|---|---|---|---|---|
+| **Tier 1: Raw DCE Exports** | `/mnt/storage_cold/array/DiscordArchive/raw/` | DCE native JSON | `discord-chat-exporter` | Unmodified output from DiscordChatExporter. One directory per export run. |
+| **Tier 2: Per-User JSONL Archive** | `/mnt/storage_cold/array/DiscordArchive/archive/` | JSONL (one line per message) | `history-service` | Normalized, per-user message archive. **Unfiltered** — all messages retained. |
+| **Tier 3: Filtered Training Dataset** | Separate service (not `history-service`) | JSONL chat format | Training pipeline | Filtered subset of Tier 2 for LoRA training. Filtering is **NOT** a responsibility of history-service. |
 
-The incremental pull uses Discord's `GET /channels/{id}/messages?after={snowflake}` endpoint, paginating until no new messages remain. "Recently active" is defined as any channel with a message in the last 24 hours (configurable).
+**Key design principle:** Raw data is preserved in the archive. Filtering logic is applied at training time, not at ingest. This allows experimenting with different filtering methods without re-pulling data from Discord.
 
-**Message filtering (applied at ingest):**
+### 9a.2 Data Flow
 
-Messages are stored with a `clean` flag. Only clean messages are used for LoRA training. Unclean messages are retained for lore RAG context.
+```
+Host cron (monthly)
+    ↓
+POST /evaluate (history-service :11437)
+    ↓
+history-service evaluates channel state (state/channel_state.json)
+    ↓
+history-service invokes DCE via `docker compose run` (subprocess)
+    ↓
+DCE writes raw JSON → /mnt/storage_cold/array/DiscordArchive/raw/
+    ↓
+history-service merges raw exports → /mnt/storage_cold/array/DiscordArchive/archive/<user_id>.jsonl
+```
 
-| Rule | Condition |
-|---|---|
-| Minimum length | Fewer than 5 words → not clean |
-| Bot commands | Starts with `/`, `!`, `.`, `?` → not clean |
-| Pure emoji | Only emoji characters → not clean |
-| URL-only | Only a URL with no surrounding text → not clean |
-| Empty | Empty after whitespace strip → not clean |
+**Pull strategy:**
+- **Monthly cron** pings history-service to evaluate all channels
+- history-service checks `channel_state.json` for last export timestamp per channel
+- If no record exists (new channel), export the entire channel
+- If recent activity detected since last export, export the date range since last export
+- Append new messages to per-user JSONL archive (deduplicated by `message_id`)
 
-### 9a.2 LoRA Retraining Trigger
+### 9a.3 DiscordChatExporter Integration
+
+DCE (`tyrrrz/discordchatexporter`) runs as a **one-shot container** via `docker compose run` and is invoked by history-service as a subprocess. The service definition uses `profiles: ["manual"]` to prevent auto-start.
+
+**Invocation patterns:**
+
+```bash
+# Full guild export
+docker compose run --rm discord-chat-exporter exportguild --guild <guild_id> --format Json
+
+# Single channel, date range (incremental pull)
+docker compose run --rm discord-chat-exporter export --channel <channel_id> --after 2025-01-01 --before 2025-04-01 --format Json
+
+# Full channel export (new channel, no date range)
+docker compose run --rm discord-chat-exporter export --channel <channel_id> --format Json
+```
+
+**Storage:** Raw exports land on the cold storage array via bind mount (`/mnt/storage_cold/array/DiscordArchive/raw:/out`), surviving `make nuke`.
+
+### 9a.4 LoRA Retraining Trigger
 
 Retraining is triggered via three distinct paths, each handled by `training_trigger.py`:
 
 | Trigger | Caller | What it does |
 |---|---|---|
-| **Threshold check** | `main.py` after each incremental pull | Increments `messages_since_last_train`; sets `status = "queued"` for any user who hits `RETRAIN_THRESHOLD`. Does **not** dispatch training — only updates state. |
+| **Threshold check** | `main.py` after each DCE merge | Increments `messages_since_last_train`; sets `status = "queued"` for any user who hits `RETRAIN_THRESHOLD`. Does **not** dispatch training — only updates state. |
 | **Training window scheduler** | `main.py` APScheduler job (every 5 min, 3–6 AM only) | Calls `training_trigger.dispatch_queued()` — scans for `queued` users and dispatches training if the proxy queue depth is zero. Retries automatically at the next tick if the proxy is busy. |
 | **Force-all (manual)** | `make` → `python training_trigger.py --force-all` | Sets **all** users to `queued` regardless of threshold (used when the mimic base model changes and all LoRA adapters must be retrained from scratch). Training still dispatches via the training window scheduler — `--force-all` only updates state. |
 
@@ -454,7 +485,7 @@ Retraining is triggered via three distinct paths, each handled by `training_trig
 - Training runs as a subprocess calling `lora-training/train.py` then `lora-training/merge.py`
 - After the GGUF merge, the service updates `models.ini` with the new GGUF path and restarts `llama-swappable` — zero bot or proxy changes required
 
-**Training state** is tracked in `data/training_state.json` per user:
+**Training state** is tracked in `/mnt/storage_cold/array/DiscordArchive/state/training_state.json` per user:
 
 ```json
 {
@@ -471,19 +502,21 @@ Retraining is triggered via three distinct paths, each handled by `training_trig
 
 `training_status` progresses through: `idle` → `queued` → `training` → `merging` → `registering` → `idle`. On failure, status is set to `error` and requires manual intervention.
 
-### 9a.3 Relationship to RAG Service
+### 9a.5 Relationship to RAG Service
 
 | Concern | Owner |
 |---|---|
-| Collecting raw Discord messages (JSONL) | `history-service` |
-| Filtering and maintaining per-user message files | `history-service` |
+| Invoking DCE exports | `history-service` |
+| Merging raw DCE output into per-user JSONL archive | `history-service` |
+| Channel state tracking (last export per channel) | `history-service` |
 | Captioning image attachments in JSONL records | `history-service` |
 | Triggering LoRA retraining | `history-service` |
+| Filtering archive into training dataset | **Separate service** (NOT `history-service`) |
 | Chunking messages for lore retrieval | `rag-service` |
 | Embedding chunks into ChromaDB | `rag-service` |
 | Serving retrieval queries at inference time | `rag-service` |
 
-The RAG service reads from the JSONL files produced by the history service for its lore ingestion pipeline. The two services are decoupled — the RAG service does not depend on the history service being running.
+The RAG service reads from the JSONL archive files produced by the history service for its lore ingestion pipeline. The two services are decoupled — the RAG service does not depend on the history service being running.
 
 ---
 
