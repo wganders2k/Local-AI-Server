@@ -23,6 +23,7 @@ endif
         check-gpu \
         models-download \
         dce-export-full dce-export-channel dce-export-guild dce-help \
+        dce-evaluate history-refresh \
         nuke
 
 # Default target — show help
@@ -86,6 +87,10 @@ help:
 	@echo "  dce-export-channel  Export specific channel"
 	@echo "                        Usage: make dce-export-channel CHANNEL_ID=111222..."
 	@echo "                        Optional: AFTER=2026-03-29 BEFORE=2026-04-29"
+	@echo ""
+	@echo "  ── History Service ──────────────────────────────────────"
+	@echo "  dce-evaluate      Trigger history-service to evaluate channels and export"
+	@echo "  history-refresh   Alias for dce-evaluate"
 	@echo ""
 	@echo "  ── Destructive ────────────────────────────────────────"
 	@echo "  nuke                ⚠️  Stop everything AND remove all volumes"
@@ -301,3 +306,15 @@ dce-export-channel:
 		export --channel $(CHANNEL_ID) \
 		--format Json --output /out/ \
 		$(if $(AFTER),--after $(AFTER),) $(if $(BEFORE),--before $(BEFORE),)
+	
+	# ── History Service ──────────────────────────────────────────
+	
+	## Trigger history-service to evaluate channels and run targeted exports
+	## This is the standard pipeline trigger — host cron calls this monthly.
+	dce-evaluate:
+		@echo "Triggering history-service channel evaluation..."
+		curl -s -X POST http://localhost:11437/evaluate | python3 -m json.tool 2>/dev/null || echo "(history-service not running)"
+	
+	## Alias for dce-evaluate — single-command pipeline trigger
+	history-refresh: dce-evaluate
+	

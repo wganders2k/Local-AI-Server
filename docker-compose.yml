@@ -198,16 +198,32 @@ services:
   # merges raw JSONL into per-user archives.
   # Port :11437. Not in the inference hot path.
   # ──────────────────────────────────────────────────────────
-  # history-service:
-  #   build: ./history-service
-  #   restart: unless-stopped
-  #   ports:
-  #     - 11437:11437
-  #   environment:
-  #     - DISCORD_TOKEN=${DISCORD_TOKEN}
-  #     - DISCORD_GUILD_ID=${DISCORD_GUILD_ID}
-  #   volumes:
-  #     - /mnt/storage_cold/array/DiscordArchive:/archive
+  # History Service
+  # Orchestrator: evaluates channels, triggers DCE exports,
+  # merges raw JSONL into per-user archives, triggers LoRA training.
+  # Port :11437. Not in the inference hot path.
+  # ──────────────────────────────────────────────────────────
+  history-service:
+    build: ./history-service
+    restart: unless-stopped
+    ports:
+      - "11437:11437"
+    depends_on:
+      proxy:
+        condition: service_healthy
+    environment:
+      - DISCORD_TOKEN=${DISCORD_TOKEN}
+      - DISCORD_GUILD_ID=${DISCORD_GUILD_ID}
+      - PROXY_URL=http://proxy:11436
+      - IMAGE_CAPTION_ENABLED=${IMAGE_CAPTION_ENABLED:-false}
+      - IMAGE_CAPTION_MODEL=${IMAGE_CAPTION_MODEL:-image-caption}
+      - IMAGE_CAPTION_BATCH_SIZE=${IMAGE_CAPTION_BATCH_SIZE:-10}
+      - IMAGE_CAPTION_WINDOW_START=${IMAGE_CAPTION_WINDOW_START:-3}
+      - IMAGE_CAPTION_WINDOW_END=${IMAGE_CAPTION_WINDOW_END:-6}
+      - IMAGE_CAPTION_MAX_FILE_SIZE_MB=${IMAGE_CAPTION_MAX_FILE_SIZE_MB:-10}
+    volumes:
+      - /mnt/storage_cold/array/DiscordArchive:/archive    # Cold storage bind mount
+      - /var/run/docker.sock:/var/run/docker.sock  # For invoking DCE via docker compose run
 
   # ──────────────────────────────────────────────────────────
   # Named volumes
