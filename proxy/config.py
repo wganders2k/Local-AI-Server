@@ -7,6 +7,14 @@ LLAMA_SWAPPABLE = os.environ.get("LLAMA_SWAPPABLE", "http://localhost:11434")
 # System prompts config path
 SYSTEM_PROMPTS_PATH = os.environ.get("SYSTEM_PROMPTS_PATH", "../system_prompts.ini")
 
+# Glances API base URL for VRAM monitoring (e.g. http://192.168.2.55:61208)
+GLANCES_URL = os.environ.get("GLANCES_URL", "")
+
+# Autocomplete model toggle — set to "false" to disable the permanent autocomplete
+# model and free ~1.2 GB VRAM. When disabled, requests for the "autocomplete"
+# model will receive a 503 error. Controlled by AUTOCOMPLETE_ENABLED env var.
+AUTOCOMPLETE_ENABLED = os.environ.get("AUTOCOMPLETE_ENABLED", "true").lower() not in ("false", "0", "no")
+
 # Models that always route to the permanent slot — never swapped, never locked.
 # The autocomplete model is loaded at llama-server startup and stays resident.
 # Using a stable alias ("autocomplete") decouples the proxy from the underlying

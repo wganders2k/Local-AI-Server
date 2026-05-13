@@ -82,6 +82,13 @@ MODELS = [
         "notes":     "Brain (coding assistant) — ~16.8 GB VRAM",
     },
     {
+        "repo_id":   "unsloth/gemma-4-31B-it-GGUF",
+        "filename":  "gemma-4-31B-it-Q4_K_M.gguf",
+        "local_dir": "unsloth/gemma-4-31B-it-GGUF",
+        "slot":      "swappable",
+        "notes":     "Gemma Brain (coding assistant) — ~18.3 GB VRAM",
+    },
+    {
         "repo_id":   "unsloth/Qwen3.6-35B-A3B-GGUF",
         "filename":  "Qwen3.6-35B-A3B-UD-IQ4_NL.gguf",
         "local_dir": "unsloth/Qwen3.6-35B-A3B-GGUF",

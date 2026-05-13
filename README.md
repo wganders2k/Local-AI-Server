@@ -119,6 +119,28 @@ make status
 
 Run `make help` for the full list.
 
+## Autocomplete Model Toggle
+
+The permanent autocomplete model (`llama-permanent` on port `:11435`) can be disabled to free ~1.2 GB VRAM. This is useful when you don't need IDE code completion and want maximum headroom for the swappable slot.
+
+```bash
+# Disable autocomplete model
+make disable-autocomplete
+
+# Enable autocomplete model
+make enable-autocomplete
+
+# Check current status
+make status-autocomplete
+```
+
+When disabled:
+- The `llama-permanent` container will not start
+- Any request for the `"autocomplete"` model via the proxy will receive a `503 Service Unavailable` response
+- All other services (Discord bot, Open WebUI, coding assistant) continue to work normally
+
+The setting is persisted in `.env` as `AUTOCOMPLETE_ENABLED=true|false`.
+
 ## Model Management
 
 Model configuration lives in two places:
