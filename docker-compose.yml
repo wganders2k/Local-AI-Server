@@ -189,10 +189,28 @@ services:
       - /mnt/storage_cold/array/DiscordArchive/raw:/out
 
   # ──────────────────────────────────────────────────────────
-  # History Service
-  # Orchestrator: evaluates channels, triggers DCE exports,
-  # merges raw JSONL into per-user archives.
-  # Port :11437. Not in the inference hot path.
+  # Docker Socket Proxy
+  # Exposes a restricted Docker API socket so containers can
+  # invoke `docker compose run` without full socket access.
+  # Only allows container lifecycle + image pull operations.
+  # ──────────────────────────────────────────────────────────
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:latest
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    ports:
+      - "127.0.0.1:2375:2375"
+    environment:
+      # Resource permissions (which Docker API namespaces are exposed)
+      CONTAINERS: "1"   # /containers/* — list, inspect, create, start, stop, remove
+      IMAGES: "1"       # /images/* — inspect + pull
+      NETWORKS: "1"     # /networks/* — inspect (needed for compose network attachment)
+      INFO: "1"         # /info — daemon info (read by `docker compose` on startup)
+      # HTTP method permissions (default: only GET is allowed)
+      POST: "1"         # Allow POST — container create/start, image pull
+      DELETE: "1"       # Allow DELETE — container removal (--rm flag)
+
   # ──────────────────────────────────────────────────────────
   # History Service
   # Orchestrator: evaluates channels, triggers DCE exports,
@@ -203,11 +221,12 @@ services:
     build: ./history-service
     restart: unless-stopped
     ports:
-      - "11437:11437"
+      - "127.0.0.1:11437:11437"
     depends_on:
       proxy:
         condition: service_healthy
     environment:
+      - DOCKER_HOST=tcp://docker-socket-proxy:2375
       - DISCORD_TOKEN=${DISCORD_TOKEN}
       - DISCORD_GUILD_ID=${DISCORD_GUILD_ID}
       - PROXY_URL=http://proxy:11436
@@ -219,7 +238,8 @@ services:
       - IMAGE_CAPTION_MAX_FILE_SIZE_MB=${IMAGE_CAPTION_MAX_FILE_SIZE_MB:-10}
     volumes:
       - /mnt/storage_cold/array/DiscordArchive:/archive    # Cold storage bind mount
-      - /var/run/docker.sock:/var/run/docker.sock  # For invoking DCE via docker compose run
+      - /home/peacow/local-ai-server/dce-compose.yml:/etc/dce-compose.yml:ro  # DCE compose config
+      - /home/peacow/local-ai-server/dce.env:/etc/dce.env:ro  # DCE needs DISCORD_TOKEN from dce.env
 
   # ──────────────────────────────────────────────────────────
   # Prometheus

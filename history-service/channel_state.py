@@ -165,3 +165,20 @@ def channels_needing_export(
     
     logger.info(f"Channel evaluation: {len(needs_export)} of {len(channels)} channels need export")
     return needs_export
+
+
+def reset_state() -> None:
+    """
+    Delete the channel state file and write an empty state.
+
+    This resets all tracking data so that the next evaluate run
+    will treat every channel as needing a full export.
+    """
+    _ensure_state_dir()
+    try:
+        if os.path.exists(CHANNEL_STATE_FILE):
+            os.unlink(CHANNEL_STATE_FILE)
+        save_state({})
+        logger.info("Channel state reset: all tracking data cleared")
+    except IOError as e:
+        logger.error(f"Failed to reset channel state: {e}")

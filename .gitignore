@@ -1,6 +1,9 @@
 # Environment / secrets — NEVER commit these
-.env
+*.env
 *.env.local
+
+# DCE-specific secrets file (contains DISCORD_TOKEN) — populate manually from .env
+dce.env
 
 # Large model files
 *.gguf

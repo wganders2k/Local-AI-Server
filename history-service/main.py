@@ -7,7 +7,10 @@ Registers APScheduler jobs for:
 """
 
 import asyncio
+import glob
 import logging
+import os
+import shutil
 import sys
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -27,10 +30,10 @@ from config import (
     PORT,
     PROXY_URL,
 )
-from channel_state import load_state
+from channel_state import load_state, reset_state
 from dce_orchestrator import evaluate_and_export
 from image_captioner import process_pending_batch
-from jsonl_store import get_message_count, get_all_user_ids
+from jsonl_store import get_message_count, get_all_user_ids, clear_all
 
 logging.basicConfig(
     level=logging.INFO,
@@ -88,6 +91,8 @@ async def caption_batch_job() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown lifecycle."""
+    from config import validate_required
+    validate_required()
     logger.info("History service starting up")
 
     if IMAGE_CAPTION_ENABLED:
@@ -158,8 +163,8 @@ async def evaluate() -> dict:
     logger.info("Channel evaluation triggered via POST /evaluate")
 
     try:
-        # Fetch channels from Discord API
-        channels = _fetch_discord_channels()
+        # Fetch channels (blocking HTTP call) in thread pool
+        channels = await asyncio.to_thread(_fetch_discord_channels)
 
         if not channels:
             return {
@@ -169,11 +174,11 @@ async def evaluate() -> dict:
 
         logger.info(f"Fetched {len(channels)} channels from guild {DISCORD_GUILD_ID}")
 
-        # Run evaluation and export pipeline
-        new_message_counts = evaluate_and_export(channels)
+        # Run export pipeline (blocking subprocess calls) in thread pool
+        new_message_counts = await asyncio.to_thread(evaluate_and_export, channels)
 
-        # Notify lora-training service that new data is available
-        _notify_lora_training(new_message_counts)
+        # Notify lora-training (blocking HTTP call) in thread pool
+        await asyncio.to_thread(_notify_lora_training, new_message_counts)
 
         return {
             "status": "complete",
@@ -200,9 +205,74 @@ async def archive_count(user_id: str) -> dict:
     }
 
 
+@app.post("/clear")
+async def clear_history() -> dict:
+    """
+    Clear all retrieved history data.
+
+    Deletes:
+      - All per-user JSONL archive files
+      - All raw DCE export files
+      - Channel state tracking data
+    Resets:
+      - In-memory message ID cache
+    """
+    from config import ARCHIVE_RAW_DIR
+
+    logger.info("Clear history triggered via POST /clear")
+
+    # 1. Clear user archives
+    archive_count = clear_all()
+
+    # 2. Clear raw DCE exports
+    raw_deleted = 0
+    if os.path.exists(ARCHIVE_RAW_DIR):
+        pattern = os.path.join(ARCHIVE_RAW_DIR, "*")
+        for f in glob.glob(pattern):
+            try:
+                if os.path.isfile(f):
+                    os.unlink(f)
+                    raw_deleted += 1
+                elif os.path.isdir(f):
+                    shutil.rmtree(f)
+                    raw_deleted += 1
+            except PermissionError:
+                logger.warning(
+                    f"Permission denied skipping {f} — "
+                    "may need matching file ownership"
+                )
+            except OSError as e:
+                logger.warning(f"Failed to delete raw export {f}: {e}")
+
+    # 3. Reset channel state tracking
+    reset_state()
+
+    logger.info(
+        f"History cleared: {archive_count} archives, "
+        f"{raw_deleted} raw exports, channel state reset"
+    )
+
+    return {
+        "status": "cleared",
+        "archives_deleted": archive_count,
+        "raw_exports_deleted": raw_deleted,
+        "channel_state": "reset",
+    }
+
+
 # ──────────────────────────────────────────────────────────────
 # Internal helpers
 # ──────────────────────────────────────────────────────────────
+
+
+def _snowflake_to_timestamp(snowflake_id):
+    """Extract UTC timestamp from a Discord Snowflake ID."""
+    if not snowflake_id:
+        return None
+    epoch = 1420070400000  # Discord epoch (ms)
+    timestamp_ms = (int(snowflake_id) >> 22) + epoch
+    dt = datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
+    return dt.isoformat()
 
 
 def _fetch_discord_channels() -> list:
@@ -210,7 +280,7 @@ def _fetch_discord_channels() -> list:
     Fetch channels from the Discord guild via the Discord API.
 
     Returns list of channel dicts with 'id', 'name', and
-    'last_message_timestamp' (ISO 8601 or None).
+    'last_message_at' (ISO 8601 or None, converted from snowflake ID).
     """
     token = DISCORD_TOKEN
     guild_id = DISCORD_GUILD_ID
@@ -244,7 +314,7 @@ def _fetch_discord_channels() -> list:
                 channels.append({
                     "id": ch["id"],
                     "name": ch.get("name", ""),
-                    "last_message_timestamp": ch.get("last_message_id"),
+                    "last_message_at": _snowflake_to_timestamp(ch.get("last_message_id")),
                 })
 
             return channels
