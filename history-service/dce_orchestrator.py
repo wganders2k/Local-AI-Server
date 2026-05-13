@@ -19,6 +19,7 @@ from config import (
     DISCORD_TOKEN,
 )
 from channel_state import (
+    get_channel,
     load_state,
     save_state,
     update_channel,
@@ -27,7 +28,22 @@ from channel_state import (
 from dce_parser import parse_dce_export_directory
 from jsonl_store import append_messages
 
+DCE_OUTPUT_ROOT = "/out"       # Path as seen by DCE container (mounted cold storage)
+HOST_RAW_DIR = "/archive/raw"  # Path as seen by history-service (bind mount)
+
 logger = logging.getLogger(__name__)
+
+
+def _current_user_string() -> str:
+    """
+    Return the current process UID:GID as a string (e.g. "1000:1000").
+
+    Used to pass ``--user`` to ``docker compose run`` so that DCE writes
+    files owned by the same UID/GID as the history-service process
+    (appuser).  This avoids permission issues when the service later tries
+    to delete or rewrite those files.
+    """
+    return f"{os.getuid()}:{os.getgid()}"
 
 
 def _timestamp_dir() -> str:
@@ -48,26 +64,41 @@ def export_channel(
         channel_id: Discord channel ID to export.
         after: Optional start date (inclusive), ISO format YYYY-MM-DD.
         before: Optional end date (inclusive), ISO format YYYY-MM-DD.
-        output_dir: Optional override for output directory.
-                    Defaults to /archive/raw/<timestamp>.
+        output_dir: Optional override for output directory (DCE container path).
+                    Defaults to /out/<timestamp> (DCE container sees /out).
         
     Returns:
-        Path to the output directory on success, None on failure.
+        Path to the output directory as seen by the DCE container on success,
+        None on failure.
     """
-    if output_dir is None:
-        output_dir = os.path.join(ARCHIVE_RAW_DIR, _timestamp_dir())
+    ts = _timestamp_dir()
+    # DCE container writes to /out/<ts>  (DCE's bind-mount root)
+    dce_output_dir = output_dir if output_dir else os.path.join(DCE_OUTPUT_ROOT, ts)
+    # history-service sees the same storage at /archive/raw/<ts>
+    host_output_dir = os.path.join(HOST_RAW_DIR, os.path.basename(dce_output_dir))
+
+    # Pre-create directory using the history-service-visible path so DCE can
+    # write into it. Both paths point to the same bind-mounted cold storage.
+    os.makedirs(host_output_dir, exist_ok=True)
     
-    os.makedirs(output_dir, exist_ok=True)
-    
-    # Build docker compose run command
+    # Build docker compose run command.
+    # The compose file is mounted at /etc/dce-compose.yml and .env at /etc/dce.env.
+    user_str = _current_user_string()
+
+    # Build docker compose run command.
+    # The compose file is mounted at /etc/dce-compose.yml and .env at /etc/dce.env.
+    # --user ensures DCE writes files owned by the same UID/GID as appuser
+    # so the history-service process can later manage (delete/rewrite) them.
     cmd = [
         "docker", "compose",
-        "--profile", "manual",
-        "run", "--rm", "discord-chat-exporter",
+        "-f", "/etc/dce-compose.yml",
+        "--env-file", "/etc/dce.env",
+        "run", "--rm", "--user", user_str,
+        "discord-chat-exporter",
         "export",
         "--channel", channel_id,
         "--format", "Json",
-        "--output", output_dir,
+        "--output", dce_output_dir,
     ]
     
     if after:
@@ -92,8 +123,8 @@ def export_channel(
             )
             return None
         
-        logger.info(f"DCE export completed for channel {channel_id} → {output_dir}")
-        return output_dir
+        logger.info(f"DCE export completed for channel {channel_id} → {dce_output_dir}")
+        return dce_output_dir
     
     except subprocess.TimeoutExpired:
         logger.error(f"DCE export timed out for channel {channel_id}")
@@ -174,8 +205,10 @@ def evaluate_and_export(
         output_dir = export_channel(channel_id, after=after, before=before)
         
         if output_dir:
+            # Build host-side path for reading DCE output (DCE writes to /out, which is mounted cold storage)
+            host_output_dir = os.path.join(HOST_RAW_DIR, os.path.basename(output_dir))
             # Merge results
-            merge_results = merge_export(output_dir)
+            merge_results = merge_export(host_output_dir)
             
             for user_id, count in merge_results.items():
                 total_results[user_id] = total_results.get(user_id, 0) + count
@@ -183,13 +216,16 @@ def evaluate_and_export(
             # Update channel state
             now = datetime.now(timezone.utc).isoformat()
             total_exported = sum(merge_results.values())
+            existing_record = get_channel(state, channel_id)
+            previous_total = existing_record.get("total_messages_exported", 0) if existing_record else 0
+            new_total = previous_total + total_exported
             update_channel(
                 state,
                 channel_id=channel_id,
                 channel_name=channel_name,
                 last_export_at=now,
                 last_message_at=ch.get("last_message_at"),
-                total_messages_exported=total_exported,
+                total_messages_exported=new_total,
             )
         else:
             logger.warning(f"Skipping state update for channel {channel_id} (export failed)")

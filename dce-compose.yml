@@ -1,0 +1,7 @@
+services:
+  discord-chat-exporter:
+    image: tyrrrz/discordchatexporter:latest
+    environment:
+      - DISCORD_TOKEN=${DISCORD_TOKEN}
+    volumes:
+      - /mnt/storage_cold/array/DiscordArchive/raw:/out

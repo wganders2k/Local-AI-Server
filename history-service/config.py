@@ -49,3 +49,25 @@ IMAGE_CAPTION_MAX_FILE_SIZE_MB: int = int(os.environ.get("IMAGE_CAPTION_MAX_FILE
 
 HOST: str = os.environ.get("HOST", "0.0.0.0")
 PORT: int = int(os.environ.get("PORT", "11437"))
+
+
+# ──────────────────────────────────────────────────────────────
+# Validation
+# ──────────────────────────────────────────────────────────────
+
+
+def validate_required() -> None:
+    """Check required environment variables at startup."""
+    missing = []
+    if not DISCORD_TOKEN:
+        missing.append("DISCORD_TOKEN")
+    if not DISCORD_GUILD_ID:
+        missing.append("DISCORD_GUILD_ID")
+    if not PROXY_URL:
+        missing.append("PROXY_URL")
+
+    if missing:
+        raise ValueError(
+            f"Missing required environment variables: {', '.join(missing)}. "
+            "Check your .env file or docker-compose.yml environment section."
+        )

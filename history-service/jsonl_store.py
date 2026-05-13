@@ -10,11 +10,15 @@ Archive files live at /archive/archive/<user_id>.jsonl.
 import json
 import logging
 import os
+import tempfile
 from typing import Dict, List, Optional, Set
 
 from config import ARCHIVE_DIR
 
 logger = logging.getLogger(__name__)
+
+# Module-level cache: user_id -> set of known message_ids
+_user_id_cache: Dict[str, Set[str]] = {}
 
 
 def _ensure_archive_dir() -> None:
@@ -28,20 +32,17 @@ def _user_file_path(user_id: str) -> str:
 
 
 def _load_existing_ids(user_id: str) -> Set[str]:
-    """
-    Load all existing message IDs from a user's archive file.
-    
-    Args:
-        user_id: Discord user ID.
-        
-    Returns:
-        Set of existing message IDs.
-    """
+    """Load message IDs for a user, using in-memory cache after first load."""
+    if user_id in _user_id_cache:
+        return _user_id_cache[user_id]
+
+    # Load from disk and cache
+    ids: Set[str] = set()
     path = _user_file_path(user_id)
     if not os.path.exists(path):
-        return set()
-    
-    ids = set()
+        _user_id_cache[user_id] = ids
+        return ids
+
     try:
         with open(path, "r") as f:
             for line in f:
@@ -52,12 +53,21 @@ def _load_existing_ids(user_id: str) -> Set[str]:
                     record = json.loads(line)
                     msg_id = record.get("message_id")
                     if msg_id:
-                        ids.add(msg_id)
+                        ids.add(str(msg_id))
                 except json.JSONDecodeError:
                     continue
     except IOError as e:
         logger.error(f"Failed to read existing IDs for user {user_id}: {e}")
+
+    _user_id_cache[user_id] = ids
     return ids
+
+
+def _add_to_cache(user_id: str, msg_ids: Set[str]) -> None:
+    """Update in-memory cache after successful append."""
+    if user_id not in _user_id_cache:
+        _user_id_cache[user_id] = set()
+    _user_id_cache[user_id].update(msg_ids)
 
 
 def append_message(user_id: str, record: dict) -> bool:
@@ -90,6 +100,7 @@ def append_message(user_id: str, record: dict) -> bool:
     try:
         with open(path, "a") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        _add_to_cache(user_id, {str(msg_id)})
         return True
     except IOError as e:
         logger.error(f"Failed to append message for user {user_id}: {e}")
@@ -115,6 +126,7 @@ def append_messages(user_id: str, records: List[dict]) -> int:
     _ensure_archive_dir()
     
     appended = 0
+    new_ids: Set[str] = set()
     try:
         with open(path, "a") as f:
             for record in records:
@@ -124,11 +136,14 @@ def append_messages(user_id: str, records: List[dict]) -> int:
                 if msg_id in existing_ids:
                     continue
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
-                existing_ids.add(msg_id)
+                str_msg_id = str(msg_id)
+                existing_ids.add(str_msg_id)
+                new_ids.add(str_msg_id)
                 appended += 1
+        _add_to_cache(user_id, new_ids)
     except IOError as e:
         logger.error(f"Failed to append messages for user {user_id}: {e}")
-    
+
     return appended
 
 
@@ -231,21 +246,61 @@ def get_pending_captions(limit: int = 100) -> List[tuple]:
 
 def rewrite_archive(user_id: str, records: List[dict]) -> None:
     """
-    Rewrite a user's entire archive file.
-    
+    Rewrite a user's entire archive file atomically using write-then-rename.
+
     Use this when updating records in place (e.g., after captioning).
-    
+
     Args:
         user_id: Discord user ID.
         records: Complete list of message records to write.
     """
     path = _user_file_path(user_id)
     _ensure_archive_dir()
-    
+
     try:
-        with open(path, "w") as f:
-            for record in records:
-                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        # Write to temp file in same directory (ensures same filesystem for atomic rename)
+        dir_name = os.path.dirname(path)
+        fd, tmp_path = tempfile.mkstemp(dir=dir_name, suffix=".tmp", prefix=os.path.basename(path))
+        try:
+            with os.fdopen(fd, "w") as f:
+                for record in records:
+                    f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            # Atomic rename on POSIX
+            os.replace(tmp_path, path)
+        except Exception:
+            # Clean up temp file on failure
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+
         logger.info(f"Rewrote archive for user {user_id}: {len(records)} records")
     except IOError as e:
         logger.error(f"Failed to rewrite archive for user {user_id}: {e}")
+
+
+def clear_all() -> int:
+    """
+    Delete all user archive files and reset the in-memory ID cache.
+
+    Returns:
+        Number of archive files deleted.
+    """
+    import glob
+
+    _ensure_archive_dir()
+    pattern = os.path.join(ARCHIVE_DIR, "*.jsonl")
+    files = glob.glob(pattern)
+    deleted = 0
+    for f in files:
+        try:
+            os.unlink(f)
+            deleted += 1
+        except OSError as e:
+            logger.error(f"Failed to delete {f}: {e}")
+
+    # Reset in-memory cache
+    _user_id_cache.clear()
+    logger.info(f"Cleared {deleted} user archive files and reset ID cache")
+    return deleted
