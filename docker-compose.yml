@@ -7,6 +7,7 @@ services:
   llama-permanent:
     image: ghcr.io/ggml-org/llama.cpp:server-cuda
     restart: unless-stopped
+    profiles: ["autocomplete"]
     runtime: nvidia
     environment:
       - NVIDIA_VISIBLE_DEVICES=0
@@ -83,22 +84,17 @@ services:
     ports:
       - 11436:11436
     depends_on:
-      llama-permanent:
-        condition: service_healthy
       llama-swappable:
         condition: service_healthy
     environment:
       - LLAMA_PERMANENT=http://llama-permanent:8080
       - LLAMA_SWAPPABLE=http://llama-swappable:8080
       - MODELS_INI_PATH=/models.ini
+      - GLANCES_URL=http://192.168.2.55:61208
+      - AUTOCOMPLETE_ENABLED=${AUTOCOMPLETE_ENABLED:-true}
     volumes:
-      - /usr/bin/nvidia-smi:/usr/bin/nvidia-smi:ro
-      - /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.580.126.09:/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1:ro
       - /home/peacow/local-ai-server/models.ini:/models.ini:ro
       - /home/peacow/local-ai-server/system_prompts.ini:/system_prompts.ini:ro
-      - /dev/nvidia0:/dev/nvidia0
-      - /dev/nvidiactl:/dev/nvidiactl
-      - /dev/nvidia-uvm:/dev/nvidia-uvm
     healthcheck:
       test:
         - CMD
@@ -226,6 +222,35 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock  # For invoking DCE via docker compose run
 
   # ──────────────────────────────────────────────────────────
+  # Prometheus
+  # Scrapes /metrics endpoint from the proxy service.
+  # Exposed on port 9091 (9090 was already allocated).
+  # ──────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:latest
+    restart: unless-stopped
+    volumes:
+      - /home/peacow/local-ai-server/prometheus.yml:/etc/prometheus/prometheus.yml
+    ports:
+      - "9091:9090"
+
+  # ──────────────────────────────────────────────────────────
+  # Grafana
+  # Visualization layer for Prometheus metrics.
+  # Exposed on port 3002 (3000 is used by Open WebUI, 3001 was already allocated).
+  # Default login: admin / admin
+  # ──────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:latest
+    restart: unless-stopped
+    ports:
+      - "3002:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+
+  # ──────────────────────────────────────────────────────────
   # Named volumes
   # All persistent data lives here. Survives container restarts
   # and rebuilds. Use `make nuke` to wipe everything (destructive).
@@ -239,4 +264,5 @@ volumes:
   chroma_data: null
   history_data: null
   lora_outputs: null
+  grafana_data: null
 networks: {}

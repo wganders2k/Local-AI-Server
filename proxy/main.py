@@ -8,6 +8,7 @@ import sys
 import httpx
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import StreamingResponse
+from prometheus_client import Counter, Gauge, Histogram, generate_latest, CONTENT_TYPE_LATEST
 
 logging.basicConfig(
     level=logging.INFO,
@@ -16,15 +17,26 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-from config import AUTOCOMPLETE_MODELS, LLAMA_PERMANENT, LLAMA_SWAPPABLE, SWAPPABLE_MODELS
+from config import AUTOCOMPLETE_ENABLED, AUTOCOMPLETE_MODELS, GLANCES_URL, LLAMA_PERMANENT, LLAMA_SWAPPABLE, SWAPPABLE_MODELS
 from state import state, external_jobs
-from job_history import job_history
 
 # HTTP client — shared across all requests, reuses connections
 _http_client: httpx.AsyncClient | None = None
 
 # How many bytes of the first response chunk to log as a preview.
 _RESPONSE_PREVIEW_BYTES = 120
+
+# Prometheus Metrics
+PROXY_REQUESTS = Counter("proxy_requests_total", "Total LLM requests", ["model", "status"])
+PROXY_ACTIVE_REQUESTS = Gauge("proxy_active_requests", "Currently processing requests", ["model"])
+PROXY_TOKENS = Counter("proxy_tokens_total", "Total tokens processed", ["model", "token_type"])
+PROXY_QUEUE_DEPTH = Gauge("proxy_queue_depth", "Current requests waiting for a model swap")
+PROXY_EXTERNAL_JOBS = Gauge("proxy_external_jobs_active", "Number of active external VRAM jobs")
+GPU_VRAM_PERCENT = Gauge("gpu_vram_percent", "GPU VRAM usage percentage")
+PROXY_REQUEST_DURATION = Histogram("proxy_request_duration_seconds", "Total request time", ["model"])
+
+# Initialize VRAM gauge to 0 so it appears in /metrics before first Glances read
+GPU_VRAM_PERCENT.set(0)
 
 
 @asynccontextmanager
@@ -34,17 +46,10 @@ async def lifespan(app: FastAPI):
     logger.info("HTTP client initialised")
     # Start background VRAM monitor
     vram_task = asyncio.create_task(_vram_monitor())
-    # Start background job history heartbeat
-    heartbeat_task = asyncio.create_task(_job_history_heartbeat())
     yield
     vram_task.cancel()
-    heartbeat_task.cancel()
     try:
         await vram_task
-    except asyncio.CancelledError:
-        pass
-    try:
-        await heartbeat_task
     except asyncio.CancelledError:
         pass
     await _http_client.aclose()
@@ -57,47 +62,37 @@ app = FastAPI(title="Orchestration Proxy", lifespan=lifespan)
 # VRAM monitor — runs in background, logs GPU memory usage every 30s
 
 async def _vram_monitor(interval: int = 30) -> None:
-    while True:
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "nvidia-smi",
-                "--query-gpu=memory.used,memory.total",
-                "--format=csv,noheader,nounits",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            stdout, _ = await proc.communicate()
-            if proc.returncode == 0 and stdout:
-                line = stdout.decode().strip().splitlines()[0]
-                used, total = (x.strip() for x in line.split(","))
-                model_label = state.current_model or "none"
-                age = state.time_since_swap
-                age_str = f"{age:.0f}s ago" if age is not None else "never swapped"
-                logger.info(
-                    f"VRAM: {used} / {total} MiB | "
-                    f"swappable slot: {model_label} (loaded {age_str})"
-                )
-        except FileNotFoundError:
-            logger.warning("nvidia-smi not found — VRAM monitoring disabled")
-            return
-        except Exception as exc:
-            logger.warning(f"VRAM monitor error: {exc}")
-        await asyncio.sleep(interval)
+    """Poll Glances API for GPU VRAM usage and expose via Prometheus gauges."""
+    if not GLANCES_URL:
+        logger.info("GLANCES_URL not set — VRAM monitoring disabled")
+        return
 
+    gpu_api = f"{GLANCES_URL.rstrip('/')}/api/4/gpu"
+    async with _http_client as client:
+        while True:
+            try:
+                resp = await client.get(gpu_api, timeout=5.0)
+                if resp.status_code == 200:
+                    gpus = resp.json()
+                    if gpus:
+                        gpu = gpus[0]  # Use first GPU
+                        mem_percent = float(gpu.get("mem", 0))
+                        GPU_VRAM_PERCENT.set(mem_percent)
 
-async def _job_history_heartbeat(interval: int = 60) -> None:
-    """
-    Periodically pulse the job history to force-finalize any stale tasks
-    that were never properly closed (e.g. client disconnected mid-stream).
-    """
-    while True:
-        await asyncio.sleep(interval)
-        try:
-            stale_count = job_history.heartbeat()
-            if stale_count > 0:
-                logger.info(f"Job history heartbeat: force-finalized {stale_count} stale task(s)")
-        except Exception as exc:
-            logger.warning(f"Job history heartbeat error: {exc}")
+                        model_label = state.current_model or "none"
+                        age = state.time_since_swap
+                        age_str = f"{age:.0f}s ago" if age is not None else "never swapped"
+                        logger.info(
+                            f"VRAM: {mem_percent:.1f}% | "
+                            f"swappable slot: {model_label} (loaded {age_str})"
+                        )
+                    else:
+                        logger.warning("VRAM monitor: Glances returned empty GPU list")
+                else:
+                    logger.warning(f"VRAM monitor: Glances API returned HTTP {resp.status_code}")
+            except Exception as exc:
+                logger.warning(f"VRAM monitor error: {exc}")
+            await asyncio.sleep(interval)
 
 
 # Internal helpers
@@ -172,14 +167,21 @@ async def _forward(
             params=request.query_params,
         )
 
-        label = model or request.url.path
+        label = model or "unknown_model"
         t_start = time.monotonic()
 
-        # Track request start in job history
+        # Track request start in Prometheus
         if model:
-            job_history.request_start(model)
+            PROXY_ACTIVE_REQUESTS.labels(model=label).inc()
 
-        response = await _http_client.send(req, stream=True)
+        try:
+            response = await _http_client.send(req, stream=True)
+        except Exception as exc:
+            if model:
+                PROXY_ACTIVE_REQUESTS.labels(model=label).dec()
+                PROXY_REQUESTS.labels(model=label, status="error").inc()
+            logger.error(f"[{label}] request failed: {exc}")
+            raise
         
     except BaseException:
         if lock:
@@ -193,7 +195,6 @@ async def _forward(
         full_content = []  # Buffer to store the text response
         input_tokens = 0    # Track prompt/input tokens from usage field
         output_tokens = 0   # Track completion tokens from usage field
-        request_end_called = False  # Track to avoid double-calling
         try:
             first = True
             async for chunk in response.aiter_bytes():
@@ -244,15 +245,17 @@ async def _forward(
             logger.info(f"[{label}] completed in {t_done - t_start:.2f}s total")
 
         finally:
-            # Always call request_end, even if client disconnects mid-stream
-            if model and not request_end_called:
-                t_done = time.monotonic()
-                generation_time = t_done - t_first_byte
+            # Always record Prometheus metrics, even if client disconnects mid-stream
+            if model:
                 # Fallback: estimate tokens from character count if usage not available (~4 chars/token)
                 if output_tokens == 0 and full_content:
                     output_tokens = max(1, len("".join(full_content)) // 4)
-                job_history.request_end(model, input_tokens, output_tokens, generation_time)
-                request_end_called = True
+
+                PROXY_TOKENS.labels(model=label, token_type="input").inc(input_tokens)
+                PROXY_TOKENS.labels(model=label, token_type="output").inc(output_tokens)
+                PROXY_REQUESTS.labels(model=label, status=str(response.status_code)).inc()
+                PROXY_REQUEST_DURATION.labels(model=label).observe(time.monotonic() - t_start)
+                PROXY_ACTIVE_REQUESTS.labels(model=label).dec()
 
             if lock:
                 lock.release()
@@ -285,27 +288,36 @@ async def status() -> dict:
     }
 
 
+@app.get("/metrics")
+async def metrics() -> Response:
+    """Expose Prometheus metrics for scraping."""
+    PROXY_QUEUE_DEPTH.set(state.queue_depth)
+    PROXY_EXTERNAL_JOBS.set(len(external_jobs.active_job_ids))
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
 @app.get("/history")
 async def history() -> list[dict]:
     """
-    Return job history as Homepage-compatible JSON.
+    Stub endpoint for Homepage compatibility.
 
-    Groups recent requests to the same model into tasks and returns
-    metrics (request count, avg tokens/sec, total tokens, active status).
+    Previously returned job history as Homepage-compatible JSON.
+    Now returns empty list — data migrated to Prometheus metrics.
+    Re-implement later by querying Prometheus API if needed.
     """
-    return job_history.get_homepage_json()
+    return []
 
 
 @app.get("/history/summary")
 async def history_summary() -> list[dict]:
     """
-    Return a minimal summary of the last 10 jobs.
+    Stub endpoint for Homepage compatibility.
 
-    Each entry contains only two fields:
-    - name: "model-name (X,XXX tk)"
-    - description: "HH:MM:SS (active|completed)"
+    Previously returned a minimal summary of the last 10 jobs.
+    Now returns empty list — data migrated to Prometheus metrics.
+    Re-implement later by querying Prometheus API if needed.
     """
-    return job_history.get_summary_json()
+    return []
 
 
 # === External Job VRAM Coordination Endpoints ===
@@ -364,6 +376,16 @@ async def proxy(path: str, request: Request) -> Response:
 
     # Fast path: autocomplete models bypass the lock entirely
     if model in AUTOCOMPLETE_MODELS:
+        if not AUTOCOMPLETE_ENABLED:
+            logger.warning(f"Autocomplete model '{model}' requested but autocomplete is disabled")
+            return Response(
+                content=json.dumps({
+                    "error": "autocomplete_disabled",
+                    "message": "The autocomplete model is currently disabled. Enable it with 'make enable-autocomplete'."
+                }),
+                status_code=503,
+                media_type="application/json",
+            )
         logger.debug(f"Fast path: {model} → permanent slot")
         return await _forward(LLAMA_PERMANENT, request, model=model)
 

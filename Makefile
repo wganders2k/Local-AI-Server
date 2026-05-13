@@ -15,16 +15,17 @@ ifneq (,$(wildcard ./.env))
 endif
 
 .PHONY: help up down restart build pull \
-        logs logs-proxy logs-bot logs-llama logs-openwebui logs-rag logs-history \
-        status \
-        restart-bot restart-proxy restart-openwebui restart-rag \
-        shell-bot shell-proxy shell-rag \
-        llama-ps llama-models \
-        check-gpu \
-        models-download \
-        dce-export-full dce-export-channel dce-export-guild dce-help \
-        dce-evaluate history-refresh \
-        nuke
+	logs logs-proxy logs-bot logs-llama logs-openwebui logs-rag logs-history \
+	status \
+	restart-bot restart-proxy restart-openwebui restart-rag \
+	shell-bot shell-proxy shell-rag \
+	llama-ps llama-models \
+	check-gpu \
+	models-download \
+	enable-autocomplete disable-autocomplete status-autocomplete \
+	dce-export-full dce-export-channel dce-export-guild dce-help \
+	dce-evaluate history-refresh \
+	nuke
 
 # Default target — show help
 help:
@@ -72,6 +73,11 @@ help:
 	@echo "                               make models-download SLOT=swappable"
 	@echo "                               make models-download DRY_RUN=1"
 	@echo "                        Set HF_TOKEN env var for private/gated repos."
+	@echo ""
+	@echo "  ── Autocomplete Model Toggle ──────────────────────────"
+	@echo "  enable-autocomplete   Enable the permanent autocomplete model (~1.2 GB VRAM)"
+	@echo "  disable-autocomplete  Disable the permanent autocomplete model (free ~1.2 GB VRAM)"
+	@echo "  status-autocomplete   Show whether autocomplete is enabled or disabled"
 	@echo ""
 	@echo "  To add or change a model:"
 	@echo "    1. Edit models.ini (swappable) or docker-compose.yml --model flag (permanent)"
@@ -252,6 +258,59 @@ models-download:
 		$(if $(MODELS_DIR),--models-dir $(MODELS_DIR),) \
 		$(if $(SLOT),--slot $(SLOT),) \
 		$(if $(DRY_RUN),--dry-run,)
+
+# ── Autocomplete Model Toggle ────────────────────────────────
+# Enable or disable the permanent autocomplete model.
+# When disabled, llama-permanent is not started (saves ~1.2 GB VRAM).
+# The .env file is updated and the stack is restarted accordingly.
+
+## Enable the permanent autocomplete model (~1.2 GB VRAM)
+enable-autocomplete:
+	@echo "Enabling autocomplete model..."
+	@if [ -f .env ]; then \
+		if grep -q '^AUTOCOMPLETE_ENABLED=' .env; then \
+			sed -i 's/^AUTOCOMPLETE_ENABLED=.*/AUTOCOMPLETE_ENABLED=true/' .env; \
+		else \
+			echo 'AUTOCOMPLETE_ENABLED=true' >> .env; \
+		fi \
+	else \
+		echo "Warning: .env not found. Copy .env.example to .env first."; \
+	fi
+	@echo "Starting stack with autocomplete profile..."
+	docker compose --profile autocomplete up -d --build
+	@echo ""
+	@echo "✓ Autocomplete model enabled."
+	@echo "  Port :11435 is now active for the autocomplete model."
+
+## Disable the permanent autocomplete model (free ~1.2 GB VRAM)
+disable-autocomplete:
+	@echo "Disabling autocomplete model..."
+	@if [ -f .env ]; then \
+		if grep -q '^AUTOCOMPLETE_ENABLED=' .env; then \
+			sed -i 's/^AUTOCOMPLETE_ENABLED=.*/AUTOCOMPLETE_ENABLED=false/' .env; \
+		else \
+			echo 'AUTOCOMPLETE_ENABLED=false' >> .env; \
+		fi \
+	else \
+		echo "Warning: .env not found. Copy .env.example to .env first."; \
+	fi
+	@echo "Stopping llama-permanent and restarting proxy..."
+	docker compose stop llama-permanent 2>/dev/null || true
+	docker compose up -d --build
+	@echo ""
+	@echo "✓ Autocomplete model disabled."
+	@echo "  ~1.2 GB VRAM freed. Requests to 'autocomplete' will get 503."
+
+## Show whether autocomplete is enabled or disabled
+status-autocomplete:
+	@ENABLED=$$(grep -o 'AUTOCOMPLETE_ENABLED=[^ ]*' .env 2>/dev/null | cut -d= -f2); \
+	if [ -z "$$ENABLED" ]; then \
+		ENABLED="true (default)"; \
+	fi; \
+	echo "Autocomplete model: $$ENABLED"; \
+	echo ""; \
+	echo "llama-permanent container:"; \
+	docker compose ps llama-permanent 2>/dev/null || echo "  (not running)"
 
 # ── Destructive ────────────────────────────────────────────
 
