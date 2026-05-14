@@ -5,6 +5,9 @@ Wraps httpx to send chat completion requests to the proxy's
 OpenAI-compatible API endpoint (/v1/chat/completions).
 """
 
+import json
+from typing import AsyncGenerator
+
 import httpx
 from config import (
     PROXY_URL,
@@ -108,6 +111,70 @@ class ProxyClient:
 
         return content
 
+    async def chat_stream(
+        self,
+        model: str,
+        messages: list[dict],
+    ) -> AsyncGenerator[str, None]:
+        """
+        Stream a chat completion from the proxy using Server-Sent Events.
+
+        Args:
+            model: Model alias (e.g. "mimic_user3", "lore").
+            messages: List of message dicts with "role" and "content".
+
+        Yields:
+            Non-empty content strings from each SSE delta chunk.
+
+        Raises:
+            ProxyError: When the proxy is unreachable or returns an error.
+        """
+        client = await self._get_client()
+
+        payload = {
+            "model": model,
+            "messages": messages,
+            "stream": True,
+        }
+
+        try:
+            response = await client.post(
+                "/v1/chat/completions",
+                json=payload,
+            )
+        except httpx.ConnectError:
+            raise ProxyError(
+                "The AI backend is currently unreachable. Try again in a moment."
+            )
+        except httpx.TimeoutException:
+            raise ProxyError(
+                "Request timed out. The model may be busy."
+            )
+
+        if response.status_code != 200:
+            raise ProxyError(
+                f"Proxy returned error {response.status_code}: {response.text[:200]}",
+                status_code=response.status_code,
+            )
+
+        async for line in response.aiter_lines():
+            if not line or not line.startswith("data: "):
+                continue
+            data = line[len("data: "):]
+            if data == "[DONE]":
+                continue
+            try:
+                chunk = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            choices = chunk.get("choices", [])
+            if not choices:
+                continue
+            delta = choices[0].get("delta", {})
+            content = delta.get("content", "")
+            if content:
+                yield content
+
     async def get_queue_depth(self) -> int:
         """
         Query the proxy /status endpoint for current queue depth.
@@ -134,6 +201,29 @@ class ProxyClient:
 
         data = response.json()
         return data.get("queue_depth", 0)
+
+    async def list_models(self) -> list[str]:
+        """
+        Query the proxy /v1/models endpoint for available model IDs.
+
+        Returns:
+            List of model name strings. Returns an empty list on failure
+            so that autocomplete degrades gracefully.
+        """
+        client = await self._get_client()
+        try:
+            response = await client.get("/v1/models")
+        except (httpx.ConnectError, httpx.TimeoutException):
+            return []
+
+        if response.status_code != 200:
+            return []
+
+        try:
+            data = response.json()
+            return [m.get("id", "") for m in data.get("data", []) if m.get("id")]
+        except (ValueError, KeyError):
+            return []
 
     async def close(self) -> None:
         """Close the underlying HTTP client."""

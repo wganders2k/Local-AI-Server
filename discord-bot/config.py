@@ -47,6 +47,10 @@ PROXY_READ_TIMEOUT: int = 60
 PROXY_TOTAL_TIMEOUT: int = 70
 
 
+# Thread registry
+THREAD_REGISTRY_PATH: str = os.environ.get("THREAD_REGISTRY_PATH", "data/threads.json")
+
+
 # ──────────────────────────────────────────────────────────────
 # Persona Configuration
 # ──────────────────────────────────────────────────────────────

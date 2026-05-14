@@ -1,0 +1,14 @@
+{
+  "1504334578335354941": {
+    "model": "chat-chinese",
+    "name": "chat-chat-chinese",
+    "created_at": "2026-05-14T04:08:32.819140+00:00",
+    "status": "deleted"
+  },
+  "1504335794285052056": {
+    "model": "chat-liberal",
+    "name": "chat-chat-liberal",
+    "created_at": "2026-05-14T04:13:22.804765+00:00",
+    "status": "active"
+  }
+}
