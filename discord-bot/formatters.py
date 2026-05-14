@@ -29,44 +29,49 @@ def strip_disclaimers(text: str) -> str:
     return text.strip()
 
 
-def truncate_response(text: str, max_length: int = MAX_MESSAGE_LENGTH) -> str:
+def find_split_boundary(buffer: str, max_length: int) -> int:
     """
-    Truncate a response to fit within Discord's message length limit.
+    Find the best split index in a buffer exceeding max_length.
 
-    Attempts to break at the last complete sentence before the limit.
-    If no sentence boundary is found, hard-truncates at the limit.
+    Prefers splitting at paragraph breaks (\n\n), then line breaks (\n),
+    within the first max_length characters. Falls back to max_length
+    if no suitable break is found.
+
+    Args:
+        buffer: The accumulated text buffer.
+        max_length: Maximum desired chunk length.
+
+    Returns:
+        The index to split at.
     """
-    if len(text) <= max_length:
-        return text
+    if len(buffer) <= max_length:
+        return len(buffer)
 
-    # Try to find a sentence boundary near the limit
-    truncated = text[:max_length]
+    # Search within the first max_length characters
+    search_range = buffer[:max_length]
 
-    # Look for the last sentence-ending punctuation
-    last_period = truncated.rfind(".")
-    last_exclaim = truncated.rfind("!")
-    last_question = truncated.rfind("?")
+    # Prefer paragraph breaks (\n\n)
+    idx = search_range.rfind("\n\n")
+    if idx >= 0:
+        return idx + 2  # Include both newlines in the split point
 
-    boundary = max(last_period, last_exclaim, last_question)
+    # Next prefer line breaks (\n)
+    idx = search_range.rfind("\n")
+    if idx >= 0:
+        return idx + 1
 
-    if boundary > max_length * 0.5:
-        # Only use sentence boundary if it's in the latter half
-        return text[: boundary + 1].rstrip()
-
-    # Hard truncate — no good sentence boundary found
-    return truncated.rstrip() + "..."
+    # Fallback: hard split at max_length
+    return max_length
 
 
 def format_mimic_response(text: str) -> str:
     """
-    Apply all post-processing steps for mimic responses.
+    Apply post-processing for mimic responses.
 
-    1. Strip disclaimers
-    2. Truncate to Discord message limit
+    Strips disclaimers from the final accumulated chunk.
+    Truncation is no longer needed — streaming handles message splitting.
     """
-    text = strip_disclaimers(text)
-    text = truncate_response(text, MAX_MESSAGE_LENGTH)
-    return text
+    return strip_disclaimers(text)
 
 
 def build_lore_embed_discord(text: str, chunk_count: int = 0) -> "discord.Embed":

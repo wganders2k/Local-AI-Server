@@ -10,11 +10,13 @@ Features:
   - Typing indicator throughout swap + inference latency
   - Per-user rate limiting
   - Per-channel, per-persona conversation history
+  - /chat creates a thread for persistent model-based chat
 """
 
 import asyncio
 import logging
 from logging import StreamHandler
+from typing import Dict
 
 import discord
 from discord import app_commands
@@ -23,16 +25,19 @@ from config import (
     DISCORD_TOKEN,
     LORE_MODEL,
     LORE_SYSTEM_PROMPT,
+    MAX_MESSAGE_LENGTH,
     MAX_QUEUE_DEPTH,
     MIMIC_PERSONAS,
     MIMIC_SYSTEM_PROMPTS,
+    THREAD_REGISTRY_PATH,
     get_mimic_system_prompt,
     validate_config,
 )
-from formatters import build_lore_embed_discord, format_mimic_response
+from formatters import build_lore_embed_discord, find_split_boundary, format_mimic_response
 from history import ConversationHistory
 from proxy_client import ProxyClient, ProxyError
 from rate_limiter import RateLimiter
+from thread_registry import ThreadRegistry
 
 # ──────────────────────────────────────────────────────────────
 # Logging
@@ -56,6 +61,7 @@ logging.getLogger("discord.http").setLevel(logging.WARNING)
 
 intents = discord.Intents.default()
 intents.members = True
+intents.message_content = True  # Required to read message content in threads
 
 bot = commands.Bot(
     command_prefix="!",  # Unused prefix — prevents default help command
@@ -67,6 +73,8 @@ bot = commands.Bot(
 proxy_client: ProxyClient | None = None
 rate_limiter: RateLimiter | None = None
 history: ConversationHistory | None = None
+thread_registry: ThreadRegistry | None = None
+thread_models: Dict[int, str] = {}  # thread_id -> model_name mapping
 
 
 # ──────────────────────────────────────────────────────────────
@@ -77,13 +85,17 @@ history: ConversationHistory | None = None
 @bot.event
 async def on_ready():
     """Initialise shared state and sync slash commands when the bot comes online."""
-    global proxy_client, rate_limiter, history
+    global proxy_client, rate_limiter, history, thread_registry
 
     validate_config()
 
     proxy_client = ProxyClient()
     rate_limiter = RateLimiter()
     history = ConversationHistory()
+    thread_registry = ThreadRegistry(THREAD_REGISTRY_PATH)
+
+    # Restore thread mappings from persistent registry
+    await restore_thread_models()
 
     # Sync slash commands to Discord
     try:
@@ -99,6 +111,85 @@ async def on_ready():
 
 
 # ──────────────────────────────────────────────────────────────
+# Thread Restoration on Startup
+# ──────────────────────────────────────────────────────────────
+
+
+async def restore_thread_models() -> None:
+    """
+    Restore thread→model mappings from the persistent registry.
+
+    For each entry in the registry, verify the thread still exists via
+    Discord API and update its status accordingly. Only non-deleted
+    threads are added to the in-memory thread_models dict.
+    """
+    if thread_registry is None:
+        logger.warning("ThreadRegistry not initialised — skipping restore")
+        return
+
+    entries = thread_registry.get_all()
+    if not entries:
+        logger.info("No threads in registry — nothing to restore")
+        return
+
+    restored = 0
+    archived = 0
+    deleted = 0
+    skipped = 0
+
+    for thread_id, entry in entries.items():
+        model = entry.get("model")
+        name = entry.get("name", "unknown")
+        try:
+            channel = await bot.fetch_channel(thread_id)
+
+            if isinstance(channel, discord.Thread):
+                if channel.archived:
+                    thread_registry.update_status(thread_id, "archived")
+                    archived += 1
+                else:
+                    thread_registry.update_status(thread_id, "active")
+
+                # Both active and archived threads are restored so the bot
+                # responds when users post (Discord auto-unarchives on new message).
+                thread_models[thread_id] = model
+                restored += 1
+                logger.info(
+                    "Restored thread %d (%s) model=%s status=%s",
+                    thread_id, name, model, channel.archived and "archived" or "active",
+                )
+            else:
+                # Channel exists but is not a thread — mark deleted.
+                thread_registry.update_status(thread_id, "deleted")
+                deleted += 1
+                logger.warning(
+                    "Thread %d (%s) exists but is not a Thread — marked deleted",
+                    thread_id, name,
+                )
+
+        except discord.NotFound:
+            thread_registry.update_status(thread_id, "deleted")
+            deleted += 1
+            logger.info("Thread %d (%s) no longer exists — marked deleted", thread_id, name)
+        except discord.Forbidden:
+            skipped += 1
+            logger.warning(
+                "Forbidden accessing thread %d (%s) — skipping restore",
+                thread_id, name,
+            )
+        except Exception:
+            skipped += 1
+            logger.exception(
+                "Unexpected error restoring thread %d (%s)", thread_id, name
+            )
+
+    logger.info(
+        "Thread restore complete: %d restored, %d archived, %d deleted, %d skipped",
+        restored, archived, deleted, skipped,
+    )
+
+
+# ──────────────────────────────────────────────────────────────
 # Autocomplete: persona options
 # ──────────────────────────────────────────────────────────────
 
@@ -110,6 +201,25 @@ async def persona_autocomplete(
     for persona in sorted(MIMIC_SYSTEM_PROMPTS.keys()):
         if current.lower() in persona.lower():
             choices.append(app_commands.Choice(name=persona, value=persona))
+        if len(choices) >= 25:  # Discord max choices
+            break
+    return choices
+
+
+async def model_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    """Provide autocomplete suggestions for available models from the API."""
+    if not proxy_client:
+        return []
+    try:
+        models = await proxy_client.list_models()
+    except Exception:
+        models = []
+    choices = []
+    for model in sorted(models):
+        if current.lower() in model.lower():
+            choices.append(app_commands.Choice(name=model, value=model))
         if len(choices) >= 25:  # Discord max choices
             break
     return choices
@@ -180,26 +290,38 @@ async def mimic_command(
         conv_history = history.get_history(channel_id, persona)
 
         # Build full message list
+        # Label the user message with the sender's display name so the model
+        # can track who is speaking when multiple users share a channel.
+        labeled = f"[{interaction.user.display_name}]: {message}"
+
         msgs: list[dict] = [
             {"role": "system", "content": system_prompt},
         ]
         msgs.extend(conv_history)
-        msgs.append({"role": "user", "content": message})
+        msgs.append({"role": "user", "content": labeled})
 
-        # Use channel.typing() context manager to maintain typing indicator
-        # throughout the entire proxy call and response processing
+        # Stream response from proxy, splitting into ~2000-char chunks
+        buffer = ""
+        full_response = ""
+
         async with interaction.channel.typing():
-            # Call proxy
-            raw_response = await proxy_client.chat(persona, msgs)
+            async for token in proxy_client.chat_stream(persona, msgs):
+                buffer += token
+                full_response += token
 
-        # Post-process: strip disclaimers, truncate
-        response = format_mimic_response(raw_response)
+                while len(buffer) >= MAX_MESSAGE_LENGTH:
+                    split_at = find_split_boundary(buffer, MAX_MESSAGE_LENGTH)
+                    chunk = buffer[:split_at].rstrip()
+                    buffer = buffer[split_at:].lstrip("\n")
+                    if chunk:
+                        await interaction.followup.send(chunk)
 
-        # Store turn in history
-        history.add_turn(channel_id, persona, message, response)
+        # After stream ends — strip disclaimers on final buffer, send remainder
+        buffer = format_mimic_response(buffer).strip()
+        if buffer:
+            await interaction.followup.send(buffer)
 
-        # Send response
-        await interaction.followup.send(response)
+        history.add_turn(channel_id, persona, labeled, full_response)
 
     except ProxyError as e:
         logger.warning("Proxy error: %s", e)
@@ -213,6 +335,91 @@ async def mimic_command(
             "An unexpected error occurred. Please try again.",
             ephemeral=True,
         )
+
+
+# ──────────────────────────────────────────────────────────────
+# Slash Command: /chat
+# ──────────────────────────────────────────────────────────────
+
+@bot.tree.command(name="chat", description="Create a chat thread with an AI model")
+@app_commands.describe(
+    model="The model to chat with",
+)
+@app_commands.autocomplete(model=model_autocomplete)
+async def chat_command(
+    interaction: discord.Interaction,
+    model: str,
+):
+    """Handle the /chat slash command — creates a thread for persistent chat."""
+    # Rate limit check
+    if not rate_limiter.is_allowed(interaction.user.id):
+        await interaction.response.send_message(
+            "⚠️ You're sending requests too fast. Slow down a bit.",
+            ephemeral=True,
+        )
+        return
+
+    # Check that we're in a text channel that supports threads (not DMs)
+    channel = interaction.channel
+    if not hasattr(channel, "create_thread"):
+        await interaction.response.send_message(
+            "⚠️ Threads are not supported in DMs. Please use this command in a server channel.",
+            ephemeral=True,
+        )
+        return
+
+    logger.info(
+        "Chat thread request from %s in %s: model=%s",
+        interaction.user.name,
+        channel.name if channel else "DM",
+        model,
+    )
+
+    await interaction.response.defer(ephemeral=False)
+
+    try:
+        # Create a thread in the current channel
+        thread = await channel.create_thread(
+            name=f"chat-{model}",
+            auto_archive_duration=60,  # 1 hour archive duration
+            type=discord.ChannelType.public_thread,
+        )
+
+        # Register this thread for chat with the specified model
+        thread_models[thread.id] = model
+
+        # Persist thread metadata to disk registry
+        if thread_registry is not None:
+            thread_registry.register(thread.id, model, thread.name)
+
+        # Send greeting in the thread
+        await thread.send(
+            f"🤖 Chat with **{model}** started. Send your messages here!"
+        )
+
+        # Confirm to the user
+        await interaction.followup.send(
+            f"✅ Chat thread created: {thread.mention}",
+            ephemeral=True,
+        )
+
+    except discord.Forbidden:
+        await interaction.followup.send(
+            "⚠️ I don't have permission to create threads in this channel.",
+            ephemeral=True,
+        )
+    except discord.HTTPException as e:
+        if e.code == 50035:  # Cannot send messages to this thread
+            await interaction.followup.send(
+                "⚠️ Failed to create thread. The channel may have thread creation disabled.",
+                ephemeral=True,
+            )
+        else:
+            logger.exception("Failed to create chat thread")
+            await interaction.followup.send(
+                "⚠️ An unexpected error occurred while creating the thread.",
+                ephemeral=True,
+            )
 
 
 # ──────────────────────────────────────────────────────────────
@@ -292,6 +499,86 @@ async def lore_command(
             "An unexpected error occurred. Please try again.",
             ephemeral=True,
         )
+
+
+# ──────────────────────────────────────────────────────────────
+# Thread Chat Handler
+# ──────────────────────────────────────────────────────────────
+
+@bot.event
+async def on_message(message: discord.Message):
+    """Respond to regular messages sent inside chat threads."""
+    # Ignore messages from the bot itself
+    if message.author == bot.user:
+        return
+
+    # Only respond in threads that have a registered model
+    channel = message.channel
+    if not isinstance(channel, discord.Thread):
+        return
+
+    model = thread_models.get(channel.id)
+    if model is None:
+        return
+
+    # Rate limit check
+    if not rate_limiter.is_allowed(message.author.id):
+        await channel.send(
+            f"{message.author.mention} ⚠️ You're sending requests too fast. Slow down a bit.",
+        )
+        return
+
+    logger.info(
+        "Thread chat from %s in thread %s (channel %s): model=%s, message=%r",
+        message.author.name,
+        channel.name,
+        channel.parent.name if hasattr(channel, "parent") and channel.parent else "unknown",
+        model,
+        message.content[:100],
+    )
+
+    try:
+        # Build conversation history keyed by thread_id
+        conv_history = history.get_history(channel.id, model)
+
+        # Build full message list — no system prompt, just history + user message
+        # Label the user message with the sender's display name so the model
+        # can track who is speaking when multiple users share a thread.
+        labeled = f"[{message.author.display_name}]: {message.content}"
+
+        msgs: list[dict] = []
+        msgs.extend(conv_history)
+        msgs.append({"role": "user", "content": labeled})
+
+        # Stream response from proxy, splitting into ~2000-char chunks
+        buffer = ""
+        full_response = ""
+
+        async with channel.typing():
+            async for token in proxy_client.chat_stream(model, msgs):
+                buffer += token
+                full_response += token
+
+                while len(buffer) >= MAX_MESSAGE_LENGTH:
+                    split_at = find_split_boundary(buffer, MAX_MESSAGE_LENGTH)
+                    chunk = buffer[:split_at].rstrip()
+                    buffer = buffer[split_at:].lstrip("\n")
+                    if chunk:
+                        await channel.send(chunk)
+
+        # After stream ends — strip disclaimers on final buffer, send remainder
+        buffer = format_mimic_response(buffer).strip()
+        if buffer:
+            await channel.send(buffer)
+
+        history.add_turn(channel.id, model, labeled, full_response)
+
+    except ProxyError as e:
+        logger.warning("Proxy error: %s", e)
+        await channel.send(f"⚠️ {e}")
+    except Exception as e:
+        logger.exception("Unexpected error handling thread chat for model %s", model)
+        await channel.send("An unexpected error occurred. Please try again.")
 
 
 # ──────────────────────────────────────────────────────────────

@@ -365,15 +365,15 @@ dce-export-channel:
 		export --channel $(CHANNEL_ID) \
 		--format Json --output /out/ \
 		$(if $(AFTER),--after $(AFTER),) $(if $(BEFORE),--before $(BEFORE),)
-	
-	# ── History Service ──────────────────────────────────────────
-	
-	## Trigger history-service to evaluate channels and run targeted exports
-	## This is the standard pipeline trigger — host cron calls this monthly.
-	dce-evaluate:
-		@echo "Triggering history-service channel evaluation..."
-		curl -s -X POST http://localhost:11437/evaluate | python3 -m json.tool 2>/dev/null || echo "(history-service not running)"
-	
-	## Alias for dce-evaluate — single-command pipeline trigger
-	history-refresh: dce-evaluate
+# ── History Service ──────────────────────────────────────────
+
+## Trigger history-service to evaluate channels and run targeted exports
+## This is the standard pipeline trigger — host cron calls this monthly.
+dce-evaluate:
+	@echo "Triggering history-service channel evaluation..."
+	curl -s -X POST http://localhost:11437/evaluate | python3 -m json.tool 2>/dev/null || echo "(history-service not running)"
+
+## Alias for dce-evaluate — single-command pipeline trigger
+history-refresh: dce-evaluate
+
 	

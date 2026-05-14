@@ -121,6 +121,8 @@ services:
       - MAX_QUEUE_DEPTH=${MAX_QUEUE_DEPTH:-3}
       - RATE_LIMIT_PER_USER=${RATE_LIMIT_PER_USER:-5}
       - TYPING_INDICATOR_INTERVAL=${TYPING_INDICATOR_INTERVAL:-5}
+    volumes:
+      - ./discord-bot/data:/app/data  # Persistent thread registry
 
   # ──────────────────────────────────────────────────────────
   # Open WebUI (:3000)

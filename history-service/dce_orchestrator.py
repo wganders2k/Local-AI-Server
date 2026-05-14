@@ -9,7 +9,7 @@ calculation, and post-export merge into per-user JSONL archive.
 import logging
 import os
 import subprocess
-import tempfile
+import threading
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
@@ -32,6 +32,25 @@ DCE_OUTPUT_ROOT = "/out"       # Path as seen by DCE container (mounted cold sto
 HOST_RAW_DIR = "/archive/raw"  # Path as seen by history-service (bind mount)
 
 logger = logging.getLogger(__name__)
+
+# Dedicated logger for DCE output — allows selective filtering of DCE logs.
+# stdout lines → INFO, stderr lines → WARNING.
+dce_logger = logging.getLogger(__name__ + ".dce")
+
+
+def _stream_pipe(pipe, logger_method, prefix: str) -> None:
+    """
+    Read lines from a subprocess pipe and log each one in real-time.
+
+    Runs in a background thread so the main thread can wait() on the process.
+    """
+    try:
+        for line in pipe:
+            stripped = line.rstrip("\n\r")
+            if stripped:
+                logger_method(f"[DCE] {stripped}")
+    except Exception as e:
+        logger_method(f"[DCE] pipe read error: {e}")
 
 
 def _current_user_string() -> str:
@@ -107,28 +126,57 @@ def export_channel(
         cmd.extend(["--before", before])
     
     logger.info(f"Running DCE export: {' '.join(cmd)}")
-    
+
     try:
-        result = subprocess.run(
+        process = subprocess.Popen(
             cmd,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=3600,  # 1 hour max per channel export
         )
-        
-        if result.returncode != 0:
+
+        # Start background threads to stream stdout and stderr to the logger.
+        stdout_thread = threading.Thread(
+            target=_stream_pipe,
+            args=(process.stdout, dce_logger.info, ""),
+            daemon=True,
+        )
+        stderr_thread = threading.Thread(
+            target=_stream_pipe,
+            args=(process.stderr, dce_logger.warning, ""),
+            daemon=True,
+        )
+        stdout_thread.start()
+        stderr_thread.start()
+
+        # Wait for process to complete with a timeout.
+        try:
+            process.wait(timeout=3600)  # 1 hour max per channel export
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+            stdout_thread.join(timeout=5)
+            stderr_thread.join(timeout=5)
+            logger.error(f"DCE export timed out for channel {channel_id}")
+            return None
+
+        # Ensure threads have finished reading any remaining pipe data.
+        stdout_thread.join(timeout=5)
+        stderr_thread.join(timeout=5)
+
+        # Close pipes to free resources.
+        process.stdout.close()
+        process.stderr.close()
+
+        if process.returncode != 0:
             logger.error(
-                f"DCE export failed for channel {channel_id} (exit {result.returncode}):\n"
-                f"STDERR: {result.stderr[:500]}"
+                f"DCE export failed for channel {channel_id} (exit {process.returncode})"
             )
             return None
-        
+
         logger.info(f"DCE export completed for channel {channel_id} → {dce_output_dir}")
         return dce_output_dir
-    
-    except subprocess.TimeoutExpired:
-        logger.error(f"DCE export timed out for channel {channel_id}")
-        return None
+
     except Exception as e:
         logger.error(f"DCE export failed for channel {channel_id}: {e}")
         return None
