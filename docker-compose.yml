@@ -107,7 +107,7 @@ services:
       start_period: 10s
   # ──────────────────────────────────────────────────────────
   # Discord Bot
-  # Mention routing, typing indicators, lore+mimic chain.
+  # Slash commands, typing indicators, lore+mimic chain.
   # ──────────────────────────────────────────────────────────
   discord-bot:
     build: ./discord-bot
@@ -115,12 +115,17 @@ services:
     depends_on:
       proxy:
         condition: service_healthy
+      rag-service:
+        condition: service_started
     environment:
       - DISCORD_TOKEN=${DISCORD_TOKEN}
       - PROXY_URL=${PROXY_URL}
       - MAX_QUEUE_DEPTH=${MAX_QUEUE_DEPTH:-3}
       - RATE_LIMIT_PER_USER=${RATE_LIMIT_PER_USER:-5}
       - TYPING_INDICATOR_INTERVAL=${TYPING_INDICATOR_INTERVAL:-5}
+      - RAG_SERVICE_URL=http://rag-service:8001
+      - LORE_TOP_K=${LORE_TOP_K:-5}
+      - RAG_ENABLED=${RAG_ENABLED:-true}
     volumes:
       - ./discord-bot/data:/app/data  # Persistent thread registry
 
@@ -154,27 +159,29 @@ services:
   # CPU-only — no VRAM impact.
   # Reads JSONL history files produced by history-service.
   # ──────────────────────────────────────────────────────────
-  # rag-service:
-  #   build: ./rag
-  #   restart: unless-stopped
-  #   environment:
-  #     - CHROMA_HOST=chromadb
-  #     - CHROMA_PORT=8000
-  #   depends_on:
-  #     - chromadb
-  #   volumes:
-  #     - history_data:/history:ro    # Read-only access to JSONL history files
+  rag-service:
+    build: ./rag
+    restart: unless-stopped
+    environment:
+      - CHROMA_HOST=chromadb
+      - CHROMA_PORT=8000
+      - ARCHIVE_DIR=/archive
+    depends_on:
+      chromadb:
+        condition: service_started
+    volumes:
+      - /mnt/storage_cold/array/DiscordArchive/archive:/archive:ro  # JSONL archive
 
   # ──────────────────────────────────────────────────────────
   # ChromaDB
   # Vector store for lore embeddings.
   # CPU-only — no VRAM impact.
   # ──────────────────────────────────────────────────────────
-  # chromadb:
-  #   image: chromadb/chroma:latest
-  #   restart: unless-stopped
-  #   volumes:
-  #     - chroma_data:/chroma/chroma
+  chromadb:
+    image: chromadb/chroma:latest
+    restart: unless-stopped
+    volumes:
+      - chroma_data:/chroma/chroma
 
   # ──────────────────────────────────────────────────────────
   # DiscordChatExporter — CLI-only, run via `docker compose run`

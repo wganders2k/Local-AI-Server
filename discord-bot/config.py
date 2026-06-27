@@ -46,9 +46,16 @@ PROXY_CONNECTION_TIMEOUT: int = 10
 PROXY_READ_TIMEOUT: int = 60
 PROXY_TOTAL_TIMEOUT: int = 70
 
-
 # Thread registry
 THREAD_REGISTRY_PATH: str = os.environ.get("THREAD_REGISTRY_PATH", "data/threads.json")
+
+# ──────────────────────────────────────────────────────────────
+# RAG Service Configuration
+# ──────────────────────────────────────────────────────────────
+
+RAG_SERVICE_URL: str = os.environ.get("RAG_SERVICE_URL", "http://rag-service:8001")
+LORE_TOP_K: int = int(os.environ.get("LORE_TOP_K", "5"))
+RAG_ENABLED: bool = os.environ.get("RAG_ENABLED", "true").lower() == "true"
 
 
 # ──────────────────────────────────────────────────────────────
