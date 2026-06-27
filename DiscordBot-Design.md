@@ -523,6 +523,29 @@ The typing indicator (via `interaction.response.defer()`) is active throughout i
 
 ---
 
+## 17. Phase 2 — RAG Implementation Checklist
+
+### Completed
+- [x] Create `rag/requirements.txt` with chromadb, sentence-transformers, fastapi, uvicorn
+- [x] Implement `rag/ingest.py` — JSONL archive loader, cross-user flattening, temporal conversation chunking (1-hour gap), mini-transcript formatting, ChromaDB upsert
+- [x] Implement `rag/retrieve.py` — ChromaDB query, context formatting with chunk separators
+- [x] Implement `rag/main.py` — FastAPI app with `/retrieve`, `/ingest`, `/health` endpoints
+- [x] Create `rag/Dockerfile` — Python 3.11-slim base, CPU-only
+- [x] Implement `discord-bot/rag_client.py` — async HTTP client with graceful degradation
+- [x] Add RAG env vars to `discord-bot/config.py` (RAG_SERVICE_URL, LORE_TOP_K, RAG_ENABLED)
+- [x] Wire RAG client into `/lore` command in `discord-bot/bot.py`
+- [x] Configure rag-service + chromadb in `docker-compose.yml`
+- [x] Add RAG env vars to `.env.example`
+
+### Pending
+- [ ] Run initial ingest (`POST /ingest`) and verify ChromaDB chunk count
+- [ ] Test `/lore` command end-to-end with RAG retrieval
+- [ ] Verify graceful fallback when RAG service is unreachable
+- [ ] Tune `LORE_TOP_K` and chunk gap threshold based on retrieval quality
+- [ ] Add ingest scheduling (cron or manual trigger via Makefile target)
+
+---
+
 ## 16. Image Captioning in Discord History
 
 Discord image attachments shared by members are automatically captioned by the `history-service` as a background process. This is **transparent to the bot** — the bot never calls the image captioner directly.

@@ -195,6 +195,81 @@ async def evaluate() -> dict:
         }
 
 
+@app.post("/reparse")
+async def reparse() -> dict:
+    """
+    Re-parse all existing raw DCE export files into the JSONL archive.
+
+    Scans /archive/raw/ for all timestamped export directories, parses
+    every JSON file found using the DCE parser, and appends new records
+    to the per-user JSONL archive. Skips duplicates via message_id.
+
+    This endpoint does NOT call the Discord API or invoke DCE subprocesses.
+    Use it to iterate on parser changes without waiting for fresh exports.
+    """
+    logger.info("Re-parse triggered via POST /reparse")
+
+    try:
+        from dce_parser import parse_dce_export_directory
+        from jsonl_store import append_messages as _append_messages
+
+        raw_dir = os.path.join("/archive", "raw")
+        if not os.path.isdir(raw_dir):
+            return {
+                "status": "error",
+                "message": f"Raw exports directory does not exist: {raw_dir}",
+            }
+
+        # Collect all timestamped export directories
+        export_dirs = sorted([
+            d for d in os.listdir(raw_dir)
+            if os.path.isdir(os.path.join(raw_dir, d))
+        ])
+
+        if not export_dirs:
+            return {
+                "status": "complete",
+                "message": "No export directories found in raw/",
+                "directories_scanned": 0,
+                "total_records_parsed": 0,
+                "total_records_appended": 0,
+                "users_updated": 0,
+            }
+
+        total_parsed = 0
+        total_appended = 0
+        users_touched: set = set()
+
+        for dirname in export_dirs:
+            dirpath = os.path.join(raw_dir, dirname)
+            logger.info(f"Parsing export directory: {dirpath}")
+
+            # Parse returns {user_id: [records]}
+            user_records = await asyncio.to_thread(parse_dce_export_directory, dirpath)
+            total_parsed += sum(len(recs) for recs in user_records.values())
+
+            for uid, records in user_records.items():
+                if records:
+                    appended = await asyncio.to_thread(_append_messages, uid, records)
+                    total_appended += appended
+                    users_touched.add(uid)
+
+        return {
+            "status": "complete",
+            "directories_scanned": len(export_dirs),
+            "total_records_parsed": total_parsed,
+            "total_records_appended": total_appended,
+            "users_updated": len(users_touched),
+        }
+
+    except Exception as e:
+        logger.error(f"Re-parse failed: {e}", exc_info=True)
+        return {
+            "status": "error",
+            "message": str(e),
+        }
+
+
 @app.get("/archive/{user_id}/count")
 async def archive_count(user_id: str) -> dict:
     """Message count for a user in the archive."""

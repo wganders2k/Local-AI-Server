@@ -25,6 +25,7 @@ endif
 	enable-autocomplete disable-autocomplete status-autocomplete \
 	dce-export-full dce-export-channel dce-export-guild dce-help \
 	dce-evaluate history-refresh \
+	rag-ingest rag-status \
 	nuke
 
 # Default target — show help
@@ -97,6 +98,12 @@ help:
 	@echo "  ── History Service ──────────────────────────────────────"
 	@echo "  dce-evaluate      Trigger history-service to evaluate channels and export"
 	@echo "  history-refresh   Alias for dce-evaluate"
+	@echo ""
+	@echo "  ── RAG ────────────────────────────────────────────────"
+	@echo "  rag-ingest        Trigger lore ingestion into ChromaDB"
+	@echo "                        Reads JSONL archives, embeds, and upserts."
+	@echo "                        Idempotent — safe to re-run."
+	@echo "  rag-status        Show ChromaDB collection stats & data path"
 	@echo ""
 	@echo "  ── Destructive ────────────────────────────────────────"
 	@echo "  nuke                ⚠️  Stop everything AND remove all volumes"
@@ -221,6 +228,34 @@ shell-proxy:
 ## Open an interactive bash shell inside the rag-service container
 shell-rag:
 	docker compose exec rag-service bash
+
+# ── RAG ────────────────────────────────────────────────────
+
+## Trigger lore ingestion into ChromaDB.
+## Reads JSONL archives, embeds messages, and upserts to the vector store.
+## Idempotent — safe to re-run (will update existing records).
+rag-ingest:
+	docker compose exec rag-service python -c " \
+		import httpx; \
+		r = httpx.post('http://localhost:8001/ingest', json={}, timeout=600); \
+		print(r.text) \
+	"
+
+## Show ChromaDB collection stats & volume path
+rag-status:
+	@echo "=== ChromaDB volume path ==="
+	@docker volume inspect local-ai-server_chroma_data --format '{{.Mountpoint}}'
+	@echo ""
+	@echo "=== Data directory contents ==="
+	@ls -la $$(docker volume inspect local-ai-server_chroma_data --format '{{.Mountpoint}}')/
+	@echo ""
+	@echo "=== Collection document counts ==="
+	@docker compose exec rag-service python -c " \
+		import chromadb; \
+		client = chromadb.HttpClient(host='chromadb', port='8000'); \
+		cols = client.list_collections(); \
+		[print(f'  {c.name}: {client.get_collection(c.name).count()} documents') for c in cols] \
+	" 2>/dev/null || echo "  (RAG/ChromaDB not reachable)"
 
 # ── Model Management ───────────────────────────────────────
 

@@ -29,6 +29,8 @@ from config import (
     MAX_QUEUE_DEPTH,
     MIMIC_PERSONAS,
     MIMIC_SYSTEM_PROMPTS,
+    RAG_ENABLED,
+    RAG_SERVICE_URL,
     THREAD_REGISTRY_PATH,
     get_mimic_system_prompt,
     validate_config,
@@ -36,6 +38,7 @@ from config import (
 from formatters import build_lore_embed_discord, find_split_boundary, format_mimic_response
 from history import ConversationHistory
 from proxy_client import ProxyClient, ProxyError
+from rag_client import RAGClient
 from rate_limiter import RateLimiter
 from thread_registry import ThreadRegistry
 
@@ -71,6 +74,7 @@ bot = commands.Bot(
 
 # Shared state — initialised in on_ready
 proxy_client: ProxyClient | None = None
+rag_client: RAGClient | None = None
 rate_limiter: RateLimiter | None = None
 history: ConversationHistory | None = None
 thread_registry: ThreadRegistry | None = None
@@ -85,11 +89,12 @@ thread_models: Dict[int, str] = {}  # thread_id -> model_name mapping
 @bot.event
 async def on_ready():
     """Initialise shared state and sync slash commands when the bot comes online."""
-    global proxy_client, rate_limiter, history, thread_registry
+    global proxy_client, rag_client, rate_limiter, history, thread_registry
 
     validate_config()
 
     proxy_client = ProxyClient()
+    rag_client = RAGClient(RAG_SERVICE_URL) if RAG_ENABLED else None
     rate_limiter = RateLimiter()
     history = ConversationHistory()
     thread_registry = ThreadRegistry(THREAD_REGISTRY_PATH)
@@ -468,15 +473,35 @@ async def lore_command(
     await interaction.response.defer()
 
     try:
+        # Retrieve relevant lore chunks from RAG service
+        context = ""
+        chunk_count = 0
+        if rag_client is not None:
+            from config import LORE_TOP_K
+            context, chunk_count = await rag_client.retrieve(question, top_k=LORE_TOP_K)
+
+            # ── LOGGING: show what RAG returned ──
+            logger.info(
+                "RAG retrieve for question=%r → %d chunks",
+                question, chunk_count,
+            )
+            if context:
+                logger.info("RAG context (first 500 chars):\n%s...", context[:500])
+            else:
+                logger.warning("RAG returned no context for question=%r", question)
+
+        # Build user message with retrieved context
+        if context:
+            user_content = f"Retrieved context:\n\n{context}\n\nQuestion: {question}"
+        else:
+            user_content = (
+                "No retrieved context available.\n\n"
+                f"Question: {question}"
+            )
+
         messages = [
             {"role": "system", "content": LORE_SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": (
-                    "No retrieved context available (RAG service not yet configured).\n\n"
-                    f"Question: {question}"
-                ),
-            },
+            {"role": "user", "content": user_content},
         ]
 
         # Use channel.typing() context manager to maintain typing indicator
@@ -484,7 +509,7 @@ async def lore_command(
         async with interaction.channel.typing():
             lore_text = await proxy_client.chat(LORE_MODEL, messages)
 
-        embed = build_lore_embed_discord(lore_text, chunk_count=0)
+        embed = build_lore_embed_discord(lore_text, chunk_count=chunk_count)
         await interaction.followup.send(embed=embed)
 
     except ProxyError as e:
@@ -598,6 +623,8 @@ async def main():
     finally:
         if proxy_client:
             await proxy_client.close()
+        if rag_client:
+            await rag_client.close()
         await bot.close()
         logger.info("Bot shut down cleanly.")
 
