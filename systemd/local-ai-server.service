@@ -1,0 +1,44 @@
+[Unit]
+# Brings the compose stack up at boot, recreating containers if a normal start
+# fails.
+#
+# Why this is needed: the NVIDIA container runtime resolves driver libraries at
+# container *create* time and bakes their exact versioned paths into the
+# container's OCI mount spec — e.g. libEGL_nvidia.so.595.58.03. When the driver
+# is upgraded (unattended-upgrades does this happily), those files are replaced
+# by a new version and the old paths vanish. Every GPU container created before
+# the upgrade then fails at init with:
+#
+#   failed to fulfil mount request: open .../libEGL_nvidia.so.<old>: no such file
+#
+# `restart: unless-stopped` does not rescue this. Restart policies apply to
+# container *exits*; this is a failure during container init, so Docker gives up
+# and the container simply stays down until someone recreates it. That is why
+# the stack silently stayed dead for four days after the 2026-07-22 reboot.
+#
+# Recreating regenerates the mount spec against whatever driver is currently
+# installed, which is the only thing that actually fixes it.
+Description=local-ai-server compose stack
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=peacow
+Group=docker
+WorkingDirectory=/home/peacow/local-ai-server
+
+# Try a normal start first — cheap and preserves containers. If anything fails
+# to come up (the driver-upgrade case above), recreate. Recreating these
+# containers is safe: all persistent data lives in named volumes or bind mounts.
+ExecStart=/bin/bash -c '/usr/bin/docker compose up -d --remove-orphans || /usr/bin/docker compose up -d --force-recreate'
+
+ExecStop=/usr/bin/docker compose stop
+
+# Pulling images and loading a model can take a while on a cold boot.
+TimeoutStartSec=900
+
+[Install]
+WantedBy=multi-user.target

@@ -17,7 +17,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-from config import AUTOCOMPLETE_ENABLED, AUTOCOMPLETE_MODELS, GLANCES_URL, LLAMA_PERMANENT, LLAMA_SWAPPABLE, SWAPPABLE_MODELS
+from config import (
+    AUTOCOMPLETE_ENABLED,
+    AUTOCOMPLETE_MODELS,
+    EXTERNAL_JOB_YIELD_ON_TIMEOUT,
+    EXTERNAL_JOB_YIELD_TIMEOUT,
+    GLANCES_URL,
+    IDLE_EVICT_ENABLED,
+    IDLE_EVICT_POLL_SECONDS,
+    IDLE_EVICT_SECONDS,
+    IDLE_EVICT_UNLOAD_TIMEOUT,
+    LLAMA_PERMANENT,
+    LLAMA_SWAPPABLE,
+    SWAPPABLE_MODELS,
+)
 from state import state, external_jobs
 
 # HTTP client — shared across all requests, reuses connections
@@ -44,14 +57,18 @@ async def lifespan(app: FastAPI):
     global _http_client
     _http_client = httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0))
     logger.info("HTTP client initialised")
-    # Start background VRAM monitor
-    vram_task = asyncio.create_task(_vram_monitor())
+    # Background tasks
+    tasks = [asyncio.create_task(_vram_monitor())]
+    if IDLE_EVICT_ENABLED:
+        tasks.append(asyncio.create_task(_idle_evictor()))
     yield
-    vram_task.cancel()
-    try:
-        await vram_task
-    except asyncio.CancelledError:
-        pass
+    for t in tasks:
+        t.cancel()
+    for t in tasks:
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
     await _http_client.aclose()
     logger.info("HTTP client closed")
 
@@ -68,31 +85,138 @@ async def _vram_monitor(interval: int = 30) -> None:
         return
 
     gpu_api = f"{GLANCES_URL.rstrip('/')}/api/4/gpu"
-    async with _http_client as client:
-        while True:
-            try:
-                resp = await client.get(gpu_api, timeout=5.0)
-                if resp.status_code == 200:
-                    gpus = resp.json()
-                    if gpus:
-                        gpu = gpus[0]  # Use first GPU
-                        mem_percent = float(gpu.get("mem", 0))
-                        GPU_VRAM_PERCENT.set(mem_percent)
+    # NB: use _http_client directly — an `async with` here would close the
+    # shared client for the whole proxy when this task exits.
+    while True:
+        try:
+            resp = await _http_client.get(gpu_api, timeout=5.0)
+            if resp.status_code == 200:
+                gpus = resp.json()
+                if gpus:
+                    gpu = gpus[0]  # Use first GPU
+                    mem_percent = float(gpu.get("mem", 0))
+                    GPU_VRAM_PERCENT.set(mem_percent)
 
-                        model_label = state.current_model or "none"
-                        age = state.time_since_swap
-                        age_str = f"{age:.0f}s ago" if age is not None else "never swapped"
-                        logger.info(
-                            f"VRAM: {mem_percent:.1f}% | "
-                            f"swappable slot: {model_label} (loaded {age_str})"
-                        )
-                    else:
-                        logger.warning("VRAM monitor: Glances returned empty GPU list")
+                    model_label = state.current_model or "none"
+                    age = state.time_since_swap
+                    age_str = f"{age:.0f}s ago" if age is not None else "never swapped"
+                    logger.info(
+                        f"VRAM: {mem_percent:.1f}% | "
+                        f"swappable slot: {model_label} (loaded {age_str})"
+                    )
                 else:
-                    logger.warning(f"VRAM monitor: Glances API returned HTTP {resp.status_code}")
-            except Exception as exc:
-                logger.warning(f"VRAM monitor error: {exc}")
-            await asyncio.sleep(interval)
+                    logger.warning("VRAM monitor: Glances returned empty GPU list")
+            else:
+                logger.warning(f"VRAM monitor: Glances API returned HTTP {resp.status_code}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(f"VRAM monitor error: {exc}")
+        await asyncio.sleep(interval)
+
+
+# Idle eviction — hand the GPU to external jobs when the LLMs are quiet
+
+async def _resident_models() -> list[str]:
+    """Model ids the swappable router currently has loaded."""
+    resp = await _http_client.get(f"{LLAMA_SWAPPABLE}/v1/models", timeout=10.0)
+    resp.raise_for_status()
+    return [
+        m.get("id", "?")
+        for m in resp.json().get("data", [])
+        if (m.get("status") or {}).get("value", "unloaded") != "unloaded"
+    ]
+
+
+async def _unload_resident_models(resident: list[str] | None = None) -> bool:
+    """
+    Ask the router to unload, then verify it actually happened.
+
+    Returns True once nothing is resident. We verify rather than trust the
+    response because the whole point is to guarantee free VRAM before telling
+    an external job it may run.
+
+    The router requires the model name — an empty body is rejected with
+    400 "model is not found" and nothing is unloaded.
+    """
+    if resident is None:
+        try:
+            resident = await _resident_models()
+        except Exception as exc:
+            logger.warning(f"Idle evictor: could not read model status: {exc}")
+            return False
+
+    for model in resident:
+        try:
+            resp = await _http_client.post(
+                f"{LLAMA_SWAPPABLE}/models/unload",
+                json={"model": model},
+                timeout=30.0,
+            )
+            if resp.status_code != 200:
+                logger.warning(
+                    f"Idle evictor: unload of '{model}' returned "
+                    f"HTTP {resp.status_code}: {resp.text[:200]}"
+                )
+                return False
+        except Exception as exc:
+            logger.warning(f"Idle evictor: unload of '{model}' failed: {exc}")
+            return False
+
+    deadline = time.monotonic() + IDLE_EVICT_UNLOAD_TIMEOUT
+    while time.monotonic() < deadline:
+        try:
+            resident = await _resident_models()
+        except Exception as exc:
+            logger.warning(f"Idle evictor: could not read model status: {exc}")
+            return False
+        if not resident:
+            state.current_model = None
+            return True
+        await asyncio.sleep(2.0)
+
+    logger.warning(f"Idle evictor: models still resident after {IDLE_EVICT_UNLOAD_TIMEOUT}s")
+    return False
+
+
+async def _idle_evictor() -> None:
+    """
+    Free the swappable slot once the LLMs have been idle long enough, so a
+    registered external job gets a real window.
+
+    The router keeps a model resident indefinitely once loaded, so without this
+    an external job would be permanently starved on any day with LLM traffic.
+    """
+    logger.info(
+        f"Idle evictor active: unload after {IDLE_EVICT_SECONDS:.0f}s idle "
+        f"when an external job is waiting"
+    )
+    while True:
+        await asyncio.sleep(IDLE_EVICT_POLL_SECONDS)
+        try:
+            if not external_jobs.external_job_running:
+                continue
+            if external_jobs.llm_inflight > 0 or state.queue_depth > 0:
+                continue
+            idle = state.idle_seconds
+            if idle is not None and idle < IDLE_EVICT_SECONDS:
+                continue
+
+            resident = await _resident_models()
+            if resident:
+                logger.info(
+                    f"LLMs idle {idle if idle is not None else float('inf'):.0f}s and external "
+                    f"job(s) waiting — unloading {resident}"
+                )
+                if not await _unload_resident_models(resident):
+                    continue
+
+            if external_jobs.yield_requested:
+                external_jobs.release_yield()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(f"Idle evictor error: {exc}")
 
 
 # Internal helpers
@@ -137,9 +261,14 @@ async def _forward(
     request: Request,
     model: str | None = None,
     lock: asyncio.Lock | None = None,
+    on_complete=None,
 ) -> Response:
     """
     Transparently forward the raw request to the target_base_url.
+
+    ``on_complete`` runs once the response stream is fully consumed (or the
+    client disconnects), alongside the lock release — used to drop the
+    in-flight LLM refcount that gates external-job yielding.
     """
     try:
         body = await request.body()
@@ -186,6 +315,8 @@ async def _forward(
     except BaseException:
         if lock:
             lock.release()
+        if on_complete:
+            on_complete()
         raise
 
     t_first_byte = time.monotonic()
@@ -259,6 +390,8 @@ async def _forward(
 
             if lock:
                 lock.release()
+            if on_complete:
+                on_complete()
             await response.aclose()
 
     return StreamingResponse(
@@ -347,23 +480,41 @@ async def external_job_status(job_id: str = "") -> dict:
         return {
             "external_job_running": external_jobs.external_job_running,
             "active_jobs": external_jobs.active_job_ids,
+            "yield_requested": external_jobs.yield_requested,
+            "may_run": not external_jobs.yield_requested,
         }
     return external_jobs.get_status(job_id)
 
 
 @app.post("/external-job/yield")
 async def external_job_yield(body: dict) -> dict:
-    """Handle yield/resume actions from external jobs."""
+    """
+    Handle yield/resume signals from external jobs.
+
+    ``action: "yield"`` means "my VRAM is released" — the job is expected to
+    have verified that before calling, since this is what unblocks the proxy
+    from loading a model.
+    """
     job_id = body.get("job_id", "")
     action = body.get("action", "")
     if not job_id:
         return {"error": "job_id required"}
     if action == "yield":
-        return external_jobs.clear_yield(job_id)
+        return external_jobs.confirm_yield(job_id)
     elif action == "resume":
         return external_jobs.resume(job_id)
     else:
         return {"error": f"Unknown action: {action}"}
+
+
+@app.get("/external-job/debug")
+async def external_job_debug() -> dict:
+    """Full coordination state — for validating the handover protocol."""
+    return external_jobs.snapshot() | {
+        "llm_idle_seconds": state.idle_seconds,
+        "current_model": state.current_model,
+        "queue_depth": state.queue_depth,
+    }
 
 
 @app.api_route(
@@ -392,46 +543,93 @@ async def proxy(path: str, request: Request) -> Response:
     # Swappable path: serialise via lock
     if model in SWAPPABLE_MODELS or model is not None:
         state.increment_queue()
-        
-        # Yield to external jobs if we need to load/switch a model
-        if model in SWAPPABLE_MODELS and external_jobs.external_job_running:
-            active_jobs = external_jobs.active_job_ids
-            if active_jobs:
+        state.record_request()
+        external_jobs.llm_request_started()
+        released = False
+
+        def _finish():
+            """Drop the refcount; hand VRAM back once nothing is in flight."""
+            nonlocal released
+            if released:
+                return
+            released = True
+            external_jobs.llm_request_finished()
+            if external_jobs.llm_inflight == 0 and state.queue_depth == 0:
+                external_jobs.release_yield()
+
+        try:
+            # Reclaim VRAM from external jobs before touching the GPU. The
+            # router auto-loads on first request, so this must complete before
+            # we forward anything — not after.
+            if external_jobs.external_job_running:
                 logger.info(
-                    f"LLM model '{model}' requested — {len(active_jobs)} external job(s) running, "
-                    f"requesting yield: {active_jobs}"
+                    f"LLM model '{model}' requested — {len(external_jobs.active_job_ids)} "
+                    f"external job(s) registered, requesting VRAM release: "
+                    f"{external_jobs.active_job_ids}"
                 )
-                # Signal all external jobs to yield
-                for job_id in active_jobs:
-                    external_jobs.request_yield(job_id)
-                # Wait for external jobs to acknowledge yield
+                external_jobs.request_yield_all()
                 try:
-                    await asyncio.wait_for(external_jobs.wait_for_yield(), timeout=120.0)
-                    logger.info("External job(s) yielded — proceeding with model load")
-                except asyncio.TimeoutError:
-                    logger.warning("External job(s) did not yield in time — proceeding anyway")
-
-        try:
-            await state.lock.acquire()
-        except BaseException:
-            state.decrement_queue()
-            raise
-            
-        state.decrement_queue()
-        
-        try:
-            if model in SWAPPABLE_MODELS:
-                if state.current_model != model:
-                    logger.info(
-                        f"Model switch: {state.current_model} → {model} "
-                        f"(swappable slot evict + load)"
+                    await asyncio.wait_for(
+                        external_jobs.wait_for_yield(),
+                        timeout=EXTERNAL_JOB_YIELD_TIMEOUT,
                     )
-                    state.record_swap(model)
-        except BaseException:
-            state.lock.release()
-            raise
+                    logger.info("External job(s) released VRAM — proceeding with model load")
+                except asyncio.TimeoutError:
+                    if EXTERNAL_JOB_YIELD_ON_TIMEOUT == "wait":
+                        logger.warning(
+                            f"External job(s) still holding VRAM after "
+                            f"{EXTERNAL_JOB_YIELD_TIMEOUT:.0f}s — continuing to wait"
+                        )
+                        await external_jobs.wait_for_yield()
+                    else:
+                        # Refusing is the safe failure: loading a model on top
+                        # of a job still holding several GB OOMs both workloads.
+                        logger.error(
+                            f"External job(s) did not release VRAM within "
+                            f"{EXTERNAL_JOB_YIELD_TIMEOUT:.0f}s — refusing request "
+                            f"rather than risking an OOM"
+                        )
+                        state.decrement_queue()
+                        _finish()
+                        return Response(
+                            content=json.dumps({
+                                "error": "vram_unavailable",
+                                "message": (
+                                    "An external GPU job has not released VRAM yet. "
+                                    "Retry shortly."
+                                ),
+                            }),
+                            status_code=503,
+                            headers={"Retry-After": "30"},
+                            media_type="application/json",
+                        )
 
-        return await _forward(LLAMA_SWAPPABLE, request, model=model, lock=state.lock)
+            try:
+                await state.lock.acquire()
+            except BaseException:
+                state.decrement_queue()
+                raise
+
+            state.decrement_queue()
+
+            try:
+                if model in SWAPPABLE_MODELS:
+                    if state.current_model != model:
+                        logger.info(
+                            f"Model switch: {state.current_model} → {model} "
+                            f"(swappable slot evict + load)"
+                        )
+                        state.record_swap(model)
+            except BaseException:
+                state.lock.release()
+                raise
+
+            return await _forward(
+                LLAMA_SWAPPABLE, request, model=model, lock=state.lock, on_complete=_finish
+            )
+        except BaseException:
+            _finish()
+            raise
 
     # Fallback: no model in body
     logger.debug(f"No model in request body, forwarding to swappable: /{path}")

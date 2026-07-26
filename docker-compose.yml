@@ -92,6 +92,15 @@ services:
       - MODELS_INI_PATH=/models.ini
       - GLANCES_URL=http://192.168.2.55:61208
       - AUTOCOMPLETE_ENABLED=${AUTOCOMPLETE_ENABLED:-true}
+      # External GPU job coordination. The proxy waits for registered jobs to
+      # confirm they have released VRAM before loading a model, and refuses the
+      # request rather than loading over a job that never confirmed.
+      - EXTERNAL_JOB_YIELD_TIMEOUT=${EXTERNAL_JOB_YIELD_TIMEOUT:-180}
+      - EXTERNAL_JOB_YIELD_ON_TIMEOUT=${EXTERNAL_JOB_YIELD_ON_TIMEOUT:-503}
+      # Unload the resident model after this long idle so external jobs get a
+      # VRAM window — the router otherwise keeps it loaded indefinitely.
+      - IDLE_EVICT_ENABLED=${IDLE_EVICT_ENABLED:-true}
+      - IDLE_EVICT_SECONDS=${IDLE_EVICT_SECONDS:-600}
     volumes:
       - /home/peacow/local-ai-server/models.ini:/models.ini:ro
       - /home/peacow/local-ai-server/system_prompts.ini:/system_prompts.ini:ro
