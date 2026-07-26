@@ -7,7 +7,7 @@ RAG service is unreachable rather than raising.
 """
 
 import logging
-from typing import Tuple
+from typing import Optional, Tuple
 
 import httpx
 
@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 class RAGClient:
     """Async client for the RAG service /retrieve endpoint."""
 
-    def __init__(self, base_url: str, timeout: float = 10.0):
+    def __init__(self, base_url: str, timeout: float = 30.0):
         """
         Args:
             base_url: Base URL of the RAG service (e.g. http://rag-service:8001).
@@ -36,13 +36,23 @@ class RAGClient:
             )
         return self._client
 
-    async def retrieve(self, query: str, top_k: int = 5) -> Tuple[str, int]:
+    async def retrieve(
+        self,
+        query: str,
+        top_k: int = 5,
+        channel_name: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> Tuple[str, int]:
         """
         Retrieve relevant lore chunks for a query.
 
         Args:
             query: The user's lore question.
             top_k: Number of chunks to retrieve.
+            channel_name: Optional — only search within this channel.
+            start_date: Optional ISO 8601 date — only include results after this date.
+            end_date: Optional ISO 8601 date — only include results before this date.
 
         Returns:
             Tuple of (context_string, chunk_count).
@@ -50,9 +60,17 @@ class RAGClient:
         """
         client = await self._get_client()
         try:
+            payload = {"query": query, "top_k": top_k}
+            if channel_name:
+                payload["channel_name"] = channel_name
+            if start_date:
+                payload["start_date"] = start_date
+            if end_date:
+                payload["end_date"] = end_date
+
             resp = await client.post(
                 "/retrieve",
-                json={"query": query, "top_k": top_k},
+                json=payload,
             )
             resp.raise_for_status()
             data = resp.json()

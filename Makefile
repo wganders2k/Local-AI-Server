@@ -235,11 +235,7 @@ shell-rag:
 ## Reads JSONL archives, embeds messages, and upserts to the vector store.
 ## Idempotent — safe to re-run (will update existing records).
 rag-ingest:
-	docker compose exec rag-service python -c " \
-		import httpx; \
-		r = httpx.post('http://localhost:8001/ingest', json={}, timeout=600); \
-		print(r.text) \
-	"
+	docker compose exec rag-service python -c "import httpx; r = httpx.post('http://localhost:8001/ingest', json={}, timeout=600); print(r.text)"
 
 ## Show ChromaDB collection stats & volume path
 rag-status:
@@ -250,12 +246,7 @@ rag-status:
 	@ls -la $$(docker volume inspect local-ai-server_chroma_data --format '{{.Mountpoint}}')/
 	@echo ""
 	@echo "=== Collection document counts ==="
-	@docker compose exec rag-service python -c " \
-		import chromadb; \
-		client = chromadb.HttpClient(host='chromadb', port='8000'); \
-		cols = client.list_collections(); \
-		[print(f'  {c.name}: {client.get_collection(c.name).count()} documents') for c in cols] \
-	" 2>/dev/null || echo "  (RAG/ChromaDB not reachable)"
+	@docker compose exec rag-service python -c "import chromadb; client = chromadb.HttpClient(host='chromadb', port='8000'); cols = client.list_collections(); [print(f'  {c.name}: {client.get_collection(c.name).count()} documents') for c in cols]" 2>/dev/null || echo "  (RAG/ChromaDB not reachable)"
 
 # ── Model Management ───────────────────────────────────────
 

@@ -126,8 +126,10 @@ services:
       - RAG_SERVICE_URL=http://rag-service:8001
       - LORE_TOP_K=${LORE_TOP_K:-5}
       - RAG_ENABLED=${RAG_ENABLED:-true}
+      - LORE_CONTEXT_PATH=${LORE_CONTEXT_PATH:-prompts/lore_context.md}
     volumes:
       - ./discord-bot/data:/app/data  # Persistent thread registry
+      - ./discord-bot/prompts:/app/prompts:ro  # Local-only lore context (gitignored)
 
   # ──────────────────────────────────────────────────────────
   # Open WebUI (:3000)

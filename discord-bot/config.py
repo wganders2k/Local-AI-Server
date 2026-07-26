@@ -43,8 +43,8 @@ MAX_EMBED_DESCRIPTION_LENGTH: int = 4096  # Discord embed description limit
 
 # Proxy timeouts (seconds)
 PROXY_CONNECTION_TIMEOUT: int = 10
-PROXY_READ_TIMEOUT: int = 60
-PROXY_TOTAL_TIMEOUT: int = 70
+PROXY_READ_TIMEOUT: int = 120
+PROXY_TOTAL_TIMEOUT: int = 320
 
 # Thread registry
 THREAD_REGISTRY_PATH: str = os.environ.get("THREAD_REGISTRY_PATH", "data/threads.json")
@@ -54,14 +54,34 @@ THREAD_REGISTRY_PATH: str = os.environ.get("THREAD_REGISTRY_PATH", "data/threads
 # ──────────────────────────────────────────────────────────────
 
 RAG_SERVICE_URL: str = os.environ.get("RAG_SERVICE_URL", "http://rag-service:8001")
-LORE_TOP_K: int = int(os.environ.get("LORE_TOP_K", "5"))
+LORE_TOP_K: int = int(os.environ.get("LORE_TOP_K", "10"))
 RAG_ENABLED: bool = os.environ.get("RAG_ENABLED", "true").lower() == "true"
+
+# ──────────────────────────────────────────────────────────────
+# Agent (Agentic RAG) Configuration
+# ──────────────────────────────────────────────────────────────
+
+AGENT_MODEL: str = "brain-dense-heretic"  # Qwen3.6-27B — tool-calling capable model
+AGENT_MAX_ROUNDS: int = 10        # Default max tool-call rounds before forcing a final answer
+AGENT_MAX_ROUNDS_HARD_CAP: int = 25  # Hard cap for user-specified rounds in /lore
+AGENT_TEMPERATURE: float = 0.1    # Low temperature for deterministic tool calling
+AGENT_TOP_K: int = 10             # Default chunks per tool call (higher than lore's 5)
+
+# Server-specific background knowledge injected into the /lore agent system
+# prompt (member alias index, persona notes). Kept out of the repo — see
+# prompts/lore_context.example.md for the expected format. Relative paths are
+# resolved against the discord-bot directory.
+LORE_CONTEXT_PATH: str = os.environ.get(
+    "LORE_CONTEXT_PATH", "prompts/lore_context.md"
+)
 
 
 # ──────────────────────────────────────────────────────────────
 # Persona Configuration
 # ──────────────────────────────────────────────────────────────
 
+# Standalone lore model from models.ini. NOT used by /lore — that command runs
+# the agentic RAG loop against AGENT_MODEL. Kept for direct model routing.
 LORE_MODEL: str = "lore"
 
 # Display name mapping: persona_key → human-readable name
@@ -80,14 +100,9 @@ MIMIC_PERSONAS: Dict[str, str] = {
 # Injected per-request by the bot. These override any baked-in prompts
 # from the GGUF Modelfile since llama-server router mode uses
 # per-request system messages.
-
-LORE_SYSTEM_PROMPT: str = (
-    "You are the nullposting lore assistant. You have access to a curated database of "
-    "server history, in-jokes, memes, and member events. When answering questions, "
-    "cite your sources from the retrieved context. Be factual and concise. "
-    "If the retrieved context does not contain the answer, say so clearly rather than "
-    "guessing. Never invent lore, events, or quotes."
-)
+#
+# NOTE: the /lore agent's prompts live in agent_tools.py, not here — see
+# build_system_prompt() / build_synthesis_prompt() and LORE_CONTEXT_PATH above.
 
 # Template for mimic persona system prompts. Use get_mimic_system_prompt(persona)
 # to generate the full prompt for a given persona key.

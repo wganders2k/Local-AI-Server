@@ -339,14 +339,20 @@ def format_chunk_text(chunk: Chunk) -> str:
 # ──────────────────────────────────────────────────────────────
 
 
-def _build_metadata(chunk: Chunk) -> Dict[str, str]:
-    """Build ChromaDB metadata dict for a chunk."""
+def _build_metadata(chunk: Chunk) -> dict:
+    """Build ChromaDB metadata dict for a chunk.
+
+    Timestamps are stored as Unix epoch integers so that ChromaDB's $gte/$lte
+    numeric comparison operators work correctly for date-range filtering.
+    ChromaDB type-infers field types on first insert — once a field is seen
+    as a string, numeric operators will fail with ValueError.
+    """
     return {
         "chunk_id": chunk.chunk_id,
         "channel_id": chunk.channel_id,
         "channel_name": chunk.channel_name,
-        "timestamp_start": chunk.timestamp_start.isoformat(),
-        "timestamp_end": chunk.timestamp_end.isoformat(),
+        "timestamp_start": int(chunk.timestamp_start.timestamp()),
+        "timestamp_end": int(chunk.timestamp_end.timestamp()),
         "authors": ",".join(chunk.authors),
         "message_count": str(chunk.message_count),
         "message_ids": ",".join(chunk.message_ids),

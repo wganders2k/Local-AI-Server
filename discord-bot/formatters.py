@@ -74,21 +74,43 @@ def format_mimic_response(text: str) -> str:
     return strip_disclaimers(text)
 
 
-def build_lore_embed_discord(text: str, chunk_count: int = 0) -> "discord.Embed":
+def build_lore_embeds(text: str) -> list["discord.Embed"]:
     """
-    Build a lore response as an actual discord.Embed instance.
-
-    Use this version when discord is imported in the calling scope.
+    Build one or more discord.Embed instances for a lore response.
+    
+    If the text exceeds Discord's embed description limit (~4096 chars),
+    it is split into multiple embeds with pagination footers.
     """
     import discord  # noqa: F811
 
-    embed = discord.Embed(
-        title="\U0001f4da nullposting Lore",
-        description=text[:MAX_EMBED_DESCRIPTION_LENGTH],
-        colour=0x5865F2,
-    )
+    if not text:
+        return [discord.Embed(title="\U0001f4da nullposting Lore", description="(No results)", colour=0x5865F2)]
 
-    if chunk_count > 0:
-        embed.set_footer(text=f"Sources: {chunk_count} lore entries retrieved")
+    # Split text into chunks that fit within Discord's embed description limit
+    chunks = []
+    remaining = text
+    while remaining:
+        if len(remaining) <= MAX_EMBED_DESCRIPTION_LENGTH:
+            chunks.append(remaining)
+            break
+        
+        split_idx = find_split_boundary(remaining, MAX_EMBED_DESCRIPTION_LENGTH)
+        # Safety fallback: if no break point found, hard split
+        if split_idx == 0:
+            split_idx = MAX_EMBED_DESCRIPTION_LENGTH
+            
+        chunks.append(remaining[:split_idx].rstrip())
+        remaining = remaining[split_idx:].lstrip()
 
-    return embed
+    embeds = []
+    for i, chunk in enumerate(chunks):
+        embed = discord.Embed(
+            title="\U0001f4da nullposting Lore",
+            description=chunk,
+            colour=0x5865F2,
+        )
+        if len(chunks) > 1:
+            embed.set_footer(text=f"Part {i + 1}/{len(chunks)}")
+        embeds.append(embed)
+
+    return embeds

@@ -25,6 +25,21 @@
 - Strip baked-in disclaimers from mimic responses
 - Format lore responses as Discord embeds
 
+## Setup: lore context file
+
+The `/lore` agent injects server-specific background (member alias index, persona
+notes) into its system prompt. That content is **not committed** — it holds real
+names. Create it locally before first run:
+
+```bash
+cp discord-bot/prompts/lore_context.example.md discord-bot/prompts/lore_context.md
+# then edit lore_context.md with your server's real members
+```
+
+`prompts/` is bind-mounted read-only into the container, so edits take effect on
+restart — no image rebuild needed. If the file is missing the bot still starts and
+`/lore` still works; it just logs a warning and answers without the alias index.
+
 ## Design Reference
 
 See [`DiscordBot-Design.md`](../DiscordBot-Design.md) for full detail. See [`Design.md`](../Design.md) §8 for request flow examples.
@@ -38,6 +53,7 @@ See [`DiscordBot-Design.md`](../DiscordBot-Design.md) for full detail. See [`Des
 | `MAX_QUEUE_DEPTH` | ❌ | `3` | Max queued requests before ephemeral error |
 | `RATE_LIMIT_PER_USER` | ❌ | `5` | Max requests per user per minute |
 | `TYPING_INDICATOR_INTERVAL` | ❌ | `5` | Seconds between typing indicator refreshes |
+| `LORE_CONTEXT_PATH` | ❌ | `prompts/lore_context.md` | Gitignored file holding server-specific background for the `/lore` agent prompt |
 
 ### Phase 2+ Variables (RAG service not yet deployed)
 
