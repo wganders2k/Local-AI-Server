@@ -6,6 +6,7 @@ defaults, and defines the single source of truth for all service settings.
 """
 
 import os
+from typing import List
 
 from dotenv import load_dotenv
 
@@ -29,6 +30,17 @@ PROXY_URL: str = os.environ.get("PROXY_URL", "http://proxy:11436")
 ARCHIVE_RAW_DIR: str = "/archive/raw"
 ARCHIVE_DIR: str = "/archive/archive"
 ARCHIVE_STATE_DIR: str = "/archive/state"
+
+
+# ──────────────────────────────────────────────────────────────
+# Channel filtering
+# ──────────────────────────────────────────────────────────────
+
+# Comma-separated list of channel IDs to exclude from DCE export.
+# Example: EXCLUDED_CHANNELS=123456789012345678,987654321098765432
+EXCLUDED_CHANNELS: List[str] = [
+    x.strip() for x in os.environ.get("EXCLUDED_CHANNELS", "").split(",") if x.strip()
+]
 
 
 # ──────────────────────────────────────────────────────────────

@@ -17,6 +17,7 @@ from config import (
     ARCHIVE_RAW_DIR,
     DISCORD_GUILD_ID,
     DISCORD_TOKEN,
+    EXCLUDED_CHANNELS,
 )
 from channel_state import (
     get_channel,
@@ -227,6 +228,14 @@ def evaluate_and_export(
     """
     state = load_state()
     needs_export = channels_needing_export(state, channels)
+
+    # Filter out excluded channels
+    if EXCLUDED_CHANNELS:
+        needs_export = [
+            ch for ch in needs_export
+            if ch["channel_id"] not in EXCLUDED_CHANNELS
+        ]
+        logger.info(f"Filtered out {len(EXCLUDED_CHANNELS)} excluded channels")
     
     total_results: Dict[str, int] = {}
     

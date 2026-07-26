@@ -133,8 +133,9 @@ def parse_dce_message(
     user_id = author.get("id", "")
     is_bot = author.get("isBot", False)
 
-    # Username: prefer global @username over server nickname (nicknames change often)
-    username = author.get("name", "") or author.get("nickname", "") or author.get("discriminator", "")
+    # Username: prefer global @username. Fall back to user_id for stability.
+    # Deliberately skipping server nicknames (they change over time).
+    username = author.get("name", "") or str(user_id)
 
     # Skip bot messages entirely — they add noise to the lore corpus
     if is_bot:

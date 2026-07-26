@@ -23,8 +23,6 @@ from discord import app_commands
 from discord.ext import commands
 from config import (
     DISCORD_TOKEN,
-    LORE_MODEL,
-    LORE_SYSTEM_PROMPT,
     MAX_MESSAGE_LENGTH,
     MAX_QUEUE_DEPTH,
     MIMIC_PERSONAS,
@@ -35,12 +33,13 @@ from config import (
     get_mimic_system_prompt,
     validate_config,
 )
-from formatters import build_lore_embed_discord, find_split_boundary, format_mimic_response
+from formatters import build_lore_embeds, find_split_boundary, format_mimic_response
 from history import ConversationHistory
 from proxy_client import ProxyClient, ProxyError
 from rag_client import RAGClient
 from rate_limiter import RateLimiter
 from thread_registry import ThreadRegistry
+from agent_tools import run_agent_loop
 
 # ──────────────────────────────────────────────────────────────
 # Logging
@@ -434,20 +433,15 @@ async def chat_command(
 @bot.tree.command(name="lore", description="Ask the lore assistant a question")
 @app_commands.describe(
     question="Your question about server lore",
+    rounds="Maximum search rounds (1-25, default: 10)",
 )
 async def lore_command(
     interaction: discord.Interaction,
     question: str,
+    rounds: int = 10,
 ):
-    """Handle the /lore slash command."""
-    # Rate limit check
-    if not rate_limiter.is_allowed(interaction.user.id):
-        await interaction.response.send_message(
-            "⚠️ You're sending requests too fast. Slow down a bit.",
-            ephemeral=True,
-        )
-        return
-
+    """Handle the /lore slash command — agentic RAG with tool calling."""
+    # Rate limit check removed — lore queries are long-running and don't benefit from rate limiting
     # Queue depth check — reject if backend is too busy
     try:
         depth = await proxy_client.get_queue_depth()
@@ -459,7 +453,6 @@ async def lore_command(
             )
             return
     except ProxyError:
-        # If we can't reach the proxy, the chat() call below will handle the error.
         logger.warning("Could not check queue depth — proceeding with request.")
 
     logger.info(
@@ -473,44 +466,26 @@ async def lore_command(
     await interaction.response.defer()
 
     try:
-        # Retrieve relevant lore chunks from RAG service
-        context = ""
-        chunk_count = 0
-        if rag_client is not None:
-            from config import LORE_TOP_K
-            context, chunk_count = await rag_client.retrieve(question, top_k=LORE_TOP_K)
+        # Collect available channel names from the guild text channels
+        channel_names: list[str] = []
+        if isinstance(interaction.guild, discord.Guild):
+            for ch in interaction.guild.text_channels:
+                channel_names.append(ch.name)
 
-            # ── LOGGING: show what RAG returned ──
-            logger.info(
-                "RAG retrieve for question=%r → %d chunks",
-                question, chunk_count,
-            )
-            if context:
-                logger.info("RAG context (first 500 chars):\n%s...", context[:500])
-            else:
-                logger.warning("RAG returned no context for question=%r", question)
+        # Run the agentic RAG loop — brain-dense will iteratively call tools
+        # to search Discord history and synthesize an answer.
+        lore_text = await run_agent_loop(
+            user_question=question,
+            proxy_client=proxy_client,
+            rag_client=rag_client,
+            interaction=interaction,
+            channel_names=channel_names,
+            max_rounds=rounds,
+        )
 
-        # Build user message with retrieved context
-        if context:
-            user_content = f"Retrieved context:\n\n{context}\n\nQuestion: {question}"
-        else:
-            user_content = (
-                "No retrieved context available.\n\n"
-                f"Question: {question}"
-            )
-
-        messages = [
-            {"role": "system", "content": LORE_SYSTEM_PROMPT},
-            {"role": "user", "content": user_content},
-        ]
-
-        # Use channel.typing() context manager to maintain typing indicator
-        # throughout the entire proxy call and response processing
-        async with interaction.channel.typing():
-            lore_text = await proxy_client.chat(LORE_MODEL, messages)
-
-        embed = build_lore_embed_discord(lore_text, chunk_count=chunk_count)
-        await interaction.followup.send(embed=embed)
+        embeds = build_lore_embeds(lore_text)
+        for i, embed in enumerate(embeds):
+            await interaction.followup.send(embed=embed)
 
     except ProxyError as e:
         logger.warning("Proxy error: %s", e)

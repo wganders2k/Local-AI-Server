@@ -111,6 +111,73 @@ class ProxyClient:
 
         return content
 
+    async def chat_with_tools(
+        self,
+        model: str,
+        messages: list[dict],
+        tools: list[dict],
+        temperature: float = 0.1,
+    ) -> dict:
+        """
+        Send a chat completion request with tool definitions attached.
+
+        Returns the full assistant message dict, which may contain either
+        `content` (text response) or `tool_calls` (function invocation requests).
+
+        Args:
+            model: Model alias (e.g. "brain-dense").
+            messages: Conversation history including system, user, assistant, and tool messages.
+            tools: List of tool schema dicts (OpenAI function-calling format).
+            temperature: Sampling temperature (low for deterministic tool calling).
+
+        Returns:
+            Dict with keys: "content" (str|None), "tool_calls" (list|None).
+
+        Raises:
+            ProxyError: When the proxy is unreachable or returns an error.
+        """
+        client = await self._get_client()
+
+        payload = {
+            "model": model,
+            "messages": messages,
+            "tools": tools,
+            "temperature": temperature,
+            "stream": False,
+        }
+
+        try:
+            response = await client.post(
+                "/v1/chat/completions",
+                json=payload,
+            )
+        except httpx.ConnectError:
+            raise ProxyError(
+                "The AI backend is currently unreachable. Try again in a moment."
+            )
+        except httpx.TimeoutException:
+            raise ProxyError(
+                "Request timed out. The model may be busy."
+            )
+
+        if response.status_code != 200:
+            raise ProxyError(
+                f"Proxy returned error {response.status_code}: {response.text[:200]}",
+                status_code=response.status_code,
+            )
+
+        data = response.json()
+        choices = data.get("choices", [])
+
+        if not choices:
+            raise ProxyError("The model returned an empty response.")
+
+        message = choices[0].get("message", {})
+        return {
+            "content": message.get("content"),
+            "tool_calls": message.get("tool_calls"),
+        }
+
     async def chat_stream(
         self,
         model: str,

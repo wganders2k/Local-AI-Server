@@ -82,6 +82,13 @@ MODELS = [
         "notes":     "Brain (coding assistant) — ~16.8 GB VRAM",
     },
     {
+        "repo_id":   "DavidAU/Qwen3.6-27B-Heretic-Uncensored-FINETUNE-NEO-CODE-Di-IMatrix-MAX-GGUF",
+        "filename":  "Qwen3.6-27B-NEO-CODE-HERE-2T-OT-Q4_K_M.gguf",
+        "local_dir": "DavidAU/Qwen3.6-27B-Heretic-Uncensored-FINETUNE-NEO-CODE-Di-IMatrix-MAX-GGUF",
+        "slot":      "swappable",
+        "notes":     "Brain (coding assistant uncensored) — ~16.9 GB VRAM",
+    },
+    {
         "repo_id":   "unsloth/gemma-4-31B-it-GGUF",
         "filename":  "gemma-4-31B-it-Q4_K_M.gguf",
         "local_dir": "unsloth/gemma-4-31B-it-GGUF",

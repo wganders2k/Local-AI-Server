@@ -30,6 +30,8 @@ AUTOCOMPLETE_MODELS: set[str] = {
 # model is requested. The proxy serialises access via asyncio.Lock.
 SWAPPABLE_MODELS: set[str] = {
     "brain",
+    "brain-dense",  # Qwen3.6-27B — agentic RAG tool-calling model
+    "brain-dense-heretic",
     "agent",
     "mimic_user1",
     "mimic_user2",

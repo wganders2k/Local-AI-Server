@@ -54,6 +54,9 @@ _ingest_task: Optional[asyncio.Task] = None
 class RetrieveRequest(BaseModel):
     query: str
     top_k: int = 5
+    channel_name: Optional[str] = None  # Filter to a specific channel
+    start_date: Optional[str] = None    # ISO 8601 — only results after this date
+    end_date: Optional[str] = None      # ISO 8601 — only results before this date
 
 
 class RetrieveResponse(BaseModel):
@@ -99,6 +102,9 @@ async def retrieve(req: RetrieveRequest):
         chroma_port=CHROMA_PORT,
         collection_name=COLLECTION_NAME,
         top_k=req.top_k,
+        channel_name=req.channel_name,
+        start_date=req.start_date,
+        end_date=req.end_date,
     )
 
     return RetrieveResponse(context=context, chunk_count=chunk_count)

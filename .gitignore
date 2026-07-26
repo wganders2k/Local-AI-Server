@@ -5,6 +5,11 @@
 # DCE-specific secrets file (contains DISCORD_TOKEN) — populate manually from .env
 dce.env
 
+# Server-specific system prompt context (real names, aliases) — keep local.
+# The *.example.md template stays committed.
+discord-bot/prompts/*.md
+!discord-bot/prompts/*.example.md
+
 # Large model files
 *.gguf
 *.bin
