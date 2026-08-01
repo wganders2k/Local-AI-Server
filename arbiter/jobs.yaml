@@ -23,6 +23,19 @@ jobs:
     kind: none
     priority: 100
 
+  # LongSafeVision's pipeline profiler, run by hand
+  # (`python profile_segment.py --segment ...`). Below the LLM, because a
+  # benchmark must never be the reason an interactive request waits; above the
+  # video job, because measuring it means taking the card off it for a minute.
+  #
+  # It needs an entry at all only because the unknown-caller fallback is now
+  # priority 0, which ties with video-processing and therefore cannot preempt
+  # it. Before that it ran at 101 and silently outranked the LLM, which is what
+  # prompted the change.
+  - name: profile-segment
+    kind: none
+    priority: 50
+
   # Not a container, so it stops its own worker when told. It asks for the card
   # like everything else and holds a blocking /gpu/reclaim-notice while it has
   # it; reclaiming is waking that call and waiting for the release.
