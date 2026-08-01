@@ -125,12 +125,21 @@ def test_the_deployed_config_parses():
     jobs = load_jobs(os.path.join(here, "jobs.yaml"))
 
     by_name = {j.name: j for j in jobs}
-    assert set(by_name) == {"llm", "video-processing", "lora-trainer"}
+    assert set(by_name) == {"llm", "video-processing", "lora-trainer", "profile-segment"}
 
     # The ordering the whole design assumes, and the only place it is expressed:
     # interactive answers beat video work, which beats background training.
     assert by_name["llm"].priority > by_name["video-processing"].priority
     assert by_name["video-processing"].priority > by_name["lora-trainer"].priority
+
+    # A benchmark may take the card off the video job — that is what running one
+    # means — but must never be the reason an interactive request waits.
+    assert by_name["llm"].priority > by_name["profile-segment"].priority
+    assert by_name["profile-segment"].priority > by_name["video-processing"].priority
+
+    # Nothing may share the LLM's rank: an equal priority does not preempt, so a
+    # tie would silently make the LLM unable to take the card back.
+    assert [j.priority for j in jobs].count(by_name["llm"].priority) == 1
 
     # Cooperative, not container. Killing the container would take its
     # supervisor with it, and Docker suppresses restart policies for an
