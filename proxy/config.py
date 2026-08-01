@@ -7,29 +7,20 @@ LLAMA_SWAPPABLE = os.environ.get("LLAMA_SWAPPABLE", "http://localhost:11434")
 # System prompts config path
 SYSTEM_PROMPTS_PATH = os.environ.get("SYSTEM_PROMPTS_PATH", "../system_prompts.ini")
 
-# Glances API base URL for VRAM monitoring (e.g. http://192.168.2.55:61208)
-GLANCES_URL = os.environ.get("GLANCES_URL", "")
+# The GPU arbiter. The proxy asks it for the card and tells it when idle; it owns
+# every other decision about who runs, so this is the proxy's whole interface to
+# the GPU.
+ARBITER_URL = os.environ.get("ARBITER_URL", "http://arbiter:11438")
+
+# Which entry in the arbiter's jobs.yaml the proxy is. It sends this and nothing
+# else — priority, VRAM, and what gets stopped are all decided there. Changing
+# how the LLM ranks against the trainer is an edit to that file, not to this one.
+ARBITER_JOB_NAME = os.environ.get("ARBITER_JOB_NAME", "llm")
 
 # Autocomplete model toggle — set to "false" to disable the permanent autocomplete
 # model and free ~1.2 GB VRAM. When disabled, requests for the "autocomplete"
 # model will receive a 503 error. Controlled by AUTOCOMPLETE_ENABLED env var.
 AUTOCOMPLETE_ENABLED = os.environ.get("AUTOCOMPLETE_ENABLED", "true").lower() not in ("false", "0", "no")
-
-# === External job VRAM coordination ===
-# An external job (batch GPU work) registers with the proxy and releases VRAM on
-# request. The proxy must not touch the GPU until every job has *confirmed* the
-# release, so these knobs govern how long it waits and what it does if a job
-# never confirms.
-
-# How long to wait for external jobs to confirm VRAM release before giving up.
-EXTERNAL_JOB_YIELD_TIMEOUT = float(os.environ.get("EXTERNAL_JOB_YIELD_TIMEOUT", "180"))
-
-# What to do when that wait times out:
-#   "503"  — refuse the request. Never loads a model over a job still holding VRAM.
-#   "wait" — keep waiting indefinitely.
-# Deliberately NOT "proceed anyway": loading a model while an external job still
-# holds several GB is how you get an OOM that takes down both workloads.
-EXTERNAL_JOB_YIELD_ON_TIMEOUT = os.environ.get("EXTERNAL_JOB_YIELD_ON_TIMEOUT", "503").lower()
 
 # Idle eviction — llama-server's router keeps a model resident once loaded, so
 # without this an external job would never get a VRAM window on a busy day.

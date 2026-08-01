@@ -1,0 +1,57 @@
+# GPU policy. The single place priority and memory requirements are expressed —
+# a job never declares its own importance, and adding a fourth GPU workload is
+# one entry here and nothing anywhere else.
+#
+# Every job asks for the card the same way, so `priority` is the only thing that
+# decides who wins a contention, and `kind` says only how the card is taken back
+# from a job that will not go on its own. The LLM both outranks everything and is
+# never torn down, but for unrelated reasons — nothing in the code couples them.
+jobs:
+  # Interactive. Wins every contention, which is all the number below means and
+  # the only place it means anything — no code names this entry.
+  #
+  # kind: none because the proxy already starts and stops llama-server to swap
+  # models, and a second service tearing that container down would desync them.
+  # So the lease is the whole of the arbiter's grip here: the proxy calls
+  # /gpu/acquire before it touches the backend and /gpu/release once nothing is
+  # in flight. That is safe only because nothing outranks it — an unenforceable
+  # reclaim is never actually exercised.
+  #
+  # No required_mb: it manages its own memory, and refusing it over a reading we
+  # could not act on anyway would turn a transient into an outage.
+  - name: llm
+    kind: none
+    priority: 100
+
+  # Not a container, so it stops its own worker when told. It asks for the card
+  # like everything else and holds a blocking /gpu/reclaim-notice while it has
+  # it; reclaiming is waking that call and waiting for the release.
+  #
+  # The alternative was mounting systemd's user socket into the arbiter so it
+  # could kill the worker directly. That is a real cgroup teardown, but it costs
+  # the arbiter the authority to run anything at all as this user — too much to
+  # pay for stopping one process the watcher already supervises. What is given up
+  # is verification: this is the one tenant that could lie about letting go.
+  - name: video-processing
+    kind: cooperative
+    priority: 0
+    required_mb: 4096
+
+  # Background work, ranked below everything.
+  #
+  # cooperative rather than container, and not by preference: killing the
+  # container would take its supervisor with it, and Docker suppresses restart
+  # policies for any API-initiated stop or kill, so a preempted run would simply
+  # be over. Told instead, it SIGKILLs its own training process — which is the
+  # same CUDA teardown, performed from inside, and the container survives to ask
+  # again. No grace period: it checkpoints on a wall clock and expects to die.
+  #
+  # This entry is *only* policy. It does not mean a run is wanted or in progress
+  # — a human submits one with `make train-submit`, and with no container there
+  # is simply nothing holding the lease. The arbiter has no notion of submission
+  # and needs none, which is what makes "should this run?" a question it never
+  # has to answer. Its predecessor started a run whenever free VRAM appeared.
+  - name: lora-trainer
+    kind: cooperative
+    priority: -10
+    required_mb: 4096

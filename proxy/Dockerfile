@@ -2,9 +2,11 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# Install nvidia-utils for nvidia-smi (VRAM monitoring).
-# Bind-mount /usr/bin/nvidia-smi from the host instead of installing
-# the full driver package — the host already has nvidia-utils-580.
+# nvidia-smi is *not* installed here. The NVIDIA container runtime injects it,
+# along with the matching driver libraries, when the service requests the
+# `utility` driver capability — see docker-compose.yml. Installing nvidia-utils
+# in the image instead would pin a driver version that silently mismatches the
+# host's after any upgrade.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
