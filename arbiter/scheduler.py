@@ -147,22 +147,36 @@ class Scheduler:
         """
         The config entry for a caller, inventing one if it is not in jobs.yaml.
 
-        An unknown caller is ranked above everything and granted. That is the
-        permissive choice and it is deliberate: the callers are the interactive
-        services, and the alternative failure mode is a typo in jobs.yaml taking
-        the LLM offline with 503s. It warns on every call because running on an
-        invented policy is not a state to sit in quietly.
+        An unknown caller gets priority 0 — the middle of the range, and
+        specifically *below* the LLM.
+
+        This used to grant `max(priority) + 1`, on the reasoning that the
+        callers are interactive services and a typo in jobs.yaml must not take
+        one offline with 503s. That reasoning inverted the risk it was trying to
+        manage. Ranking the unknown caller top does not merely protect it from
+        being starved; it lets it starve everything else, the LLM included, on
+        the strength of a name nobody configured. Observed: a benchmark script
+        run under an unconfigured name held the card at priority 101 against the
+        LLM's 100, so an interactive request would have waited on it.
+
+        0 keeps the fallback permissive — the caller is still granted, and can
+        still take the card from background work — while making the one job a
+        typo must never displace unreachable. A name that genuinely needs to
+        outrank the LLM has to say so in jobs.yaml, which is the whole point of
+        that file.
+
+        It warns on every call regardless: running on an invented policy is not
+        a state to sit in quietly.
         """
         job = self.by_name.get(name)
         if job is not None:
             return job
 
-        top = max((j.priority for j in self.jobs), default=0) + 1
         logger.warning(
             f"{name!r} asked for the GPU but is not in jobs.yaml — granting it priority "
-            f"{top}, above every configured job. Add an entry to make this deliberate."
+            f"0, which is below the LLM. Add an entry to make this deliberate."
         )
-        job = config.JobConfig({"name": name, "kind": "none", "priority": top})
+        job = config.JobConfig({"name": name, "kind": "none", "priority": 0})
         self.by_name[name] = job
         self.jobs.append(job)
         self.jobs.sort(key=lambda j: (-j.priority, j.name))
