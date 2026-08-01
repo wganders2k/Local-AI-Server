@@ -1,0 +1,45 @@
+# Smoke config — validates the handover, not the loss curve.
+#
+# Everything here is chosen to make a full cycle (spawn, train, checkpoint, get
+# killed, resume) happen in minutes rather than hours, so the protocol can be
+# exercised repeatedly before a real run is committed to. A 0.6B in bf16 loads
+# in seconds, which means a preemption costs seconds to recover from and the
+# yield path can be tested a dozen times in an afternoon.
+
+model: Qwen/Qwen3-0.6B
+
+# No 4-bit here: bitsandbytes buys nothing on a 0.6B and its version coupling is
+# the most likely thing to break an install. The mimic config turns it on, where
+# it decides whether the run fits at all.
+load_in_4bit: false
+gradient_checkpointing: false
+
+dataset:
+  path: configs/smoke_data.jsonl
+
+output_dir: /home/peacow/lora-outputs/smoke
+
+# Headroom before the worker is worth spawning. A 0.6B in bf16 plus optimizer
+# state and activations sits well under this; the margin is for the CUDA context
+# and fragmentation.
+required_free_mb: 4096
+
+# Deliberately aggressive so a kill-and-resume cycle is observable during a
+# smoke run. The mimic config uses a much longer interval — see the README on
+# why this is wall-clock rather than steps.
+checkpoint_minutes: 1
+keep_checkpoints: 2
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.0
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+
+training:
+  epochs: 30          # small dataset; enough steps that a preemption lands mid-run
+  batch_size: 2
+  grad_accum: 4
+  learning_rate: 2.0e-4
+  max_seq_length: 1024
+  logging_steps: 5

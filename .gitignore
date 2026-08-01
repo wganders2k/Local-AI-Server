@@ -27,6 +27,9 @@ __pycache__/
 scripts/.venv/
 # Local venv for running the proxy test suite outside the container
 proxy/.venv-test/
+# Trainer test venv — pytest/httpx/yaml only, deliberately no torch, so the
+# handover logic can be tested without a CUDA install.
+lora-training/.venv-test/
 venv/
 env/
 *.egg-info/
@@ -55,3 +58,5 @@ Thumbs.db
 lora-training/outputs/
 lora-training/checkpoints/
 lora-training/runs/
+# Arbiter test venv — pytest/yaml only, no GPU or Docker access needed.
+arbiter/.venv-test/

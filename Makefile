@@ -26,6 +26,8 @@ endif
 	dce-export-full dce-export-channel dce-export-guild dce-help \
 	dce-evaluate history-refresh \
 	rag-ingest rag-status \
+	train-submit train-cancel train-status train-logs \
+	gpu-status \
 	nuke
 
 # Default target — show help
@@ -104,6 +106,20 @@ help:
 	@echo "                        Reads JSONL archives, embeds, and upserts."
 	@echo "                        Idempotent — safe to re-run."
 	@echo "  rag-status        Show ChromaDB collection stats & data path"
+	@echo ""
+	@echo "  ── LoRA Training ──────────────────────────────────────"
+	@echo "  train-submit      Start a training run. Nothing else ever starts one."
+	@echo "                        Usage: make train-submit"
+	@echo "                               make train-submit CONFIG=configs/mimic.yaml"
+	@echo "                        Runs at the lowest GPU priority: it waits for the"
+	@echo "                        card, is preempted by anything else that wants it,"
+	@echo "                        and resumes from its last checkpoint."
+	@echo "  train-cancel      Stop and remove the run"
+	@echo "  train-status      Container state, and what the arbiter thinks"
+	@echo "  train-logs        Tail the training log"
+	@echo ""
+	@echo "  ── GPU ────────────────────────────────────────────────"
+	@echo "  gpu-status        Who holds the card, why, and how much is free"
 	@echo ""
 	@echo "  ── Destructive ────────────────────────────────────────"
 	@echo "  nuke                ⚠️  Stop everything AND remove all volumes"
@@ -337,6 +353,71 @@ status-autocomplete:
 	echo ""; \
 	echo "llama-permanent container:"; \
 	docker compose ps llama-permanent 2>/dev/null || echo "  (not running)"
+
+# ── LoRA Training ──────────────────────────────────────────
+# A training run is submitted by a human and by nothing else. The arbiter used
+# to start one whenever free VRAM appeared, which meant a run began because the
+# LLM went quiet — not because anyone decided to train. It now only says who may
+# hold the card; deciding that there is a run to do is what these targets are.
+#
+# The normal loop is: edit lora-training/configs/<name>.yaml (and its dataset),
+# `make train-submit CONFIG=configs/<name>.yaml`, watch `make train-logs`.
+# configs/ is bind-mounted, so a tweak between runs needs no rebuild.
+
+CONFIG ?= configs/smoke.yaml
+
+## Submit a training run. The only thing that ever starts one.
+## Usage: make train-submit [CONFIG=configs/mimic.yaml]
+##
+## Runs at the lowest GPU priority: it waits for the card rather than failing,
+## is killed whenever anything outranks it, and resumes from its last complete
+## checkpoint when it comes back. Long runs are expected to be interrupted many
+## times — that is the design, not a fault.
+train-submit:
+	@if [ ! -f "lora-training/$(CONFIG)" ]; then \
+		echo "Error: lora-training/$(CONFIG) not found."; \
+		echo "Available:"; ls -1 lora-training/configs/*.yaml | sed 's|lora-training/|  |'; \
+		exit 1; \
+	fi
+	@if [ -n "$$(docker ps -q -f name=^lora-trainer$$)" ]; then \
+		echo "Error: a run is already in progress. 'make train-cancel' first."; \
+		exit 1; \
+	fi
+	@echo "Submitting $(CONFIG)..."
+	@docker rm -f lora-trainer >/dev/null 2>&1 || true
+	TRAIN_CONFIG=$(CONFIG) docker compose --profile managed up -d --build lora-trainer
+	@echo ""
+	@echo "✓ Submitted. It holds no VRAM until the arbiter grants it the card."
+	@echo "  Follow with: make train-logs"
+
+## Stop the current run and remove its container.
+## Checkpoints in /home/peacow/lora-outputs are untouched — resubmitting resumes.
+train-cancel:
+	@docker rm -f lora-trainer >/dev/null 2>&1 && echo "✓ Run cancelled." \
+		|| echo "No run to cancel."
+
+## Container state, plus what the arbiter thinks of it
+train-status:
+	@echo "=== container ==="
+	@docker ps -a --filter name=^lora-trainer$$ \
+		--format 'table {{.Names}}\t{{.Status}}\t{{.RunningFor}}' | grep . \
+		|| echo "  (no run submitted)"
+	@echo ""
+	@echo "=== arbiter ==="
+	@curl -s http://localhost:11438/gpu/status \
+		| python3 -c "import json,sys; s=json.load(sys.stdin); print(f\"  holder: {s['holder']}\"); print(f\"  reason: {s['reason']}\"); print(f\"  free:   {s['free_mb']} MiB\")" \
+		2>/dev/null || echo "  (arbiter not reachable)"
+
+## Tail the training log (Ctrl+C to stop; the run keeps going)
+train-logs:
+	docker logs -f lora-trainer
+
+# ── GPU ────────────────────────────────────────────────────
+
+## Who holds the card, why, and how much is free
+gpu-status:
+	@curl -s http://localhost:11438/gpu/status | python3 -m json.tool \
+		2>/dev/null || echo "(arbiter not reachable)"
 
 # ── Destructive ────────────────────────────────────────────
 

@@ -73,6 +73,94 @@ services:
       retries: 3
       start_period: 30s
   # ──────────────────────────────────────────────────────────
+  # LoRA trainer
+  # Started and stopped by the arbiter, never by compose. The `managed` profile
+  # is what enforces that: `docker compose up -d` skips it entirely, so it can
+  # only ever reach the GPU through the scheduler. Without the profile a plain
+  # `up` would hand it 16 GB behind the arbiter's back.
+  # ──────────────────────────────────────────────────────────
+  lora-trainer:
+    build: ./lora-training
+    container_name: lora-trainer
+    # Never started by `docker compose up`, and never by the arbiter. A training
+    # run is submitted by a human: `make train-submit CONFIG=configs/smoke.yaml`.
+    profiles: ["managed"]
+    # No restart policy, and none would help: Docker suppresses them for any
+    # API-initiated stop or kill (measured — RestartCount=0 for both `always`
+    # and `on-failure`), so a preempted container would stay down and the run
+    # would be over. Nothing kills this container. supervisor.py inside it kills
+    # the training process instead, which is what actually frees the VRAM, and
+    # the container outlives every handover.
+    restart: "no"
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=0
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - HF_HOME=/cache/huggingface
+      - ARBITER_URL=http://arbiter:11438
+      # Must match the entry in arbiter/jobs.yaml, or this falls through to the
+      # unknown-caller path and runs at the *top* priority instead of the bottom.
+      - ARBITER_JOB_NAME=lora-trainer
+      - TRAIN_CONFIG=${TRAIN_CONFIG:-configs/smoke.yaml}
+    volumes:
+      - /home/peacow/lora-outputs:/home/peacow/lora-outputs
+      # Datasets and hyperparameters are the things that actually get tinkered
+      # with between runs. Mounted so that editing one is an edit, not a rebuild
+      # of a multi-GB CUDA image.
+      - ./lora-training/configs:/app/configs:ro
+      # Model downloads survive preemption; without this every restart re-fetches
+      # the base weights, which dwarfs the training it would have done.
+      - /home/peacow/.cache/huggingface:/cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities:
+                - gpu
+
+  # ──────────────────────────────────────────────────────────
+  # GPU arbiter
+  # The only component that decides who holds the card, and the only one that
+  # can see it. Starts and stops job containers through docker-socket-proxy
+  # rather than mounting the real socket, which is root-equivalent on the host —
+  # that proxy's CONTAINERS+POST allowance is exactly this service's needs.
+  # ──────────────────────────────────────────────────────────
+  arbiter:
+    build: ./arbiter
+    restart: unless-stopped
+    depends_on:
+      - docker-socket-proxy
+    # GPU access for *measurement only*. `utility` injects NVML and nvidia-smi
+    # but deliberately NOT `compute` — without the CUDA capability this container
+    # cannot create a context, so it is structurally incapable of allocating a
+    # byte of VRAM. The thing deciding whether anyone else has room must never
+    # become a consumer itself.
+    runtime: nvidia
+    ports:
+      - 127.0.0.1:11438:11438
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=0
+      - NVIDIA_DRIVER_CAPABILITIES=utility
+      - ARBITER_JOBS_PATH=/config/jobs.yaml
+      - DOCKER_HOST=tcp://docker-socket-proxy:2375
+    volumes:
+      # GPU policy: who outranks whom and how much VRAM each job needs. The only
+      # place either is expressed.
+      - /home/peacow/local-ai-server/arbiter/jobs.yaml:/config/jobs.yaml:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities:
+                - gpu
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11438/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # ──────────────────────────────────────────────────────────
   # FastAPI Orchestration Proxy (:11436)
   # Routes requests to the correct llama-server instance.
   # Serialises access to the swappable slot via asyncio.Lock.
@@ -81,24 +169,30 @@ services:
   proxy:
     build: ./proxy
     restart: unless-stopped
+    # No GPU access. The proxy asks the arbiter for the card and is told yes or
+    # no; it has no reason to read the device, and giving it one would be a
+    # second answer to a question the arbiter already owns.
     ports:
       - 11436:11436
     depends_on:
       llama-swappable:
         condition: service_healthy
+      arbiter:
+        condition: service_healthy
     environment:
       - LLAMA_PERMANENT=http://llama-permanent:8080
       - LLAMA_SWAPPABLE=http://llama-swappable:8080
       - MODELS_INI_PATH=/models.ini
-      - GLANCES_URL=http://192.168.2.55:61208
+      - ARBITER_URL=http://arbiter:11438
+      # Which entry in arbiter/jobs.yaml this proxy is. It sends only this name;
+      # its priority and what gets stopped for it are decided there. Must match a
+      # job in that file — an unknown name is granted the top rank as a fallback,
+      # which keeps the LLM answering but means it is running on invented policy.
+      - ARBITER_JOB_NAME=llm
       - AUTOCOMPLETE_ENABLED=${AUTOCOMPLETE_ENABLED:-true}
-      # External GPU job coordination. The proxy waits for registered jobs to
-      # confirm they have released VRAM before loading a model, and refuses the
-      # request rather than loading over a job that never confirmed.
-      - EXTERNAL_JOB_YIELD_TIMEOUT=${EXTERNAL_JOB_YIELD_TIMEOUT:-180}
-      - EXTERNAL_JOB_YIELD_ON_TIMEOUT=${EXTERNAL_JOB_YIELD_ON_TIMEOUT:-503}
-      # Unload the resident model after this long idle so external jobs get a
-      # VRAM window — the router otherwise keeps it loaded indefinitely.
+      # Unload the resident model after this long idle, so the arbiter has real
+      # headroom to offer a background job. Nothing else may unload llama-server's
+      # models, which is why this stays here rather than moving to the arbiter.
       - IDLE_EVICT_ENABLED=${IDLE_EVICT_ENABLED:-true}
       - IDLE_EVICT_SECONDS=${IDLE_EVICT_SECONDS:-600}
     volumes:
@@ -163,7 +257,34 @@ services:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - OLLAMA_BASE_URL=
       - HF_TOKEN=${HF_TOKEN:-}
+      # New accounts land inactive and need promoting by an admin, so
+      # authentik deciding *who* may sign in is still backed by a
+      # second gate here.
       - DEFAULT_USER_ROLE=pending
+
+      # ── SSO (authentik) ─────────────────────────────────────
+      # WEBUI_URL is what open-webui uses to build the redirect, so
+      # it must be the public hostname.
+      - WEBUI_URL=https://chat.wganderbox.ca
+      - ENABLE_OAUTH_SIGNUP=true
+      - OAUTH_PROVIDER_NAME=authentik
+      - OAUTH_CLIENT_ID=${OPENWEBUI_CLIENT_ID}
+      - OAUTH_CLIENT_SECRET=${OPENWEBUI_CLIENT_SECRET}
+      - OPENID_PROVIDER_URL=https://auth.wganderbox.ca/application/o/open-webui/.well-known/openid-configuration
+      - OPENID_REDIRECT_URI=https://chat.wganderbox.ca/oauth/oidc/callback
+      - OAUTH_SCOPES=openid email profile
+      # Off now that linking is done. It was switched on for exactly
+      # one login so the SSO identity could adopt the pre-existing
+      # local admin account (same email) instead of being rejected.
+      # open-webui wrote the authentik `sub` into user.oauth during
+      # that login and now matches on it directly, so this flag is
+      # never consulted again for an already-linked user.
+      #
+      # Turn it back on temporarily if you ever need to link another
+      # existing local account — and off again afterwards, so a future
+      # self-signup or federated source in authentik can't be used to
+      # claim an account by asserting its email.
+      - OAUTH_MERGE_ACCOUNTS_BY_EMAIL=false
   # ──────────────────────────────────────────────────────────
   # RAG Service
   # Handles Discord history ingestion and lore retrieval.
@@ -286,7 +407,30 @@ services:
     ports:
       - "3002:3000"
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
+      # Break-glass local admin. Was "admin" on a hostname reachable
+      # from the internet; now a generated value in .env. Normal
+      # access is SSO — this is only for when authentik is down.
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}
+      # Grafana builds the OAuth redirect from this, so it must be
+      # the public URL rather than the container's own address.
+      - GF_SERVER_ROOT_URL=https://grafana.wganderbox.ca
+
+      # ── SSO (authentik) ─────────────────────────────────────
+      - GF_AUTH_GENERIC_OAUTH_ENABLED=true
+      - GF_AUTH_GENERIC_OAUTH_NAME=authentik
+      - GF_AUTH_GENERIC_OAUTH_CLIENT_ID=${GRAFANA_CLIENT_ID}
+      - GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET=${GRAFANA_CLIENT_SECRET}
+      - GF_AUTH_GENERIC_OAUTH_SCOPES=openid email profile
+      - GF_AUTH_GENERIC_OAUTH_USE_PKCE=true
+      - GF_AUTH_GENERIC_OAUTH_AUTH_URL=https://auth.wganderbox.ca/application/o/authorize/
+      - GF_AUTH_GENERIC_OAUTH_TOKEN_URL=https://auth.wganderbox.ca/application/o/token/
+      - GF_AUTH_GENERIC_OAUTH_API_URL=https://auth.wganderbox.ca/application/o/userinfo/
+      # Membership of the authentik group "grafana-admins" grants
+      # Admin; everyone else who can reach the app gets Viewer.
+      - GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_PATH=contains(groups[*], 'grafana-admins') && 'Admin' || 'Viewer'
+      # Logging out of grafana ends the authentik session too,
+      # otherwise the next visit silently logs straight back in.
+      - GF_AUTH_SIGNOUT_REDIRECT_URL=https://auth.wganderbox.ca/application/o/grafana/end-session/
     volumes:
       - grafana_data:/var/lib/grafana
 

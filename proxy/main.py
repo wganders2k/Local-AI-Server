@@ -7,7 +7,7 @@ import sys
 
 import httpx
 from fastapi import FastAPI, Request, Response
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from prometheus_client import Counter, Gauge, Histogram, generate_latest, CONTENT_TYPE_LATEST
 
 logging.basicConfig(
@@ -18,11 +18,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 from config import (
+    ARBITER_JOB_NAME,
+    ARBITER_URL,
     AUTOCOMPLETE_ENABLED,
     AUTOCOMPLETE_MODELS,
-    EXTERNAL_JOB_YIELD_ON_TIMEOUT,
-    EXTERNAL_JOB_YIELD_TIMEOUT,
-    GLANCES_URL,
     IDLE_EVICT_ENABLED,
     IDLE_EVICT_POLL_SECONDS,
     IDLE_EVICT_SECONDS,
@@ -31,7 +30,10 @@ from config import (
     LLAMA_SWAPPABLE,
     SWAPPABLE_MODELS,
 )
-from state import state, external_jobs
+from arbiter import ArbiterClient
+from state import state
+
+arbiter = ArbiterClient(ARBITER_URL, ARBITER_JOB_NAME)
 
 # HTTP client — shared across all requests, reuses connections
 _http_client: httpx.AsyncClient | None = None
@@ -44,21 +46,27 @@ PROXY_REQUESTS = Counter("proxy_requests_total", "Total LLM requests", ["model",
 PROXY_ACTIVE_REQUESTS = Gauge("proxy_active_requests", "Currently processing requests", ["model"])
 PROXY_TOKENS = Counter("proxy_tokens_total", "Total tokens processed", ["model", "token_type"])
 PROXY_QUEUE_DEPTH = Gauge("proxy_queue_depth", "Current requests waiting for a model swap")
-PROXY_EXTERNAL_JOBS = Gauge("proxy_external_jobs_active", "Number of active external VRAM jobs")
-GPU_VRAM_PERCENT = Gauge("gpu_vram_percent", "GPU VRAM usage percentage")
 PROXY_REQUEST_DURATION = Histogram("proxy_request_duration_seconds", "Total request time", ["model"])
+PROXY_CURRENT_MODEL_INFO = Gauge(
+    "proxy_current_model_info",
+    "Currently loaded swappable model, one series per model (value is always 1)",
+    ["model"],
+)
+PROXY_MODEL_AGE_SECONDS = Gauge(
+    "proxy_model_age_seconds", "Seconds since the last model swap in the swappable slot"
+)
+PROXY_LLM_INFLIGHT = Gauge("proxy_llm_requests_inflight", "In-flight LLM requests")
+PROXY_LLM_IDLE_SECONDS = Gauge("proxy_llm_idle_seconds", "Seconds since the last LLM request")
 
-# Initialize VRAM gauge to 0 so it appears in /metrics before first Glances read
-GPU_VRAM_PERCENT.set(0)
+# GPU metrics are the arbiter's — it is the only component that reads the card.
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _http_client
     _http_client = httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0))
-    logger.info("HTTP client initialised")
-    # Background tasks
-    tasks = [asyncio.create_task(_vram_monitor())]
+    logger.info(f"HTTP client initialised — arbiter at {ARBITER_URL}, asking as {ARBITER_JOB_NAME!r}")
+    tasks = []
     if IDLE_EVICT_ENABLED:
         tasks.append(asyncio.create_task(_idle_evictor()))
     yield
@@ -70,49 +78,11 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             pass
     await _http_client.aclose()
+    await arbiter.aclose()
     logger.info("HTTP client closed")
 
 
 app = FastAPI(title="Orchestration Proxy", lifespan=lifespan)
-
-
-# VRAM monitor — runs in background, logs GPU memory usage every 30s
-
-async def _vram_monitor(interval: int = 30) -> None:
-    """Poll Glances API for GPU VRAM usage and expose via Prometheus gauges."""
-    if not GLANCES_URL:
-        logger.info("GLANCES_URL not set — VRAM monitoring disabled")
-        return
-
-    gpu_api = f"{GLANCES_URL.rstrip('/')}/api/4/gpu"
-    # NB: use _http_client directly — an `async with` here would close the
-    # shared client for the whole proxy when this task exits.
-    while True:
-        try:
-            resp = await _http_client.get(gpu_api, timeout=5.0)
-            if resp.status_code == 200:
-                gpus = resp.json()
-                if gpus:
-                    gpu = gpus[0]  # Use first GPU
-                    mem_percent = float(gpu.get("mem", 0))
-                    GPU_VRAM_PERCENT.set(mem_percent)
-
-                    model_label = state.current_model or "none"
-                    age = state.time_since_swap
-                    age_str = f"{age:.0f}s ago" if age is not None else "never swapped"
-                    logger.info(
-                        f"VRAM: {mem_percent:.1f}% | "
-                        f"swappable slot: {model_label} (loaded {age_str})"
-                    )
-                else:
-                    logger.warning("VRAM monitor: Glances returned empty GPU list")
-            else:
-                logger.warning(f"VRAM monitor: Glances API returned HTTP {resp.status_code}")
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            logger.warning(f"VRAM monitor error: {exc}")
-        await asyncio.sleep(interval)
 
 
 # Idle eviction — hand the GPU to external jobs when the LLMs are quiet
@@ -181,38 +151,40 @@ async def _unload_resident_models(resident: list[str] | None = None) -> bool:
 
 async def _idle_evictor() -> None:
     """
-    Free the swappable slot once the LLMs have been idle long enough, so a
-    registered external job gets a real window.
+    Unload the swappable slot once the LLMs have been idle long enough.
 
     The router keeps a model resident indefinitely once loaded, so without this
-    an external job would be permanently starved on any day with LLM traffic.
+    a background job would be permanently starved on any day with LLM traffic —
+    it would be told it may run while 18 GB of model sat on the card.
+
+    This is the proxy's job rather than the arbiter's precisely because
+    llama-server is privileged: nothing else is allowed to unload its models. The
+    arbiter is told afterwards, and decides for itself whether the freed memory
+    is enough for whatever is waiting.
+
+    Deliberately unconditional on whether a job is waiting. The proxy no longer
+    knows what jobs exist, and evicting an idle model is the right thing anyway —
+    the cost is one cold load on the next request after ten quiet minutes.
     """
-    logger.info(
-        f"Idle evictor active: unload after {IDLE_EVICT_SECONDS:.0f}s idle "
-        f"when an external job is waiting"
-    )
+    logger.info(f"Idle evictor active: unload after {IDLE_EVICT_SECONDS:.0f}s idle")
     while True:
         await asyncio.sleep(IDLE_EVICT_POLL_SECONDS)
         try:
-            if not external_jobs.external_job_running:
-                continue
-            if external_jobs.llm_inflight > 0 or state.queue_depth > 0:
+            if state.llm_inflight > 0 or state.queue_depth > 0:
                 continue
             idle = state.idle_seconds
-            if idle is not None and idle < IDLE_EVICT_SECONDS:
+            if idle is None or idle < IDLE_EVICT_SECONDS:
                 continue
 
             resident = await _resident_models()
             if resident:
-                logger.info(
-                    f"LLMs idle {idle if idle is not None else float('inf'):.0f}s and external "
-                    f"job(s) waiting — unloading {resident}"
-                )
+                logger.info(f"LLMs idle {idle:.0f}s — unloading {resident}")
                 if not await _unload_resident_models(resident):
                     continue
-
-            if external_jobs.yield_requested:
-                external_jobs.release_yield()
+                # Only now is there really room. Telling the arbiter before the
+                # unload lands would invite it to start a job under a resident
+                # model, which is the OOM this whole arrangement exists to avoid.
+                await arbiter.release()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -411,13 +383,16 @@ async def health() -> dict:
 
 @app.get("/status")
 async def status() -> dict:
+    """
+    Proxy state only. What is on the GPU and why is `/gpu/status` on the arbiter —
+    asking two services the same question is how they end up disagreeing.
+    """
     age = state.time_since_swap
     return {
         "current_model": state.current_model,
         "queue_depth": state.queue_depth,
+        "llm_inflight": state.llm_inflight,
         "model_loaded_seconds_ago": round(age, 1) if age is not None else None,
-        "external_job_running": external_jobs.external_job_running,
-        "active_external_jobs": external_jobs.active_job_ids,
     }
 
 
@@ -425,7 +400,20 @@ async def status() -> dict:
 async def metrics() -> Response:
     """Expose Prometheus metrics for scraping."""
     PROXY_QUEUE_DEPTH.set(state.queue_depth)
-    PROXY_EXTERNAL_JOBS.set(len(external_jobs.active_job_ids))
+    PROXY_LLM_INFLIGHT.set(state.llm_inflight)
+
+    PROXY_CURRENT_MODEL_INFO.clear()
+    if state.current_model:
+        PROXY_CURRENT_MODEL_INFO.labels(model=state.current_model).set(1)
+
+    idle = state.idle_seconds
+    if idle is not None:
+        PROXY_LLM_IDLE_SECONDS.set(idle)
+
+    age = state.time_since_swap
+    if age is not None:
+        PROXY_MODEL_AGE_SECONDS.set(age)
+
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
@@ -451,70 +439,6 @@ async def history_summary() -> list[dict]:
     Re-implement later by querying Prometheus API if needed.
     """
     return []
-
-
-# === External Job VRAM Coordination Endpoints ===
-
-@app.post("/external-job/register")
-async def external_job_register(body: dict) -> dict:
-    """Register an external job (batch processing, ML inference, etc.)."""
-    job_id = body.get("job_id", "")
-    if not job_id:
-        return {"error": "job_id required"}
-    return external_jobs.register(job_id)
-
-
-@app.post("/external-job/unregister")
-async def external_job_unregister(body: dict) -> dict:
-    """Unregister an external job."""
-    job_id = body.get("job_id", "")
-    if not job_id:
-        return {"error": "job_id required"}
-    return external_jobs.unregister(job_id)
-
-
-@app.get("/external-job/status")
-async def external_job_status(job_id: str = "") -> dict:
-    """Check status of an external job (including yield state)."""
-    if not job_id:
-        return {
-            "external_job_running": external_jobs.external_job_running,
-            "active_jobs": external_jobs.active_job_ids,
-            "yield_requested": external_jobs.yield_requested,
-            "may_run": not external_jobs.yield_requested,
-        }
-    return external_jobs.get_status(job_id)
-
-
-@app.post("/external-job/yield")
-async def external_job_yield(body: dict) -> dict:
-    """
-    Handle yield/resume signals from external jobs.
-
-    ``action: "yield"`` means "my VRAM is released" — the job is expected to
-    have verified that before calling, since this is what unblocks the proxy
-    from loading a model.
-    """
-    job_id = body.get("job_id", "")
-    action = body.get("action", "")
-    if not job_id:
-        return {"error": "job_id required"}
-    if action == "yield":
-        return external_jobs.confirm_yield(job_id)
-    elif action == "resume":
-        return external_jobs.resume(job_id)
-    else:
-        return {"error": f"Unknown action: {action}"}
-
-
-@app.get("/external-job/debug")
-async def external_job_debug() -> dict:
-    """Full coordination state — for validating the handover protocol."""
-    return external_jobs.snapshot() | {
-        "llm_idle_seconds": state.idle_seconds,
-        "current_model": state.current_model,
-        "queue_depth": state.queue_depth,
-    }
 
 
 @app.api_route(
@@ -544,65 +468,41 @@ async def proxy(path: str, request: Request) -> Response:
     if model in SWAPPABLE_MODELS or model is not None:
         state.increment_queue()
         state.record_request()
-        external_jobs.llm_request_started()
+        state.llm_request_started()
         released = False
 
         def _finish():
-            """Drop the refcount; hand VRAM back once nothing is in flight."""
+            """Drop the refcount; tell the arbiter once nothing is in flight."""
             nonlocal released
             if released:
                 return
             released = True
-            external_jobs.llm_request_finished()
-            if external_jobs.llm_inflight == 0 and state.queue_depth == 0:
-                external_jobs.release_yield()
+            state.llm_request_finished()
+            if state.llm_inflight == 0 and state.queue_depth == 0:
+                asyncio.create_task(arbiter.release())
 
         try:
-            # Reclaim VRAM from external jobs before touching the GPU. The
-            # router auto-loads on first request, so this must complete before
-            # we forward anything — not after.
-            if external_jobs.external_job_running:
-                logger.info(
-                    f"LLM model '{model}' requested — {len(external_jobs.active_job_ids)} "
-                    f"external job(s) registered, requesting VRAM release: "
-                    f"{external_jobs.active_job_ids}"
+            # Clear the GPU before touching it. The router auto-loads on first
+            # request, so this must complete before we forward anything.
+            #
+            # One call: the arbiter stops whatever is running, waits for the
+            # driver to give the memory back, and answers. The proxy no longer
+            # knows what a job is, how many there are, or how one is stopped.
+            granted, detail = await arbiter.acquire()
+            if not granted:
+                logger.error(f"Arbiter would not hand over the GPU: {detail}")
+                state.decrement_queue()
+                _finish()
+                return Response(
+                    content=json.dumps({
+                        "error": "vram_unavailable",
+                        "message": "The GPU could not be freed for this request. Retry shortly.",
+                        "detail": detail,
+                    }),
+                    status_code=503,
+                    headers={"Retry-After": "30"},
+                    media_type="application/json",
                 )
-                external_jobs.request_yield_all()
-                try:
-                    await asyncio.wait_for(
-                        external_jobs.wait_for_yield(),
-                        timeout=EXTERNAL_JOB_YIELD_TIMEOUT,
-                    )
-                    logger.info("External job(s) released VRAM — proceeding with model load")
-                except asyncio.TimeoutError:
-                    if EXTERNAL_JOB_YIELD_ON_TIMEOUT == "wait":
-                        logger.warning(
-                            f"External job(s) still holding VRAM after "
-                            f"{EXTERNAL_JOB_YIELD_TIMEOUT:.0f}s — continuing to wait"
-                        )
-                        await external_jobs.wait_for_yield()
-                    else:
-                        # Refusing is the safe failure: loading a model on top
-                        # of a job still holding several GB OOMs both workloads.
-                        logger.error(
-                            f"External job(s) did not release VRAM within "
-                            f"{EXTERNAL_JOB_YIELD_TIMEOUT:.0f}s — refusing request "
-                            f"rather than risking an OOM"
-                        )
-                        state.decrement_queue()
-                        _finish()
-                        return Response(
-                            content=json.dumps({
-                                "error": "vram_unavailable",
-                                "message": (
-                                    "An external GPU job has not released VRAM yet. "
-                                    "Retry shortly."
-                                ),
-                            }),
-                            status_code=503,
-                            headers={"Retry-After": "30"},
-                            media_type="application/json",
-                        )
 
             try:
                 await state.lock.acquire()
