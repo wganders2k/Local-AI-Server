@@ -1,0 +1,22 @@
+# Pinned rather than floated. This stack renames constructor arguments between
+# minor releases — `torch_dtype` became `dtype`, `max_seq_length` became
+# `max_length` — and train_worker.py calls both by name. An unpinned upgrade
+# breaks the run at model-load time, which is the most expensive place to find
+# out.
+torch==2.9.0
+transformers==4.57.1
+trl==0.24.0
+peft==0.17.1
+datasets==4.0.0
+accelerate==1.10.1
+
+# QLoRA only. The smoke config leaves 4-bit off, so this is not needed to
+# exercise the handover — install it when moving to the 35B.
+bitsandbytes==0.48.1
+
+# Supervisor + worker shared. httpx is what vendor/vram_client.py speaks.
+httpx>=0.27
+PyYAML>=6.0
+
+# Tests only.
+pytest>=8.0
