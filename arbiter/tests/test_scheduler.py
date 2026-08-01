@@ -263,11 +263,17 @@ async def test_an_equal_priority_holder_is_not_preempted(docker, vram):
     assert docker.containers["lora-trainer"]["Running"] is True
 
 
-async def test_an_unknown_caller_is_granted_the_top_rank(docker, vram):
+async def test_an_unknown_caller_is_granted_but_below_the_llm(docker, vram):
     """
-    Permissive on purpose: the callers are the interactive services, and a typo
-    in jobs.yaml must not take one offline with 503s. It outranks everything so
-    the fallback still clears the card, and the arbiter logs on every call.
+    Permissive, but bounded. A typo in jobs.yaml must not take a service offline
+    with 503s, so the unknown name is still granted and can still take the card
+    from background work.
+
+    What it must *not* do is outrank the LLM. The fallback used to hand out
+    max(priority)+1, which meant an unconfigured name — a benchmark script, a
+    typo, anything — silently became the most important tenant on the box and
+    could make an interactive request wait. Protecting the caller from being
+    starved is not worth letting it starve everyone else.
     """
     docker.add("lora-trainer", running=True)
     sched = _build([_trainer()], docker)
@@ -275,9 +281,34 @@ async def test_an_unknown_caller_is_granted_the_top_rank(docker, vram):
 
     ok, _ = await sched.acquire("some-new-service")
 
-    assert ok
+    assert ok, "an unconfigured caller must still be granted, not refused"
     assert docker.containers["lora-trainer"]["Running"] is False
     assert sched.snapshot()["holder"] == "some-new-service"
+
+
+async def test_an_unknown_caller_cannot_take_the_card_from_the_llm(docker, vram):
+    """
+    The point of the change. This is the case a top-rank fallback got wrong.
+    """
+    sched = _build([_llm(), _trainer()], docker)
+    await sched.acquire("llm")
+
+    ok, why = await sched.acquire("some-new-service")
+
+    assert not ok
+    assert "does not outrank" in why
+    assert sched.snapshot()["holder"] == "llm"
+
+
+async def test_the_llm_can_take_the_card_from_an_unknown_caller(docker, vram):
+    """The other direction, which is what makes the LLM's rank mean anything."""
+    sched = _build([_llm()], docker)
+    await sched.acquire("some-new-service")
+
+    ok, _ = await sched.acquire("llm")
+
+    assert ok
+    assert sched.snapshot()["holder"] == "llm"
 
 
 async def test_the_holder_is_reported_by_name(docker, vram):
