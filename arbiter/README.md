@@ -182,12 +182,24 @@ here can check. Bounded by a timeout, and a timeout is a refusal.
 
 ```
 POST /gpu/acquire        {"name": ...} take the card, preempting what you
-                         outrank; 503 if it cannot be guaranteed
+                         outrank; 503 + Retry-After if it cannot be guaranteed
 POST /gpu/release        {"name": ...} done with it
 GET  /gpu/status         holder, reason, free VRAM, the job table
+GET  /gpu/reclaim-notice ?name=... blocks until the caller should give the card
+                         up. Only meaningful to a `cooperative` job; anything
+                         else gets a 400. The held connection is also the
+                         liveness signal — see above
+GET  /health             liveness
 GET  /metrics            Prometheus
-POST /external-job/*     transitional; see above
 ```
+
+A missing `name` is a 400 everywhere it is required: without a name there is no
+priority, and without a priority there is no basis for stopping anything.
+Guessing would mean inventing policy.
+
+`{"reclaim": false}` from the notice endpoint means the wait expired with nothing
+wanted — call again. It is not a poll interval; nothing is checked when it fires.
+It exists so a client blocked on an arbiter that has died eventually finds out.
 
 ## Tests
 
