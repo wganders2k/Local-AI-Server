@@ -1,39 +1,43 @@
-# Discord Bot — Design Document v1.2
+# Discord Bot — Design Document v2.0
 
-**Scope:** This document details the design parameters specifically for the Discord bot component of the Mimic Bot system. For the full system architecture (hardware, proxy, LibreChat, RAG pipeline), refer to `Design.md`.
+**Scope:** design parameters for the Discord bot component. For system architecture (hardware, GPU arbitration, proxy, RAG pipeline), see [`Design.md`](Design.md).
 
 **Change Log:**
+
 | Version | Date | Change |
 |---|---|---|
-| v1.2 | 2026-04-26 | Replaced mention-based routing with slash commands. Removed `router.py`, `rag_client.py`, and compound lore+mimic chain. |
+| v2.0 | 2026-08-07 | `/chat` thread-based conversation added. `/lore` rebuilt as an agentic tool-calling loop against the RAG service — it no longer does a single retrieval and no longer uses the `lore` model. All responses now stream. Privileged intents are required. Phase checklists replaced with current state. |
+| v1.2 | 2026-04-26 | Replaced mention-based routing with slash commands. Removed `router.py` and the compound lore+mimic chain. |
 | v1.1 | — | Original design with mention-based routing. |
 
 ---
 
 ## 1. Overview
 
-The Discord bot (`discord.py`) is the primary user-facing interface for the nullposting server. It uses **slash commands** to route user requests to the appropriate AI model via the FastAPI orchestration proxy, manages typing indicators to mask swap latency, and maintains per-channel conversation history for mimic personas.
+The bot is the primary user-facing interface for the nullposting server. It routes requests to the orchestration proxy, masks swap latency with typing indicators, and owns all prompt construction — the proxy is content-blind, so anything the model sees was assembled here.
 
-The bot exposes **two slash commands:**
+Three slash commands:
 
-| Command | Model Used | Purpose |
+| Command | Model | Purpose |
 |---|---|---|
-| `/mimic persona:<name> message:<text>` | `Qwen3.5-35B-A3B-Uncensored` IQ4_XS | Impersonate a server member's Discord personality |
-| `/lore question:<text>` | `gemma3:12b` Q6_K | Answer questions about server history, in-jokes, and events |
+| `/mimic persona message` | the persona alias itself (`mimic_user*`) | Impersonate a member's Discord personality |
+| `/chat model` | any alias llama-server knows | Create a thread bound to a model; chat in it without further commands |
+| `/lore question [rounds]` | `brain-dense-heretic` (`AGENT_MODEL`) | Agentic search over server history |
 
-### Architecture Decision: Slash Commands over Mention Routing
+### 1.1 Slash commands over mention routing
 
-Slash commands were chosen over mention-based routing for the following reasons:
-
-| Feature | Slash Commands | Mention Routing |
+| Concern | Slash commands | Mention routing |
 |---|---|---|
-| Persona discovery | Autocomplete dropdown | User must know exact alias |
-| Input structure | Named parameters | Free-text parsing (error-prone) |
-| Rate limit feedback | Ephemeral response on interaction | Requires new message reply |
-| Typing indicator | Built-in via `defer()` | Manual keep-alive required |
-| Permissions | Per-channel command visibility | Bot must read all messages |
+| Persona discovery | Autocomplete dropdown | User must know the exact alias |
+| Input structure | Named parameters | Free-text parsing, error-prone |
+| Rate limit feedback | Ephemeral interaction response | Requires a new message reply |
+| Typing indicator | Built in via `defer()` | Manual keep-alive |
 
-Compound lore+mimic chains (single message triggering both lore and mimic) are not supported. Users run `/lore` and `/mimic` as separate commands.
+Compound lore+mimic chains are not supported; the commands are run separately.
+
+### 1.2 `/chat` is the exception that reintroduced message handling
+
+`/chat` is a slash command only at creation. Afterwards the thread is the interface, and every message in it is handled by `on_message`. This deliberately reverses part of the v1.2 rationale — the ergonomics of a conversation are worth it, but the cost is real and stated in §4.2: the bot now needs a privileged intent it previously did without.
 
 ---
 
@@ -41,11 +45,18 @@ Compound lore+mimic chains (single message triggering both lore and mimic) are n
 
 | Component | Choice | Rationale |
 |---|---|---|
-| Language | Python 3.11+ | Native `discord.py` support; async-first |
-| Discord library | `discord.py` 2.x | Mature, async, slash command + mention support |
-| HTTP client | `httpx` (async) | Non-blocking requests to proxy; streaming support |
-| Containerisation | Docker (Compose service `discord-bot`) | Consistent environment; restarts on crash |
-| Configuration | Environment variables via `.env` | `DISCORD_TOKEN`, `PROXY_URL` |
+| Language | Python 3.11 (`python:3.11-slim`) | Native `discord.py` support; async-first |
+| Discord library | `discord.py` ≥2.3 | Mature, async, slash commands + app command trees |
+| HTTP client | `httpx` (async) | Non-blocking calls to proxy and RAG service; streaming support |
+| Configuration | Environment variables via `.env` | `python-dotenv` |
+
+```
+discord.py>=2.3.0
+httpx>=0.27.0
+python-dotenv>=1.0.0
+```
+
+**No vector-store dependencies.** An earlier revision planned to add `chromadb` and `sentence-transformers` here for lore retrieval. Instead the bot calls the RAG service over HTTP (`rag_client.py`). That keeps the embedding model in exactly one process rather than loading a second copy into the bot, and keeps the bot image small.
 
 ---
 
@@ -53,263 +64,244 @@ Compound lore+mimic chains (single message triggering both lore and mimic) are n
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `DISCORD_TOKEN` | ✅ | — | Bot token from Discord Developer Portal |
-| `PROXY_URL` | ✅ | — | Base URL of the orchestration proxy (e.g. `http://proxy:11436`) |
-| `MAX_QUEUE_DEPTH` | ❌ | `3` | Max queued requests before returning an ephemeral error |
-| `RATE_LIMIT_PER_USER` | ❌ | `5` | Max requests per user per minute |
-| `TYPING_INDICATOR_INTERVAL` | ❌ | `5` | Seconds between typing indicator refreshes |
+| `DISCORD_TOKEN` | ✅ | — | Bot token from the Developer Portal |
+| `PROXY_URL` | ❌ | `http://proxy:11436` | Orchestration proxy base URL |
+| `MAX_QUEUE_DEPTH` | ❌ | `3` | Reject with an ephemeral error above this proxy queue depth |
+| `RATE_LIMIT_PER_USER` | ❌ | `5` | Requests per user per 60s |
+| `TYPING_INDICATOR_INTERVAL` | ❌ | `5` | Seconds between typing refreshes |
+| `RAG_SERVICE_URL` | ❌ | `http://rag-service:8001` | RAG service base URL |
+| `LORE_TOP_K` | ❌ | `10` | Default chunks per retrieval |
+| `RAG_ENABLED` | ❌ | `true` | Set false to disable retrieval for maintenance |
+| `THREAD_REGISTRY_PATH` | ❌ | `data/threads.json` | Persisted `/chat` thread bindings |
+| `LORE_CONTEXT_PATH` | ❌ | `prompts/lore_context.md` | Gitignored server background for the `/lore` agent |
 
-> **Phase 2+ variables** (not yet active — RAG service is not deployed):
-> | `CHROMA_HOST` | ❌ | `chromadb` | ChromaDB host for lore RAG lookups |
-> | `CHROMA_PORT` | ❌ | `8000` | ChromaDB port |
-> | `LORE_TOP_K` | ❌ | `5` | Number of RAG chunks retrieved per lore query |
+`CHROMA_HOST` / `CHROMA_PORT` are **not** used by the bot — it never talks to ChromaDB directly.
+
+Non-environment constants in [`config.py`](discord-bot/config.py): `AGENT_MODEL` (`brain-dense-heretic`), `AGENT_MAX_ROUNDS` (10), `AGENT_MAX_ROUNDS_HARD_CAP` (25), `AGENT_TEMPERATURE` (0.1), `AGENT_TOP_K` (10), `HISTORY_MAX_TURNS` (20), and the proxy timeouts in §10.3.
 
 ---
 
 ## 4. Bot Identity & Permissions
 
-### 4.1 Discord Application Setup
+### 4.1 Discord application
 
 - **Application name:** `Mimic Bot`
-- **Bot username:** `mimic` (or server-specific nickname)
-- **Bot avatar:** Server-specific (optional, set via Discord Developer Portal)
+- **Bot avatar / nickname:** server-specific, set in the Developer Portal
 
-### 4.2 Required Bot Permissions (OAuth2 Scopes)
+### 4.2 Required permissions and intents
 
 | Permission | Scope | Reason |
 |---|---|---|
-| `bot` | OAuth2 | Base bot scope |
+| `bot` | OAuth2 | Base scope |
 | `applications.commands` | OAuth2 | Slash command registration |
 | Send Messages | Bot | Post responses |
-| Send Messages in Threads | Bot | Respond in thread contexts |
+| Create Public Threads | Bot | `/chat` |
+| Send Messages in Threads | Bot | Thread conversation |
+| Read Message History | Bot | Thread restore on startup |
 
-**Privileged Intents:** None required. Slash commands do not need `MESSAGE_CONTENT` intent.
+**Privileged intents are required** — this changed in v2.0:
 
-### 4.3 Channel Scope
+| Intent | Why |
+|---|---|
+| `MESSAGE_CONTENT` | `on_message` reads the text of messages inside `/chat` threads. Slash commands alone would not need it |
+| `SERVER_MEMBERS` | `intents.members = True` — display-name resolution for message labelling |
 
-Slash commands can be enabled or disabled per-channel via Discord's server settings. Recommended deployment: enable commands in a dedicated `#bot-spam` channel plus any channels the server admin opts in.
+Both must be enabled in the Developer Portal or the bot fails to start.
+
+### 4.3 Channel scope
+
+Slash commands can be enabled or disabled per-channel in server settings. Note that `/chat` threads work wherever a thread can be created, and `on_message` responds in any registered thread regardless of where the parent channel sits.
 
 ---
 
-## 5. Slash Command Routing
+## 5. Command Routing
 
-### 5.1 Available Commands
+### 5.1 Persona autocomplete (`/mimic`)
 
-| Command | Parameters | Description |
-|---|---|---|
-| `/mimic` | `persona` (autocomplete), `message` (string) | Chat with a mimic persona |
-| `/lore` | `question` (string) | Ask the lore assistant a question |
+Suggestions come from `MIMIC_SYSTEM_PROMPTS.keys()`, capped at Discord's 25-choice limit.
 
-### 5.2 Persona Autocomplete
+**These are advertised whether or not they work.** The keys come from `MIMIC_PERSONAS` in the bot's config, but the backing presets are commented out in [`models.ini`](models.ini) — so every suggestion currently resolves to a model llama-server does not have. The autocomplete has no visibility into the preset file; making it accurate would mean sourcing it from `/v1/models` the way `/chat` does.
 
-The `/mimic` command provides autocomplete for the `persona` parameter. As the user types, Discord returns matching persona names from `MIMIC_SYSTEM_PROMPTS.keys()`. Maximum 25 choices (Discord limit).
+### 5.2 Model autocomplete (`/chat`)
 
-### 5.3 Model Name Resolution
+Suggestions come from the proxy's `/v1/models`, i.e. from llama-server itself. Any alias actually loaded in the preset file is selectable, including ones absent from `SWAPPABLE_MODELS` in `proxy/config.py`. If the proxy is unreachable, the list is empty rather than an error.
 
-Persona → model name resolution is handled by the slash command handler in [`bot.py`](discord-bot/bot.py). The `persona` parameter value is looked up in `MIMIC_SYSTEM_PROMPTS` to retrieve the system prompt. The persona name is also used as the model alias for the proxy request.
+### 5.3 Adding a persona
 
-Adding a new persona requires:
-1. Add system prompt entry to `MIMIC_SYSTEM_PROMPTS` in [`config.py`](discord-bot/config.py)
-2. Add model alias to `models.ini` (if using a distinct GGUF)
-3. Restart the bot container: `make restart-discord-bot`
+1. Uncomment or add the `[mimic_<member>]` section in `models.ini`
+2. Add the member to `MIMIC_PERSONAS` in [`config.py`](discord-bot/config.py) — the prompt is generated from `MIMIC_PROMPT_TEMPLATE`
+3. `make restart-llama-swappable && make restart-bot`
 
 ---
 
 ## 6. Request Handling
 
-### 6.1 Slash Command Request Flow
+### 6.1 `/mimic` flow
 
 ```
-1. User invokes /mimic or /lore slash command
-2. Discord sends Interaction event to bot
-3. Check rate limit for requesting user → reject if exceeded (ephemeral response)
-4. Defer interaction response (shows typing indicator automatically)
-5. Build prompt (see Section 7)
-6. POST to proxy: /v1/chat/completions with {model, messages}
-7. Receive response (blocking, non-streaming)
-8. Post response via interaction.followup.send()
+1. Rate limit check → ephemeral rejection if exceeded
+2. Validate persona against MIMIC_PERSONAS → ephemeral "Unknown persona"
+3. Check proxy queue depth → ephemeral rejection at MAX_QUEUE_DEPTH
+   (a ProxyError here is logged and ignored; the chat call reports it properly)
+4. defer() the interaction
+5. Build [system prompt] + rolling history + labelled user message
+6. Stream from proxy under `async with interaction.channel.typing()`
+7. Flush 2000-char chunks at sentence boundaries as they fill
+8. Strip disclaimers from the final buffer, send the remainder
+9. Record the turn in history
 ```
 
-**Typing indicator management:**
-`interaction.response.defer()` triggers Discord's built-in typing indicator for the interaction. For long-running requests, wrap the proxy call in `async with interaction.channel.typing():` to maintain the typing indicator throughout inference.
+### 6.2 `/chat` flow
 
-### 6.2 No Compound Requests
+```
+create:   rate limit → verify the channel supports threads (not a DM)
+          → create_thread(auto_archive_duration=60)
+          → bind thread_id → model in memory and in threads.json
+          → greet in-thread, confirm ephemerally
 
-Compound lore+mimic chains are not supported with slash commands. Users run `/lore` and `/mimic` as separate commands. If compound behavior is desired in the future, consider adding a `/chain persona:<name> question:<text>` command.
+message:  on_message → ignore self → thread must be registered → rate limit
+          → build history + "[DisplayName]: text"
+          → stream to the bound model, chunked at 2000 chars
+          → record the turn
+```
 
-### 6.3 Error Handling
+Threads are restored at startup from `threads.json`: each is re-fetched, and entries whose threads were archived, deleted, or became inaccessible are reconciled and reported in a single summary log line.
 
-| Error Condition | Bot Response |
+**No system prompt is sent for thread chat.** Whatever persona the model has is whatever its weights and the conversation provide.
+
+### 6.3 `/lore` flow
+
+```
+1. Queue depth check (no rate limit — see below)
+2. defer()
+3. Collect guild text channel names to give the agent a valid channel vocabulary
+4. run_agent_loop(question, rounds) — see §7.3
+5. Render the answer into one or more embeds
+```
+
+**Rate limiting is deliberately not applied to `/lore`.** A single invocation is a multi-round, minutes-long research task, and a 5-per-minute window is meaningless against it — the queue depth check is the real defence.
+
+### 6.4 Error handling
+
+| Condition | Response |
 |---|---|
-| Proxy unreachable | Ephemeral: "⚠️ The AI backend is currently unreachable. Try again in a moment." |
 | Rate limit exceeded | Ephemeral: "⚠️ You're sending requests too fast. Slow down a bit." |
-| Inference timeout (>60s) | Ephemeral: "⚠️ Request timed out. The model may be busy." |
-| Unknown persona | Ephemeral: "⚠️ Unknown persona: <name>" |
-| Empty response from model | Ephemeral: "⚠️ The model returned an empty response." |
-| Unexpected error | Ephemeral: "An unexpected error occurred. Please try again." |
+| Queue too deep | Ephemeral: "⚠️ The AI backend is busy (N requests queued)." |
+| Unknown persona | Ephemeral: "⚠️ Unknown persona: `<name>`" |
+| `ProxyError` (unreachable, timeout, HTTP error) | Ephemeral, with the error text |
+| Anything else | Ephemeral: "An unexpected error occurred. Please try again.", full traceback logged |
+| Thread creation forbidden | Ephemeral: missing-permission message |
 
-All error messages use `ephemeral=True` so only the requesting user sees them.
+Errors in threads are posted in-thread rather than ephemerally — there is no interaction to reply to.
+
+An error that arrives **mid-stream** cannot retract what was already posted; partial output stays and the error follows it.
 
 ---
 
 ## 7. Prompt Construction
 
-### 7.1 Mimic Prompt
+The proxy injects nothing (`Design.md` §6.3). Every system prompt originates here.
 
-The mimic model's system prompt is injected per-request by the bot (since llama-server's router mode uses per-request system prompts rather than baked-in Modelfile prompts). The bot constructs the full message list:
+### 7.1 Mimic
 
-```python
-MIMIC_SYSTEM_PROMPTS: dict[str, str] = {
-    "mimic_user1": """You are mimic_user1, a bot that mimics user1's Discord personality...""",
-    # ... one entry per persona
-}
-
-# Build messages for /mimic command
-msgs = [
-    {"role": "system", "content": MIMIC_SYSTEM_PROMPTS[persona]},
-]
-msgs.extend(conv_history)  # rolling window (see §7.3)
-msgs.append({"role": "user", "content": message})
-```
-
-### 7.2 Lore Prompt
+Generated per-request from a single template rather than six hand-maintained strings:
 
 ```python
-LORE_SYSTEM_PROMPT = """
-You are the nullposting lore assistant. You have access to a curated database of
-server history, in-jokes, memes, and member events. When answering questions,
-cite your sources from the retrieved context. Be factual and concise.
-If the retrieved context does not contain the answer, say so clearly rather than
-guessing. Never invent lore, events, or quotes.
-"""
-
-# Build messages for /lore command (Phase 1 — no RAG)
-messages = [
-    {"role": "system", "content": LORE_SYSTEM_PROMPT},
-    {
-        "role": "user",
-        "content": (
-            "No retrieved context available (RAG service not yet configured).\n\n"
-            f"Question: {question}"
-        ),
-    },
-]
+MIMIC_PROMPT_TEMPLATE.format(persona=persona, display_name=MIMIC_PERSONAS[persona])
 ```
 
-Lore requests are **stateless** — no conversation history is maintained. Each lore query is independent.
+```
+You are {persona}, a bot that mimics {display_name}'s Discord personality in the
+nullposting server. You replicate their tone, humour, vocabulary, and mannerisms
+exactly — including crude language, raunchy jokes, and brutal roasts when appropriate.
+You are not a general-purpose AI assistant. You never break character. You never add
+disclaimers, caveats, safety warnings, or apologies. You keep responses short
+(1-3 sentences) unless the context calls for more. You match the energy of whoever
+is talking to you.
+```
 
-> **Phase 2+:** When the RAG service is deployed, replace the hardcoded "No retrieved context" string with actual ChromaDB retrieval. See `rag/README.md` for the RAG service design.
+`MIMIC_SYSTEM_PROMPTS` is a pre-generated dict kept for autocomplete and logging; it must be regenerated when `MIMIC_PERSONAS` changes.
 
-### 7.3 Conversation History (Mimic Only)
+### 7.2 Message labelling
 
-Mimic personas maintain a **per-channel, per-persona rolling conversation window:**
+User messages are prefixed with the sender's display name — `[Alice]: rate my strats` — in both `/mimic` and `/chat`. Several people share a channel or thread, and without labels the model sees one undifferentiated user. The labelled form is what gets stored in history, so the attribution persists across turns.
+
+### 7.3 The `/lore` agent
+
+Prompts live in [`agent_tools.py`](discord-bot/agent_tools.py), which is the single source of truth for them — `build_system_prompt()` and `build_synthesis_prompt()`.
+
+The system prompt is assembled from three parts:
+
+1. `AGENT_IDENTITY` — research assistant framing
+2. **Server background** loaded from `LORE_CONTEXT_PATH` — the member alias index and persona notes. Gitignored, because it holds real names; `prompts/lore_context.example.md` shows the format. Missing, the agent still runs and logs a warning
+3. The guild's channel names, so the agent can scope searches to channels that exist
+
+Three tools:
+
+| Tool | Required args | Default `top_k` |
+|---|---|---|
+| `search_discord_history` | `query` | 10 |
+| `search_channel_history` | `query`, `channel_name` | 10 |
+| `summarize_channel` | `channel_name` | 20 |
+
+All three accept optional `start_date` / `end_date` in ISO 8601, which the RAG service converts to epoch comparisons against chunk metadata (`Design.md` §9.1).
+
+The loop runs up to `rounds` iterations (default 10, hard cap 25) at `temperature=0.1` for deterministic tool selection, then a synthesis pass produces the answer. `AgentMetrics` records rounds, tool calls, tools used, and per-stage latency, logging a summary per run.
+
+### 7.4 Conversation history
 
 ```python
-# Key: (channel_id, model_name) → deque of message dicts
-conversation_history: dict[tuple[int, str], deque] = defaultdict(
-    lambda: deque(maxlen=10)  # last 10 turns (5 user + 5 assistant)
-)
+# (channel_id | thread_id, model_name) → deque(maxlen=20)
 ```
-
-**Window parameters:**
 
 | Parameter | Value | Rationale |
 |---|---|---|
-| Max turns | 10 (5 exchanges) | Fits within 8192 token context; Discord banter is short |
-| Scope | Per-channel, per-persona | Prevents cross-channel context bleed |
-| Persistence | In-memory only | Cleared on bot restart; Discord banter doesn't need persistence |
-| History for lore | None | Lore queries are stateless; RAG provides all context |
+| Max entries | 20 messages ≈ 10 exchanges | Each turn appends a user and an assistant message |
+| Scope | Per-channel/thread, per-model | Prevents cross-channel and cross-persona bleed |
+| Persistence | In-memory only | Cleared on restart. Note that `/chat` **thread bindings** persist but their history does not — a restarted bot answers in the same thread with no memory of it |
+| `/lore` | none | Each query is independent; the agent retrieves its own context |
 
 ---
 
 ## 8. Response Formatting
 
-### 8.1 Mimic Responses
+### 8.1 Streaming
 
-- Posted as plain text, no embeds
-- No attribution prefix (the bot's Discord username/avatar serves as attribution)
-- Truncated to **2000 characters** (Discord message limit) — mimic responses are capped at 512 tokens (~400 words) in `models.ini`, so truncation should be rare
-- If response exceeds 2000 chars: split at last sentence boundary before the limit
+All model responses stream. Tokens accumulate in a buffer; whenever it reaches Discord's 2000-character limit, `find_split_boundary()` picks a sentence boundary and that chunk is posted. The remainder is flushed when the stream ends.
 
-### 8.2 Lore Responses
+Streaming was chosen over a single blocking post because swap plus inference on a 27B–35B model routinely exceeds Discord's 15-minute interaction window in the worst case, and partial output is better feedback than a spinner.
 
-- Posted as a **Discord embed** for visual distinction from mimic responses
-- Embed colour: `0x5865F2` (Discord blurple) — visually distinct from plain mimic text
-- Embed title: `📚 nullposting Lore`
-- Embed description: lore assistant output (truncated to 4096 chars — Discord embed limit)
-- Footer: `Sources: {number of RAG chunks used}`
+### 8.2 Mimic responses
 
-```python
-def build_lore_embed(lore_text: str, chunk_count: int) -> discord.Embed:
-    embed = discord.Embed(
-        title="📚 nullposting Lore",
-        description=lore_text[:4096],
-        colour=0x5865F2
-    )
-    embed.set_footer(text=f"Sources: {chunk_count} lore entries retrieved")
-    return embed
-```
+Plain text, no embeds — the bot's own username and avatar are the attribution. Disclaimer patterns are stripped from the final buffer.
 
-### 8.3 Post-Processing: Disclaimer Stripping
+### 8.3 Lore responses
 
-The mimic base model occasionally appends baked-in disclaimers. These are stripped in post-processing before posting:
+Discord embeds, blurple `0x5865F2`, titled `📚 nullposting Lore`. Answers longer than the 4096-character embed limit are split across several embeds at sentence boundaries; an empty answer produces a single `(No results)` embed.
 
-```python
-import re
+There is no source-count footer. An earlier design specified one, but with an agentic loop "how many chunks were used" is not a single number — the agent may run a dozen retrievals across several rounds and discard most of them.
 
-DISCLAIMER_PATTERNS = [
-    r"\n+This is (general|not legal|not medical|not financial).*$",
-    r"\n+Note:.*?(disclaimer|advice|professional).*$",
-    r"\n+Please (consult|note|be aware).*$",
-    r"\n+I('m| am) an AI.*$",
-]
+### 8.4 Disclaimer stripping
 
-def strip_disclaimers(text: str) -> str:
-    for pattern in DISCLAIMER_PATTERNS:
-        text = re.sub(pattern, "", text, flags=re.IGNORECASE | re.DOTALL)
-    return text.strip()
-```
+`DISCLAIMER_PATTERNS` in [`config.py`](discord-bot/config.py) — around a dozen anchored regexes covering "This is general…", "Please consult…", "I'm an AI…", and similar trailing additions. Applied to the tail of the response.
 
-This post-processing is applied to **mimic responses only**. Lore responses are not stripped (the lore model is a standard instruction-tuned base and won't generate these).
+Applied to `/mimic` and `/chat` output. Not applied to `/lore`, whose model is not the uncensored base and whose output is a research answer where a caveat may be legitimate.
 
 ---
 
 ## 9. Rate Limiting
 
-### 9.1 Per-User Rate Limit
+Per-user sliding window in [`rate_limiter.py`](discord-bot/rate_limiter.py): timestamps outside the window are evicted on each check, then the request is admitted or refused. Default 5 per 60s via `RATE_LIMIT_PER_USER`.
 
-```python
-from collections import defaultdict
-from time import monotonic
+Applied to `/mimic`, `/chat` creation, and each message in a `/chat` thread. Not applied to `/lore` (§6.3).
 
-class RateLimiter:
-    def __init__(self, max_requests: int, window_seconds: int = 60):
-        self.max_requests = max_requests
-        self.window = window_seconds
-        self.user_timestamps: dict[int, list[float]] = defaultdict(list)
-    
-    def is_allowed(self, user_id: int) -> bool:
-        now = monotonic()
-        timestamps = self.user_timestamps[user_id]
-        # Evict timestamps outside the window
-        self.user_timestamps[user_id] = [t for t in timestamps if now - t < self.window]
-        if len(self.user_timestamps[user_id]) >= self.max_requests:
-            return False
-        self.user_timestamps[user_id].append(now)
-        return True
-```
-
-**Default:** 5 requests per user per 60-second window. Configurable via `RATE_LIMIT_PER_USER`.
-
-### 9.2 Global Queue Depth Cap
-
-The proxy exposes a `/status` endpoint (or the bot tracks in-flight requests locally). If the number of queued requests exceeds `MAX_QUEUE_DEPTH` (default: 3), new requests are rejected with an ephemeral error. This prevents the queue from growing unbounded during a burst.
+**Queue depth cap:** before dispatching, the bot reads the proxy's `/status` and refuses at `MAX_QUEUE_DEPTH` (default 3) with an ephemeral error, which stops the queue growing unbounded during a burst.
 
 ---
 
 ## 10. Proxy API Contract
 
-The bot communicates with the orchestration proxy using the **OpenAI-compatible API** exposed by llama-server. The proxy forwards requests transparently to the appropriate llama-server instance.
+OpenAI-compatible, forwarded transparently by the proxy.
 
 ### 10.1 Request
 
@@ -321,96 +313,61 @@ Content-Type: application/json
   "model": "mimic_user3",
   "messages": [
     {"role": "system", "content": "You are mimic_user3..."},
-    {"role": "user", "content": "rate my strats"}
+    {"role": "user", "content": "[Alice]: rate my strats"}
   ],
-  "stream": false
+  "stream": true
 }
 ```
 
-**Streaming:** `stream: false` for simplicity in Phase 1. Phase 2+ can enable streaming for faster perceived response time (post tokens to Discord as they arrive using message edits).
+`chat_with_tools()` additionally sends `tools` and `tool_choice` for the agent loop; the proxy passes them through to llama-server, which is started with `--jinja` so the chat template can render tool calls.
 
-### 10.2 Response
+### 10.2 Client methods
 
-```json
-{
-  "id": "chatcmpl-...",
-  "object": "chat.completion",
-  "model": "mimic_user3",
-  "choices": [
-    {
-      "index": 0,
-      "message": {
-        "role": "assistant",
-        "content": "lmao those aren't strats, that's just dying slower"
-      },
-      "finish_reason": "stop"
-    }
-  ],
-  "usage": {
-    "prompt_tokens": 42,
-    "completion_tokens": 15,
-    "total_tokens": 57
-  }
-}
-```
+[`proxy_client.py`](discord-bot/proxy_client.py) exposes `chat()`, `chat_stream()`, `chat_with_tools()`, `get_queue_depth()`, and `list_models()`.
 
-### 10.3 Timeout
+### 10.3 Timeouts
 
-- **Connection timeout:** 10s (proxy should be local network, fast connect)
-- **Read timeout:** 60s (covers worst-case swap + inference for large models)
-- **Total timeout:** 70s
+| Timeout | Value | Covers |
+|---|---|---|
+| Connection | 10s | Local network connect |
+| Read | 120s | Worst-case model swap plus first token |
+| Total | 320s | Full generation |
+
+These are considerably longer than the v1.2 values (10/60/70s). The swappable slot may need to evict an 18 GB model and load another before the first token, and a request can additionally wait on the arbiter while a junior GPU tenant is preempted.
+
+The RAG client has its own 30s timeout and degrades to empty context rather than raising, so a slow retrieval costs the agent one tool result instead of failing the command.
 
 ---
 
-## 11. Docker Service Definition
+## 11. Container Definition
 
 ```yaml
-# Excerpt from docker-compose.yml
 discord-bot:
   build: ./discord-bot
   restart: unless-stopped
   depends_on:
     proxy:
       condition: service_healthy
+    rag-service:
+      condition: service_started
   environment:
     - DISCORD_TOKEN=${DISCORD_TOKEN}
     - PROXY_URL=${PROXY_URL}
     - MAX_QUEUE_DEPTH=${MAX_QUEUE_DEPTH:-3}
     - RATE_LIMIT_PER_USER=${RATE_LIMIT_PER_USER:-5}
     - TYPING_INDICATOR_INTERVAL=${TYPING_INDICATOR_INTERVAL:-5}
+    - RAG_SERVICE_URL=http://rag-service:8001
+    - LORE_TOP_K=${LORE_TOP_K:-5}
+    - RAG_ENABLED=${RAG_ENABLED:-true}
+    - LORE_CONTEXT_PATH=${LORE_CONTEXT_PATH:-prompts/lore_context.md}
+  volumes:
+    - ./discord-bot/data:/app/data      # thread registry, read-write
+    - ./discord-bot/prompts:/app/prompts:ro
 ```
 
-> **Phase 2+:** When RAG is enabled, add `chromadb` to `depends_on` and add `CHROMA_HOST`, `CHROMA_PORT`, and `LORE_TOP_K` to environment variables.
+`prompts/` is mounted read-only, so editing `lore_context.md` takes effect on restart with no image rebuild. `data/` must stay writable — the thread registry is saved there via atomic replace.
 
-### 11.1 Dockerfile
-
-```dockerfile
-# discord-bot/Dockerfile
-FROM python:3.11-slim
-
-WORKDIR /app
-
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-COPY . .
-
-CMD ["python", "-u", "bot.py"]
-```
-
-### 11.2 requirements.txt
-
-```
-discord.py>=2.3.0
-httpx>=0.27.0
-python-dotenv>=1.0.0
-```
-
-> **Phase 2+ dependencies** (add when RAG service is deployed):
-> ```
-> chromadb>=0.5.0
-> sentence-transformers>=3.0.0
-> ```
+Note that compose passes `LORE_TOP_K` with a default of 5 while `config.py` defaults to 10; the environment wins in the deployed stack.
 
 ---
 
@@ -420,159 +377,68 @@ python-dotenv>=1.0.0
 discord-bot/
 ├── Dockerfile
 ├── requirements.txt
-├── bot.py                  # Entry point: Discord client setup, slash commands
-├── proxy_client.py         # httpx async client for proxy API calls
-├── rate_limiter.py         # Per-user rate limiting logic
-├── history.py              # Conversation history management (deque per channel/persona)
-├── formatters.py           # Response formatting, disclaimer stripping, embed builders
-└── config.py               # Environment variable loading, defaults, system prompts
+├── bot.py              # Entry point: client setup, the three slash commands, on_message
+├── agent_tools.py      # /lore agent: tool schemas, prompt builders, executor, loop, metrics
+├── proxy_client.py     # httpx client: chat, stream, tools, queue depth, model list
+├── rag_client.py       # httpx client for rag-service /retrieve; degrades to empty context
+├── thread_registry.py  # JSON-backed thread_id → model bindings, atomic writes
+├── history.py          # (channel_id, model) → deque conversation windows
+├── rate_limiter.py     # Per-user sliding window
+├── formatters.py       # Streaming split boundaries, disclaimer strip, lore embeds
+├── config.py           # Env loading, persona registry, prompt template, agent constants
+├── data/threads.json   # Persisted thread registry (bind-mounted)
+└── prompts/
+    ├── lore_context.example.md
+    └── lore_context.md        # gitignored — real names
 ```
-
-> **Phase 2+ files** (add when RAG service is deployed):
-> ```
-> ├── rag_client.py           # ChromaDB query wrapper for lore retrieval
-> ```
 
 ---
 
-## 13. Persona Configuration
+## 13. Latency Budget
 
-Each mimic persona is defined by two artefacts:
-
-1. **`models.ini` section** — sets GGUF path, inference parameters, and alias
-2. **Bot system prompt** — entry in `MIMIC_SYSTEM_PROMPTS` dict in [`config.py`](discord-bot/config.py), injected per-request
-
-### 13.1 Persona Parameter Summary
-
-| Persona | Model | Quant | VRAM | Temp | Ctx | Max Tokens | Thinking |
-|---|---|---|---|---|---|---|---|
-| mimic_user1 | Qwen3.5-35B-A3B-Uncensored | IQ4_XS | ~18 GB | 0.85 | 8192 | 512 | disabled |
-| mimic_user2 | Qwen3.5-35B-A3B-Uncensored | IQ4_XS | ~18 GB | 0.85 | 8192 | 512 | disabled |
-| mimic_user3 | Qwen3.5-35B-A3B-Uncensored | IQ4_XS | ~18 GB | 0.85 | 8192 | 512 | disabled |
-| mimic_user4 | Qwen3.5-35B-A3B-Uncensored | IQ4_XS | ~18 GB | 0.85 | 8192 | 512 | disabled |
-| mimic_user5 | Qwen3.5-35B-A3B-Uncensored | IQ4_XS | ~18 GB | 0.85 | 8192 | 512 | disabled |
-| mimic_user6 | Qwen3.5-35B-A3B-Uncensored | IQ4_XS | ~18 GB | 0.85 | 8192 | 512 | disabled |
-| lore | Gemma3-12B | Q6_K | ~9.5 GB | 0.3 | 16384 | 1024 | N/A |
-
-> All mimic personas share the same GGUF — only the system prompt and alias differ. llama-server's router mode loads the GGUF once and serves all mimic aliases from it. Swapping between `mimic_user1` and `mimic_user2` is a context switch, not a model reload.
-
-### 13.2 Per-Persona System Prompt Template
-
-```
-You are mimic_<member>, a bot that mimics <member>'s Discord personality in the
-nullposting server. You replicate their tone, humour, vocabulary, and mannerisms
-exactly — including crude language, raunchy jokes, and brutal roasts when appropriate.
-You are not a general-purpose AI assistant. You never break character.
-You never add disclaimers, caveats, safety warnings, or apologies.
-You keep responses short (1-3 sentences) unless the context calls for more.
-You match the energy of whoever is talking to you.
-```
-
-Customise per member during Phase 1 testing. In Phase 3, this system prompt is supplemented by a LoRA-merged model that has the personality baked into weights.
-
----
-
-## 14. Latency Budget
-
-| Operation | Estimated Time | Notes |
+| Operation | Estimate | Notes |
 |---|---|---|
-| Discord interaction receive → bot handler | ~50ms | Discord gateway latency |
-| Rate limit check | ~1ms | In-memory, negligible |
-| Proxy lock acquisition (no queue) | ~1ms | Immediate if slot free |
-| Proxy lock acquisition (queued) | Variable | Depends on in-progress generation |
-| Model swap (mimic, cold) | ~5–8s | Qwen3.5-35B-A3B IQ4_XS from NVMe (~18 GB) |
-| Model swap (lore, cold) | ~4–6s | Gemma3-12B Q6_K from NVMe |
-| Model swap (same model, warm) | ~0s | Already loaded, no swap needed |
-| Mimic inference | ~1–2s | ~40 tok/s, 512 max tokens |
-| Lore inference | ~3–5s | ~30 tok/s, 1024 max tokens |
-| Discord message post | ~100ms | Discord API write |
-| **Total (mimic, warm model)** | **~1.2s** | Best case |
-| **Total (mimic, cold swap)** | **~5–8s** | Typical first request |
-| **Total (lore, warm model)** | **~3.5s** | Best case |
-| **Total (lore, cold swap)** | **~7–10s** | Typical first request |
+| Interaction receive → handler | ~50ms | Gateway latency |
+| Rate limit + queue depth check | ~1ms + one HTTP round trip | |
+| Arbiter acquire (nothing to preempt) | ~ms | Lease grant only |
+| Arbiter acquire (preempting the trainer) | **0.9–2.0s** | Measured: notice, SIGKILL, process exit, driver reclaim |
+| Model swap, cold | ~5–8s | 17–18 GB from NVMe |
+| Model swap, warm | ~0s | Same model already resident |
+| First token → user | streaming | Chunks post as they fill |
+| `/lore` full run | **tens of seconds to minutes** | Multi-round; each round is an inference plus retrieval |
 
-The typing indicator (via `interaction.response.defer()`) is active throughout inference, masking all latency from the user's perspective.
+The typing indicator is held for the whole of `/mimic` and `/chat`; `/lore` uses `defer()` and posts embeds when the loop finishes.
 
 ---
 
-## 15. Phase 1 Implementation Checklist
+## 14. Current State
 
-### Completed
-- [x] Create Discord application and bot in Developer Portal
-- [x] Generate bot token and add to `.env`
-- [x] Implement `bot.py` with `/mimic` and `/lore` slash commands
-- [x] Implement `proxy_client.py` with httpx async POST to `/v1/chat/completions`
-- [x] Implement `rate_limiter.py` with per-user sliding window
-- [x] Implement `formatters.py` with disclaimer stripping and lore embed builder
-- [x] Implement `history.py` with per-channel/per-persona deque
-- [x] Add system prompts for all 6 mimic personas to `config.py`
-- [x] Deploy `discord-bot` container via Docker Compose
+**Working:** all three commands, streaming, thread persistence and restore, agentic RAG with three tools, rate limiting, queue depth rejection, disclaimer stripping.
 
-### Pending
-- [ ] Add `load_dotenv()` to [`config.py`](discord-bot/config.py)
-- [ ] Fix typing indicator with `channel.typing()` context manager
-- [ ] Refactor system prompts to template factory
-- [ ] Remove unused config variables (`MIMIC_MODELS`, `MAX_QUEUE_DEPTH` enforcement)
-- [ ] Verify all mimic aliases are present in `models.ini` and `proxy/config.py`
-- [ ] Test `/mimic` command end-to-end
-- [ ] Test `/lore` command end-to-end
-- [ ] Test rate limiting (exceed 5 req/min, verify ephemeral error)
-- [ ] Verify typing indicator persists through full swap+inference cycle
-- [ ] Verify disclaimer stripping fires on baked-in disclaimers
-- [ ] Confirm bot comes online and slash commands appear in Discord
+**Blocked:** `/mimic` — the persona presets are commented out in `models.ini`, so every persona resolves to a model llama-server does not have. Autocomplete still offers them (§5.1).
+
+**Disabled:** `/admin-clear-history`, which had no authorization check — any user could clear anyone's history. Re-enable only behind role verification.
+
+**Known rough edges:**
+
+- Persona autocomplete advertises models that may not exist; `/chat`'s live model list is the pattern to copy.
+- `/chat` thread bindings persist across restarts but conversation history does not.
+- `LORE_TOP_K` defaults disagree between `config.py` (10) and `docker-compose.yml` (5).
+- No tests. The bot is the only service in the repo without a `tests/` directory; the agent loop and the streaming split logic are the parts most worth covering.
 
 ---
 
-## 17. Phase 2 — RAG Implementation Checklist
+## 15. LoRA Upgrade Path
 
-### Completed
-- [x] Create `rag/requirements.txt` with chromadb, sentence-transformers, fastapi, uvicorn
-- [x] Implement `rag/ingest.py` — JSONL archive loader, cross-user flattening, temporal conversation chunking (1-hour gap), mini-transcript formatting, ChromaDB upsert
-- [x] Implement `rag/retrieve.py` — ChromaDB query, context formatting with chunk separators
-- [x] Implement `rag/main.py` — FastAPI app with `/retrieve`, `/ingest`, `/health` endpoints
-- [x] Create `rag/Dockerfile` — Python 3.11-slim base, CPU-only
-- [x] Implement `discord-bot/rag_client.py` — async HTTP client with graceful degradation
-- [x] Add RAG env vars to `discord-bot/config.py` (RAG_SERVICE_URL, LORE_TOP_K, RAG_ENABLED)
-- [x] Wire RAG client into `/lore` command in `discord-bot/bot.py`
-- [x] Configure rag-service + chromadb in `docker-compose.yml`
-- [x] Add RAG env vars to `.env.example`
+When a merged persona GGUF exists, the bot needs **no code changes**:
 
-### Pending
-- [ ] Run initial ingest (`POST /ingest`) and verify ChromaDB chunk count
-- [ ] Test `/lore` command end-to-end with RAG retrieval
-- [ ] Verify graceful fallback when RAG service is unreachable
-- [ ] Tune `LORE_TOP_K` and chunk gap threshold based on retrieval quality
-- [ ] Add ingest scheduling (cron or manual trigger via Makefile target)
+1. Train an adapter on the uncensored base from per-member history
+2. Merge and export `mimic_<member>_v2.gguf`
+3. Point the `[mimic_<member>]` section in `models.ini` at it
+4. `make restart-llama-swappable`
+
+The bot references aliases, not weights. Note that the training half of this is not built, and training on per-member history has not been agreed as a decision — see [`lora-training/README.md`](lora-training/README.md).
 
 ---
 
-## 16. Image Captioning in Discord History
-
-Discord image attachments shared by members are automatically captioned by the `history-service` as a background process. This is **transparent to the bot** — the bot never calls the image captioner directly.
-
-**What this means for the bot:**
-- The `history-service` stores captions in JSONL records alongside the original message content
-- The RAG service (Phase 2+) will ingest these captions into ChromaDB, making image content searchable via `/lore` queries
-- Captions are flagged `caption_excluded_from_training: true` and are never used in LoRA training — they are synthetic descriptions, not the user's voice
-
-The image captioner uses the same `Qwen3.5-35B-A3B-Uncensored` base as the mimic personas (alias `image-caption` in `models.ini`), ensuring no refusals on Discord content. It runs exclusively during the configured off-hours window (default 3–6 AM) and never contends with live bot requests.
-
-See `history-service/README.md` §Image Captioning Pipeline for full details.
-
----
-
-## 16. Phase 3 LoRA Upgrade Path
-
-When Phase 3 LoRA-merged models are ready, the bot requires **zero code changes.** The upgrade path is:
-
-1. Train LoRA adapter on Qwen3.5-35B-A3B-Uncensored base using member message history
-2. Merge adapter into full model: `mimic_<member>_v2.gguf`
-3. Update `models.ini`: change the `model` path for the relevant `[mimic_<member>]` section to point to the merged GGUF
-4. Run `make restart-llama-swappable` — the server picks up the new GGUF path from `models.ini`
-5. Bot continues using the same model alias — no proxy changes, no bot code changes
-
-The `MIMIC_SYSTEM_PROMPTS` dict and all slash command routing logic remain identical. The only change is the underlying GGUF file referenced in `models.ini`.
-
----
-
-*For full system architecture, hardware budget, proxy state machine, and RAG pipeline details, see `Design.md`.*
+*For system architecture, GPU arbitration, and the RAG pipeline, see [`Design.md`](Design.md).*
