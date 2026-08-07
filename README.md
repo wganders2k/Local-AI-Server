@@ -4,6 +4,8 @@
 
 Monorepo for a personal AI server stack running on an Ubuntu machine with an RTX 3090. Hosts a Discord bot (mimic personas, thread chat, and an agentic lore assistant), a self-hosted chat UI (Open WebUI), and a VS Code coding assistant — all fronted by a FastAPI proxy, with a single arbiter deciding who holds the GPU.
 
+Built as a deliberate exercise in agentic development workflows — specifying, steering, and reviewing model-generated code across a multi-service system.
+
 ## Architecture
 
 One card, several tenants. The proxy owns *which model answers a request*; the arbiter owns *who may be on the GPU at all*. They are separate services because they answer separate questions.
