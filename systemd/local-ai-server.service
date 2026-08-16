@@ -2,26 +2,36 @@
 # Brings the compose stack up at boot, recreating containers if a normal start
 # fails.
 #
-# Why this is needed: the NVIDIA container runtime resolves driver libraries at
-# container *create* time and bakes their exact versioned paths into the
-# container's OCI mount spec — e.g. libEGL_nvidia.so.595.58.03. When the driver
-# is upgraded (unattended-upgrades does this happily), those files are replaced
-# by a new version and the old paths vanish. Every GPU container created before
-# the upgrade then fails at init with:
+# Two distinct failure modes produce the identical symptom — a GPU container
+# refusing to start with:
 #
-#   failed to fulfil mount request: open .../libEGL_nvidia.so.<old>: no such file
+#   failed to fulfil mount request: open .../libEGL_nvidia.so.<version>: no such file
 #
-# `restart: unless-stopped` does not rescue this. Restart policies apply to
-# container *exits*; this is a failure during container init, so Docker gives up
-# and the container simply stays down until someone recreates it. That is why
-# the stack silently stayed dead for four days after the 2026-07-22 reboot.
+# 1. A driver upgrade (unattended-upgrades does this happily) replaces the
+#    versioned userspace libraries a container's OCI mount spec was baked
+#    against at *create* time. `restart: unless-stopped` cannot rescue this —
+#    restart policies apply to container exits, not failures during init — so
+#    the container just stays down until recreated. Recreating regenerates the
+#    mount spec against whichever driver is currently installed, which is why
+#    ExecStart below falls back to --force-recreate rather than just retrying.
 #
-# Recreating regenerates the mount spec against whatever driver is currently
-# installed, which is the only thing that actually fixes it.
+# 2. A boot-time RACE, found 2026-08-16 after the stack silently stayed down
+#    across three separate reboots (2026-08-10, -11, -13): the toolkit's own
+#    nvidia-cdi-refresh.service regenerates /var/run/cdi/nvidia.yaml — the
+#    correct, current-driver CDI spec — asynchronously, triggered by a .path
+#    unit watching kernel module files as they load during boot. If GPU
+#    containers start before that regeneration finishes, CDI resolution falls
+#    through to whatever static spec sits in /etc/cdi/nvidia.yaml, which on
+#    this box is a stale one-time-generated file nothing keeps in sync. Unlike
+#    failure mode 1, --force-recreate does NOT fix this — recreating a
+#    container doesn't regenerate a host-level CDI spec, so both the initial
+#    attempt and its recreate-on-failure fallback lost the same race and both
+#    failed, identically, every time. Closed by ordering after the refresh unit
+#    below so it has always finished before this one starts.
 Description=local-ai-server compose stack
 Requires=docker.service
-After=docker.service network-online.target
-Wants=network-online.target
+After=docker.service network-online.target nvidia-cdi-refresh.service
+Wants=network-online.target nvidia-cdi-refresh.service
 
 [Service]
 Type=oneshot
