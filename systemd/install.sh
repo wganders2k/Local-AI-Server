@@ -2,13 +2,19 @@
 #
 # Make the compose stack survive reboots across NVIDIA driver upgrades.
 #
-# Fixes two things:
+# Fixes three things:
 #
 #   1. Installs local-ai-server.service, which recreates containers at boot if a
 #      plain start fails. This is what actually rescues the stack after a driver
 #      upgrade invalidates the baked-in library mount paths.
 #
-#   2. Stops unattended-upgrades from swapping the NVIDIA driver out from under
+#   2. Orders that unit after nvidia-cdi-refresh.service, closing a boot-time
+#      race where GPU containers could start before the toolkit finished
+#      regenerating its CDI spec for the current driver and fell back to a
+#      stale one. Found 2026-08-16 after this silently held the stack down
+#      across three separate reboots — see the comment in the unit file.
+#
+#   3. Stops unattended-upgrades from swapping the NVIDIA driver out from under
 #      running containers in the first place. Driver upgrades on a GPU box
 #      should be deliberate: they break every running GPU container until it is
 #      recreated, and can desync the kernel module from userspace until reboot.
