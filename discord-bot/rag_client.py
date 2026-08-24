@@ -7,7 +7,7 @@ RAG service is unreachable rather than raising.
 """
 
 import logging
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import httpx
 
@@ -98,6 +98,99 @@ class RAGClient:
         except Exception:
             logger.exception("Unexpected error calling RAG service")
             return "", 0
+
+    async def _post(self, path: str, payload: dict, what: str) -> Tuple[str, int]:
+        """
+        POST to a RAG endpoint, degrading to empty rather than raising.
+
+        Args:
+            path: Endpoint path, e.g. "/search_literal".
+            payload: JSON body, with None values stripped.
+            what: Short description used in log messages.
+
+        Returns:
+            Tuple of (context_string, count). ("", 0) if the service is
+            unreachable or returns an error.
+        """
+        client = await self._get_client()
+        payload = {k: v for k, v in payload.items() if v is not None}
+        try:
+            resp = await client.post(path, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+            context = data.get("context", "")
+            count = data.get("chunk_count", 0)
+            logger.info("RAG %s: %d result(s) for %s", what, count, payload)
+            return context, count
+        except httpx.ConnectError:
+            logger.warning("RAG service unreachable (%s) — returning empty.", self.base_url)
+            return "", 0
+        except httpx.TimeoutException:
+            logger.warning("RAG %s timed out after %ss — returning empty.", what, self.timeout)
+            return "", 0
+        except httpx.HTTPStatusError as e:
+            logger.error("RAG %s HTTP %s — %s", what, e.response.status_code, e.response.text[:200])
+            return "", 0
+        except Exception:
+            logger.exception("Unexpected error calling RAG %s", what)
+            return "", 0
+
+    async def search_literal(
+        self,
+        term: Optional[str] = None,
+        author: Optional[str] = None,
+        channel_name: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        order: str = "earliest",
+        limit: int = 20,
+        whole_word: bool = False,
+    ) -> Tuple[str, int]:
+        """
+        Literal, chronologically-ordered search (no embeddings involved).
+
+        Returns:
+            Tuple of (context_string, total_matches). total_matches counts
+            every match found, which may exceed the number returned.
+        """
+        return await self._post(
+            "/search_literal",
+            {
+                "term": term, "author": author, "channel_name": channel_name,
+                "start_date": start_date, "end_date": end_date,
+                "order": order, "limit": limit, "whole_word": whole_word,
+            },
+            "search_literal",
+        )
+
+    async def aggregate(
+        self,
+        term: Optional[str] = None,
+        author: Optional[str] = None,
+        channel_name: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        group_by: str = "author",
+        top_n: int = 25,
+        whole_word: bool = False,
+        exclude_channels: Optional[List[str]] = None,
+    ) -> Tuple[str, int]:
+        """
+        Counts of matching messages grouped by author, channel or month.
+
+        Returns:
+            Tuple of (report_string, total_matching_messages).
+        """
+        return await self._post(
+            "/aggregate",
+            {
+                "term": term, "author": author, "channel_name": channel_name,
+                "start_date": start_date, "end_date": end_date,
+                "group_by": group_by, "top_n": top_n, "whole_word": whole_word,
+                "exclude_channels": exclude_channels,
+            },
+            "aggregate",
+        )
 
     async def close(self) -> None:
         """Close the underlying HTTP client."""

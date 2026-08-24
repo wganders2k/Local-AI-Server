@@ -176,6 +176,11 @@ class ProxyClient:
         return {
             "content": message.get("content"),
             "tool_calls": message.get("tool_calls"),
+            # Thinking models return their chain of thought separately. The agent
+            # loop feeds it back so the model can see why it made its previous
+            # choices; without it, it re-derives its plan from an almost
+            # unchanged context each round and reissues identical queries.
+            "reasoning_content": message.get("reasoning_content"),
         }
 
     async def chat_stream(

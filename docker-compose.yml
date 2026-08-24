@@ -107,7 +107,8 @@ services:
       # Datasets and hyperparameters are the things that actually get tinkered
       # with between runs. Mounted so that editing one is an edit, not a rebuild
       # of a multi-GB CUDA image.
-      - ./lora-training/configs:/app/configs:ro
+      # Absolute for the same reason as the discord-bot binds below.
+      - /home/peacow/local-ai-server/lora-training/configs:/app/configs:ro
       # Model downloads survive preemption; without this every restart re-fetches
       # the base weights, which dwarfs the training it would have done.
       - /home/peacow/.cache/huggingface:/cache/huggingface
@@ -231,8 +232,13 @@ services:
       - RAG_ENABLED=${RAG_ENABLED:-true}
       - LORE_CONTEXT_PATH=${LORE_CONTEXT_PATH:-prompts/lore_context.md}
     volumes:
-      - ./discord-bot/data:/app/data  # Persistent thread registry
-      - ./discord-bot/prompts:/app/prompts:ro  # Local-only lore context (gitignored)
+      # Absolute, not ./relative. Compose resolves relative binds against the
+      # directory it is invoked from, so recreating this stack through dockge
+      # (-w /opt/dockge/stacks/local-ai-server) silently repoints these at an
+      # empty directory — the bot then starts with no lore context and an empty
+      # thread registry, and nothing in the logs says the mount moved.
+      - /home/peacow/local-ai-server/discord-bot/data:/app/data  # Persistent thread registry
+      - /home/peacow/local-ai-server/discord-bot/prompts:/app/prompts:ro  # Local-only lore context (gitignored)
 
   # ──────────────────────────────────────────────────────────
   # Open WebUI (:3000)
@@ -313,7 +319,7 @@ services:
     image: chromadb/chroma:latest
     restart: unless-stopped
     volumes:
-      - chroma_data:/chroma/chroma
+      - chroma_data:/data
 
   # ──────────────────────────────────────────────────────────
   # DiscordChatExporter — CLI-only, run via `docker compose run`
