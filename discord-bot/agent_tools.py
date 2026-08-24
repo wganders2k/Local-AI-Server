@@ -69,7 +69,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "search_discord_history",
-            "description": "Search the entire Discord history across all channels for relevant context about a question. Use this as the first step when answering a lore question.",
+            "description": "SEMANTIC search across all channels. Finds messages that are *about* a topic even when they never use your exact words \u2014 good for themes, vibes, opinions and paraphrases (\"what do people think of X\"). It returns only the top_k most similar chunks out of the whole archive, ranked by meaning, so it CANNOT tell you what came first, count anything, or guarantee it has found every mention. For an exact word or name, for \"first/earliest\" questions, or for anything needing complete coverage, use search_exact_chronological instead.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -98,7 +98,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "search_channel_history",
-            "description": "Search a specific Discord channel's history for relevant context. Use this when the question is scoped to a particular channel or when you need more focused results.",
+            "description": "SEMANTIC search restricted to one channel. Same meaning-based matching and same limits as search_discord_history \u2014 top_k results by similarity, no ordering, no counting. Use when the question is clearly scoped to a channel.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -153,6 +153,136 @@ TOOLS = [
                     },
                 },
                 "required": ["channel_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_exact_chronological",
+            "description": (
+                "EXACT-TEXT search over the ENTIRE archive, returned in time order. "
+                "Matches the literal characters you give (case-insensitive), not the meaning, "
+                "and scans every message rather than a top-k sample \u2014 so it is the only tool "
+                "that can answer 'who said X first', 'when did X start', 'what was the earliest/"
+                "latest X', or give a complete list of mentions. Use it for exact words, names, "
+                "in-jokes and coined terms (which semantic search often misses entirely), and "
+                "whenever the question contains first/earliest/last/latest/original. "
+                "Set author to get only chunks where that person spoke; set both term and author "
+                "to return only messages that person actually wrote containing that term - the "
+                "matching message is quoted at the top of each result. Because matching is substring-based, the oldest hit can be incidental (the term inside a larger word, or only in a link URL) - request several results and pick the one that genuinely answers the question. It reports the TOTAL number of "
+                "matches even when it returns fewer, so you can tell how complete your picture is. "
+                "It cannot find paraphrases \u2014 if the exact wording is unknown, use "
+                "search_discord_history instead."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "term": {
+                        "type": "string",
+                        "description": "Exact text to find, matched case-insensitively as a substring. Keep it short - one word or a short phrase. Optional if author is given.",
+                    },
+                    "author": {
+                        "type": "string",
+                        "description": "Exact username (not a nickname or display name) whose messages to match. Optional if term is given.",
+                    },
+                    "order": {
+                        "type": "string",
+                        "enum": ["earliest", "latest"],
+                        "description": "'earliest' returns the oldest matches first - use this for 'first/original' questions. 'latest' returns newest first. Default 'earliest'.",
+                    },
+                    "channel_name": {
+                        "type": "string",
+                        "description": "Optional - restrict to one channel.",
+                    },
+                    "start_date": {
+                        "type": "string",
+                        "description": "Optional ISO 8601 lower bound, e.g. '2024-01-01T00:00:00Z'.",
+                    },
+                    "end_date": {
+                        "type": "string",
+                        "description": "Optional ISO 8601 upper bound.",
+                    },
+                    "whole_word": {
+                        "type": "boolean",
+                        "description": "Default false: the term matches anywhere, so 'oink' also matches 'oinking', 'oinked' AND 'yoink'. Set true to require the match to start at a word boundary - still matches 'oinking'/'oinks' but not 'yoink'/'sploinky'. Use it when a short term is colliding with unrelated words.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum chunks to return after ordering. Default 20.",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "count_messages",
+            "description": (
+                "COUNT matching messages and group them by author, channel or month, without "
+                "returning the messages themselves. Use for 'how many times', 'who says X most', "
+                "'which channel is X discussed in', 'when was X most active', or to check how "
+                "common something is before deciding whether to search for it. Counting is done "
+                "per message and attributed to the person who actually wrote it. Because it "
+                "returns a small summary instead of raw conversation, prefer it over repeated "
+                "searching when the question is about volume, ranking or distribution rather "
+                "than about what was actually said. Use exclude_channels to drop bulk-posted "
+                "catalogue channels that would otherwise skew an author ranking."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "term": {
+                        "type": "string",
+                        "description": "Exact text to count, matched case-insensitively. Omit to count all messages in scope.",
+                    },
+                    "author": {
+                        "type": "string",
+                        "description": "Optional - count only this person's messages.",
+                    },
+                    "group_by": {
+                        "type": "string",
+                        "enum": ["author", "channel", "month"],
+                        "description": "How to group the counts. 'author' answers who-says-it-most, 'channel' where, 'month' when. Default 'author'.",
+                    },
+                    "channel_name": {
+                        "type": "string",
+                        "description": "Optional - restrict to one channel.",
+                    },
+                    "start_date": {
+                        "type": "string",
+                        "description": "Optional ISO 8601 lower bound.",
+                    },
+                    "end_date": {
+                        "type": "string",
+                        "description": "Optional ISO 8601 upper bound.",
+                    },
+                    "whole_word": {
+                        "type": "boolean",
+                        "description": "Default false: the term matches anywhere, so 'oink' also matches 'oinking', 'oinked' AND 'yoink'. Set true to require the match to start at a word boundary - still matches 'oinking'/'oinks' but not 'yoink'/'sploinky'. Use it when a short term is colliding with unrelated words.",
+                    },
+                    "exclude_channels": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Optional - channel names to leave out of the count. Use this for "
+                            "bulk-posted catalogue or log channels, where one person posts a long "
+                            "reference document rather than talking: their entries are counted as "
+                            "messages and can dominate an author ranking without reflecting how the "
+                            "term is actually used in conversation. '#grant-chronicle' is the main "
+                            "one on this server - a solo album-review catalogue. Pass "
+                            "['grant-chronicle'] when the question is about what people say to each "
+                            "other, and leave it out when the question is about the archive as a whole."
+                        ),
+                    },
+                    "top_n": {
+                        "type": "integer",
+                        "description": "How many groups to report. Default 25.",
+                    },
+                },
+                "required": [],
             },
         },
     },
@@ -238,12 +368,87 @@ CURRENT DATE/TIME: {now}
 AVAILABLE CHANNELS TO SEARCH:
 {channels}
 {background}
+CHOOSING A TOOL — this matters more than the query you write:
+
+  Two different kinds of search are available, and they fail in opposite ways.
+
+  SEMANTIC (search_discord_history, search_channel_history, summarize_channel)
+    Matches meaning, so it finds paraphrases and related discussion. But it only
+    ever returns the top_k closest chunks out of the whole archive, ranked by
+    similarity. It therefore cannot tell you what came FIRST, cannot count, and
+    can silently miss an exact word — rare words, names and in-jokes are poorly
+    represented by embeddings.
+    -> Use for: themes, opinions, "what do people think about X", "what is the
+       story behind X", when you do not know the exact wording.
+
+  EXACT (search_exact_chronological, count_messages)
+    Matches literal text case-insensitively across EVERY message, and orders by
+    time. It reports the total number of matches, so you know your coverage.
+    It cannot find paraphrases.
+    -> Use for: exact words, names, in-jokes and coined terms; any question
+       containing first / earliest / original / last / latest / when did X
+       start; anything needing a complete list; and per-person questions via
+       the `author` parameter.
+    -> Use count_messages for how many / who most / where / when-most-active,
+       instead of searching repeatedly and counting by hand.
+
+CHANNELS THAT SKEW COUNTS
+
+  #grant-chronicle is not a conversation. It is a solo catalogue trystero49
+  bulk-posted, one album review per message, so its lines count as messages and
+  can bury everyone else in an author ranking — for 'oink' it supplies 113 of
+  trystero49's 173 hits while nobody else has a single line in there.
+  When a counting question is about what people say to EACH OTHER — who says X
+  most, who is the biggest X-poster — pass exclude_channels=['grant-chronicle']
+  and say that you excluded it. When the question is about the archive itself,
+  or about trystero49's catalogue, leave it in.
+
+COMBINING TOOLS — most good answers use more than one call:
+
+  "Everyone's first X" / "each person's X" / "who all did X"
+    1. count_messages(term='X', group_by='author')  -> the complete roster of
+       who actually said it, and how often. This is the only way to know you
+       have everyone. Add exclude_channels=['grant-chronicle'] if the question
+       is about conversation rather than about the archive as a whole.
+    2. For each name returned: search_exact_chronological(term='X',
+       author=<name>, order='earliest', limit=5) -> their earliest few.
+       Ask for several, never limit=1. Matching is substring-based, so the
+       single oldest hit is frequently incidental: the term sitting inside a
+       larger word ('oink' inside 'yoink' or 'zoinked'), or appearing only in
+       a GIF/link URL rather than something the person actually said. Read the
+       '>>> MATCH' lines and pick the earliest one where the term is genuinely
+       used the way the question means it — not merely the first row returned.
+       Say so briefly if you skipped earlier incidental matches. If all five
+       look incidental, retry that person with whole_word=true, which ignores
+       matches inside larger words while still matching 'oinking'/'oinks'.
+    Do NOT try to answer this from a single search: one search returns only the
+    globally oldest matches, which are usually all from the same one or two
+    people, and you will silently miss everyone else.
+
+  "When did X start / who said it first"
+    search_exact_chronological(term='X', order='earliest', limit=5), then
+    optionally search_discord_history around that date for the context and
+    reaction that the exact match alone does not explain.
+
+  "Where / when is X discussed most"
+    count_messages(term='X', group_by='channel' or 'month') first, then search
+    only the channel or period that actually matters.
+
+  Always check the totals a tool reports. If a search says more matches exist
+  than it showed you, your view is partial — narrow it or enumerate per author
+  before you answer.
+
 YOUR INSTRUCTIONS:
-1. You have access to three tools: search_discord_history, search_channel_history, and summarize_channel.
+1. Pick the tool that matches the KIND of question, using the guide above.
 2. Use these tools to find relevant information BEFORE answering.
-3. When a user asks a question, first formulate a good search query and call your search tool(s).
-4. If initial results are insufficient, try additional searches with different keywords or scope.
-5. After gathering enough context, synthesize a comprehensive answer based on what you found.
+3. If a tool reports zero matches over the whole archive, that answer is
+   conclusive for that exact wording — change your approach or your tool, and
+   never reissue a query you have already run. Re-running an identical search
+   wastes a round and returns identical results.
+4. If initial results are insufficient, change ONE thing at a time: the tool,
+   the exact term, or the scope. Broaden before narrowing.
+5. After gathering enough context, synthesize a comprehensive answer based on
+   what you found.
 6. If no relevant information exists in the search results, honestly state that you couldn't find relevant information.
 7. Always cite which channel(s) and approximate time period your information comes from.
 8. Be specific with dates, author names, and direct quotes when they appear in the context.
@@ -392,6 +597,95 @@ async def execute_tool(
                 )
             return context
 
+        elif tool_name == "search_exact_chronological":
+            term = tool_args.get("term") or None
+            author = tool_args.get("author") or None
+            order = tool_args.get("order") or "earliest"
+            channel_name = tool_args.get("channel_name")
+            start_date = tool_args.get("start_date")
+            end_date = tool_args.get("end_date")
+            limit = tool_args.get("limit", 20)
+            if not term and not author:
+                return (
+                    "Error: search_exact_chronological needs at least one of 'term' or 'author'. "
+                    "If you do not know the exact wording, use search_discord_history instead."
+                )
+            context, total = await rag_client.search_literal(
+                term=term, author=author, channel_name=channel_name,
+                start_date=start_date, end_date=end_date, order=order, limit=limit,
+                whole_word=bool(tool_args.get("whole_word", False)),
+            )
+            logger.info(
+                "RAG search_exact_chronological: term=%r author=%r order=%s -> %d total",
+                term, author, order, total,
+            )
+            if total == 0:
+                scope = f"'{term}'" if term else ""
+                if author:
+                    scope = f"{scope} by {author}".strip()
+                return (
+                    f"No messages anywhere in the archive literally contain {scope}. "
+                    "This is an exact-text search over everything, so this result is conclusive "
+                    "for that exact wording — do not repeat it. Either the phrasing differs "
+                    "(try search_discord_history for the concept, or a shorter/simpler term), "
+                    "or it genuinely was never said."
+                )
+            shown = context.count("\n\n---\n\n") + 1
+            header = (
+                f"Found {total} matching chunk(s); showing the {shown} "
+                f"{'oldest' if order == 'earliest' else 'newest'} in time order.\n"
+            )
+            if total > shown:
+                # The agent cannot see what it was not sent, so say plainly that
+                # the view is partial and how to complete it. A per-person
+                # question answered from a truncated window looks complete and
+                # is wrong.
+                header += (
+                    f"WARNING: {total - shown} further match(es) exist and are NOT shown, "
+                    f"so this is a partial view. Do NOT treat it as the full picture. "
+                    f"For a per-person or 'everyone' question, call count_messages with "
+                    f"group_by='author' to get the complete roster of who said it, then "
+                    f"call this tool once per person with author=<name> and limit=5, "
+                    f"picking the earliest result that genuinely matches the intent rather "
+                    f"than the first row. "
+                    f"To page through time instead, repeat with start_date set just after "
+                    f"the last result shown.\n"
+                )
+            return header + "\n" + context
+
+        elif tool_name == "count_messages":
+            term = tool_args.get("term") or None
+            author = tool_args.get("author") or None
+            group_by = tool_args.get("group_by") or "author"
+            # The model tends to write channels the way Discord renders them.
+            # Metadata stores the bare name, so a leading '#' would silently
+            # match nothing and quietly exclude nothing.
+            raw_exclude = tool_args.get("exclude_channels") or []
+            if isinstance(raw_exclude, str):
+                raw_exclude = [raw_exclude]
+            exclude_channels = [c.lstrip("#").strip() for c in raw_exclude if c and c.strip()]
+            report, total = await rag_client.aggregate(
+                term=term, author=author,
+                channel_name=tool_args.get("channel_name"),
+                start_date=tool_args.get("start_date"),
+                end_date=tool_args.get("end_date"),
+                group_by=group_by,
+                top_n=tool_args.get("top_n", 25),
+                whole_word=bool(tool_args.get("whole_word", False)),
+                exclude_channels=exclude_channels or None,
+            )
+            logger.info(
+                "RAG count_messages: term=%r author=%r group_by=%s exclude=%r -> %d",
+                term, author, group_by, exclude_channels, total,
+            )
+            if total == 0:
+                return (
+                    f"No messages matched, so there is nothing to count. This counted over the "
+                    f"whole archive, so the answer is zero for that exact wording — do not repeat "
+                    f"this search."
+                )
+            return report
+
         else:
             logger.warning("Unknown tool requested: %s", tool_name)
             return f"Error: Unknown tool '{tool_name}'."
@@ -409,6 +703,138 @@ async def execute_tool(
 # ---------------------------------------------------------------------------
 # Agent loop
 # ---------------------------------------------------------------------------
+
+
+# How the RAG service joins retrieved chunks inside a single tool result
+# (rag/retrieve.py :: format_context_block). Splitting on it lets repeated
+# chunks be dropped across searches. If that formatter ever changes separator
+# this degrades safely: the split yields one element and dedup still catches
+# whole results that are byte-identical.
+_RAG_CHUNK_SEPARATOR = "\n\n---\n\n"
+
+
+def _flatten_research_for_synthesis(
+    messages: list[dict],
+    user_question: str,
+) -> list[dict]:
+    """
+    Collapse a tool-calling conversation into a flat two-message exchange.
+
+    Replacing only the system prompt was not enough to stop the model ending a
+    run by emitting tool-call markup as its answer. The assistant/``tool_calls``
+    and ``role="tool"`` messages stayed in context, and a dozen rounds of
+    "assistant emits a tool call, tool returns a result" is a stronger signal
+    than a single instruction not to emit tool calls. When the model imitates
+    that pattern on the synthesis call the markup reaches the user verbatim:
+    the request carries no tools, so the backend has no tool parser to lift it
+    out of the response the way it does during the loop itself.
+
+    Rendering the same research as plain text under one user turn leaves no
+    tool-calling pattern in context to continue.
+
+    Chunks repeated across searches are dropped, keeping the first occurrence.
+    The flattened prompt is new text every time and so cannot reuse the KV
+    cache prefix the incremental conversation enjoyed; dropping redundant
+    chunks keeps what has to be prefilled proportional to what was actually
+    found rather than to how many overlapping queries the agent happened to run.
+
+    Args:
+        messages: The full agent-loop conversation.
+        user_question: The original question from the /lore command.
+
+    Returns:
+        A two-message list — the synthesis system prompt, and one user turn
+        carrying the question plus every tool result gathered during the loop.
+    """
+    # tool_call_id -> description of what was searched, so each result block
+    # keeps its provenance. Rendered as prose rather than echoing function
+    # names, which would put tool-calling vocabulary back into context.
+    search_labels: dict[str, str] = {}
+    for msg in messages:
+        for tc in msg.get("tool_calls") or ():
+            function = tc.get("function", {}) or {}
+            raw_args = function.get("arguments", "")
+            try:
+                args = json.loads(raw_args) if isinstance(raw_args, str) else (raw_args or {})
+            except (json.JSONDecodeError, TypeError):
+                args = {}
+
+            query = args.get("query")
+            channel = args.get("channel_name")
+            start_date = args.get("start_date")
+            end_date = args.get("end_date")
+
+            parts: list[str] = []
+            if query:
+                parts.append(f'"{query}"')
+            if channel:
+                parts.append(f"in {channel}")
+            if start_date or end_date:
+                parts.append(f"between {start_date or 'any'} and {end_date or 'any'}")
+
+            search_labels[tc.get("id", "")] = " ".join(parts) if parts else "(unlabelled search)"
+
+    # The agent tends to issue near-identical queries across rounds, which return
+    # heavily overlapping chunks. Keeping only the first occurrence of each chunk
+    # preserves every distinct fact while cutting the prompt that has to be
+    # prefilled from scratch on the synthesis call.
+    seen_chunks: set[str] = set()
+    dropped = 0
+
+    blocks: list[str] = []
+    for msg in messages:
+        if msg.get("role") != "tool":
+            continue
+        result = (msg.get("content") or "").strip()
+        if not result:
+            continue
+        label = search_labels.get(msg.get("tool_call_id", "")) or "(unlabelled search)"
+
+        fresh: list[str] = []
+        for chunk in result.split(_RAG_CHUNK_SEPARATOR):
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            if chunk in seen_chunks:
+                dropped += 1
+                continue
+            seen_chunks.add(chunk)
+            fresh.append(chunk)
+
+        # A search whose every hit was already shown adds nothing to synthesise.
+        if not fresh:
+            continue
+
+        blocks.append(
+            f"[Search {len(blocks) + 1}] {label}\n"
+            + _RAG_CHUNK_SEPARATOR.join(fresh)
+        )
+
+    logger.info(
+        "Synthesis payload: %d unique chunk(s) across %d search block(s), "
+        "%d duplicate chunk(s) dropped",
+        len(seen_chunks), len(blocks), dropped,
+    )
+
+    if blocks:
+        user_content = (
+            f"Question: {user_question}\n\n"
+            "Below is everything already retrieved from the Discord archive to "
+            "answer it. No further searching is possible — write the final "
+            "answer using only what appears here.\n\n"
+            + "\n\n".join(blocks)
+        )
+    else:
+        user_content = (
+            f"Question: {user_question}\n\n"
+            "No usable results came back from the Discord archive. Tell the "
+            "user plainly that you could not find this information."
+        )
+
+    return [
+        {"role": "system", "content": build_synthesis_prompt()},
+        {"role": "user", "content": user_content},
+    ]
 
 
 async def run_agent_loop(
@@ -501,6 +927,7 @@ async def run_agent_loop(
 
         content = result.get("content")
         tool_calls = result.get("tool_calls")
+        reasoning = (result.get("reasoning_content") or "").strip()
 
         # Log what the model returned
         if tool_calls:
@@ -540,12 +967,19 @@ async def run_agent_loop(
                 # Log tool result length for debugging
                 logger.info("Tool %s returned %d chars", function_name, len(tool_result))
 
-                # Append assistant's tool call and the tool result to conversation
-                messages.append({
+                # Append assistant's tool call and the tool result to conversation.
+                # The model's own reasoning rides along on the first tool call of
+                # the round: dropping it left the model able to see *what* it had
+                # searched but not why, so it re-derived the same plan — and at
+                # temperature 0.1 that meant reissuing byte-identical queries.
+                assistant_msg = {
                     "role": "assistant",
                     "content": None,
                     "tool_calls": [tc],
-                })
+                }
+                if reasoning and tc is tool_calls[0]:
+                    assistant_msg["reasoning_content"] = reasoning
+                messages.append(assistant_msg)
                 messages.append({
                     "role": "tool",
                     "name": function_name,
@@ -605,14 +1039,16 @@ async def run_agent_loop(
 
     try:
         llm_start = time.monotonic()
-        # Strip the original tool-calling system prompt (first message) and replace
-        # it with a pure synthesis instruction. This prevents the model from
-        # continuing its tool-calling pattern and emitting XML markup as text.
-        messages[0]["content"] = build_synthesis_prompt()
+        # Flatten the tool-calling history into a single plain-text user turn.
+        # Replacing just the system prompt left the assistant/tool_calls and
+        # role="tool" messages in context and the model kept imitating them,
+        # emitting tool-call markup as its answer. See the helper for why that
+        # markup reaches the user instead of being parsed out.
+        synthesis_messages = _flatten_research_for_synthesis(messages, user_question)
         # Use chat() instead of chat_with_tools() — no tools in the request at all.
         answer = await proxy_client.chat(
             model=AGENT_MODEL,
-            messages=messages,
+            messages=synthesis_messages,
         )
         llm_elapsed = time.monotonic() - llm_start
         metrics.llm_response_times.append(llm_elapsed)
