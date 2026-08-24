@@ -8,13 +8,13 @@ CPU-only — no VRAM impact.
 import asyncio
 import logging
 import os
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from ingest import run_ingest
-from retrieve import build_lore_context
+from retrieve import aggregate_stats, build_lore_context, search_literal
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +64,31 @@ class RetrieveResponse(BaseModel):
     chunk_count: int
 
 
+class LiteralSearchRequest(BaseModel):
+    """Chronological/literal search — no embedding involved."""
+    term: Optional[str] = None       # literal text, matched case-insensitively
+    author: Optional[str] = None     # username whose messages to match
+    channel_name: Optional[str] = None
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    order: str = "earliest"          # "earliest" | "latest"
+    limit: int = 20
+    whole_word: bool = False         # True = don't match inside larger words
+
+
+class AggregateRequest(BaseModel):
+    """Counts grouped by author, channel or month."""
+    term: Optional[str] = None
+    author: Optional[str] = None
+    channel_name: Optional[str] = None
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    group_by: str = "author"         # "author" | "channel" | "month"
+    top_n: int = 25
+    whole_word: bool = False
+    exclude_channels: Optional[List[str]] = None
+
+
 class IngestRequest(BaseModel):
     since: Optional[str] = None
 
@@ -108,6 +133,65 @@ async def retrieve(req: RetrieveRequest):
     )
 
     return RetrieveResponse(context=context, chunk_count=chunk_count)
+
+
+@app.post("/search_literal", response_model=RetrieveResponse)
+async def search_literal_endpoint(req: LiteralSearchRequest):
+    """
+    Literal / chronological search over the whole collection.
+
+    Unlike /retrieve this does not embed anything: it selects chunks by the
+    text they contain and by who spoke in them, then orders by timestamp.
+    That is what makes "who said X first" answerable — ranking by similarity
+    and sorting the top-k only reorders a similarity-chosen subset.
+    """
+    if not req.term and not req.author:
+        raise HTTPException(status_code=400, detail="Provide at least one of: term, author")
+    if req.order not in ("earliest", "latest"):
+        raise HTTPException(status_code=400, detail="order must be 'earliest' or 'latest'")
+
+    context, total = search_literal(
+        term=req.term,
+        chroma_host=CHROMA_HOST,
+        chroma_port=CHROMA_PORT,
+        collection_name=COLLECTION_NAME,
+        author=req.author,
+        channel_name=req.channel_name,
+        start_date=req.start_date,
+        end_date=req.end_date,
+        order=req.order,
+        limit=req.limit,
+        whole_word=req.whole_word,
+    )
+    return RetrieveResponse(context=context, chunk_count=total)
+
+
+@app.post("/aggregate", response_model=RetrieveResponse)
+async def aggregate_endpoint(req: AggregateRequest):
+    """
+    Counts of matching messages grouped by author, channel or month.
+
+    Returns a small report rather than the chunks themselves, so questions
+    like "who says X most" do not have to spend the whole context budget.
+    """
+    if req.group_by not in ("author", "channel", "month"):
+        raise HTTPException(status_code=400, detail="group_by must be 'author', 'channel' or 'month'")
+
+    report, total = aggregate_stats(
+        term=req.term,
+        chroma_host=CHROMA_HOST,
+        chroma_port=CHROMA_PORT,
+        collection_name=COLLECTION_NAME,
+        author=req.author,
+        channel_name=req.channel_name,
+        start_date=req.start_date,
+        end_date=req.end_date,
+        group_by=req.group_by,
+        top_n=req.top_n,
+        whole_word=req.whole_word,
+        exclude_channels=req.exclude_channels,
+    )
+    return RetrieveResponse(context=report, chunk_count=total)
 
 
 @app.post("/ingest", response_model=IngestResponse)
