@@ -71,6 +71,25 @@ def _timestamp_dir() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
+def _has_export_output(host_output_dir: str) -> bool:
+    """
+    Check whether a DCE export actually produced a non-empty JSON file.
+
+    Used to distinguish a real export failure from `docker compose run`
+    exiting non-zero for reasons unrelated to DCE itself (e.g. the proxy
+    connection dropping after DCE already finished writing its output).
+    """
+    try:
+        for name in os.listdir(host_output_dir):
+            if name.endswith(".json"):
+                path = os.path.join(host_output_dir, name)
+                if os.path.isfile(path) and os.path.getsize(path) > 0:
+                    return True
+    except OSError:
+        return False
+    return False
+
+
 def export_channel(
     channel_id: str,
     after: Optional[str] = None,
@@ -170,6 +189,21 @@ def export_channel(
         process.stderr.close()
 
         if process.returncode != 0:
+            # `docker compose run` can exit non-zero (observed: 125,
+            # "error waiting for container: unexpected EOF") even after DCE
+            # itself finished the export cleanly — e.g. an infra hiccup
+            # severs the /wait connection after the export completed but
+            # before compose reads the exit status. Trusting the exit code
+            # alone would silently discard a real, possibly hour-long,
+            # export and re-run it from scratch next cycle. So before
+            # giving up, check whether the export actually produced output.
+            if _has_export_output(host_output_dir):
+                logger.warning(
+                    f"DCE export for channel {channel_id} exited {process.returncode} "
+                    f"but output files are present in {host_output_dir} — treating as "
+                    f"success (likely a docker/proxy hiccup after DCE finished)"
+                )
+                return dce_output_dir
             logger.error(
                 f"DCE export failed for channel {channel_id} (exit {process.returncode})"
             )
