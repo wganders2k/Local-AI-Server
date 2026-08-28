@@ -7,11 +7,27 @@ Post-processing applied to mimic responses before posting to Discord.
 import re
 from typing import TYPE_CHECKING
 
-from config import (
-    DISCLAIMER_PATTERNS,
-    MAX_EMBED_DESCRIPTION_LENGTH,
-    MAX_MESSAGE_LENGTH,
-)
+from config import MAX_EMBED_DESCRIPTION_LENGTH
+
+# Applied to mimic responses only. The base model occasionally appends
+# baked-in disclaimers that break character. Anchored to the end of the
+# response, which is why stripping happens once on the final buffer rather
+# than per streamed chunk.
+DISCLAIMER_PATTERNS: list[str] = [
+    r"\n+This is general.*$",
+    r"\n+This is not legal.*$",
+    r"\n+This is not medical.*$",
+    r"\n+This is not financial.*$",
+    r"\n+Note:.*?(disclaimer|advice|professional).*$",
+    r"\n+Please consult.*$",
+    r"\n+Please note.*$",
+    r"\n+Please be aware.*$",
+    r"\n+I'm an AI.*$",
+    r"\n+I am an AI.*$",
+    r"\n+As an AI.*$",
+    r"\n+Remember, I'm.*$",
+    r"\n+Remember, I am.*$",
+]
 
 if TYPE_CHECKING:
     import discord
@@ -21,7 +37,7 @@ def strip_disclaimers(text: str) -> str:
     """
     Remove baked-in disclaimers from mimic responses.
 
-    Applies each regex pattern from config.DISCLAIMER_PATTERNS
+    Applies each regex pattern from DISCLAIMER_PATTERNS above
     to strip trailing disclaimers.
     """
     for pattern in DISCLAIMER_PATTERNS:

@@ -11,7 +11,7 @@ CPU-only service that handles Discord history ingestion and lore retrieval for t
 
 ## Design Reference
 
-See `Design.md` §9 (RAG Pipeline).
+See `../docs/design/system.md` §9 (RAG Pipeline).
 
 ## Chunk metadata schema
 
