@@ -1,6 +1,6 @@
 # Discord Bot — Design Document v1.2
 
-**Scope:** This document details the design parameters specifically for the Discord bot component of the Mimic Bot system. For the full system architecture (hardware, proxy, LibreChat, RAG pipeline), refer to `Design.md`.
+**Scope:** This document details the design parameters specifically for the Discord bot component of the Mimic Bot system. For the full system architecture (hardware, proxy, LibreChat, RAG pipeline), refer to `system.md`.
 
 **Change Log:**
 | Version | Date | Change |
@@ -575,4 +575,4 @@ The `MIMIC_SYSTEM_PROMPTS` dict and all slash command routing logic remain ident
 
 ---
 
-*For full system architecture, hardware budget, proxy state machine, and RAG pipeline details, see `Design.md`.*
+*For full system architecture, hardware budget, proxy state machine, and RAG pipeline details, see `system.md`.*

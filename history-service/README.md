@@ -18,7 +18,7 @@ Runs on port `:11437` (internal only, not exposed externally).
 
 ## Design Reference
 
-See `Design.md` §9a (History & Training Pipeline) and §10 Phase 3 (LoRA Persona Refinement).
+See `../docs/design/system.md` §9a (History & Training Pipeline) and §10 Phase 3 (LoRA Persona Refinement).
 
 ---
 

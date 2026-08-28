@@ -27,15 +27,15 @@ Monorepo for a personal AI server stack running on an Ubuntu machine with an RTX
     Cursor                :3000
 ```
 
-For full architecture detail, see [`Design.md`](Design.md).  
-For Discord bot specifics, see [`DiscordBot-Design.md`](DiscordBot-Design.md).
+For full architecture detail, see [`docs/design/system.md`](docs/design/system.md).  
+For Discord bot specifics, see [`docs/design/discord-bot.md`](docs/design/discord-bot.md).
 
 ## Repository Structure
 
 ```
 local-ai-server/
-├── Design.md               # Full system design document
-├── DiscordBot-Design.md    # Discord bot design document
+├── docs/                   # Design documents, plans, TODO
+├── CONVENTIONS.md          # Repo layout and code conventions
 ├── docker-compose.yml      # All services defined here
 ├── Makefile                # Common server operations (see below)
 ├── models.ini              # llama-server model presets (swappable slot)
@@ -188,4 +188,4 @@ No download needed — all mimic personas share the same GGUF.
 | Phase 3 | ⏳ Planned | LoRA fine-tuning: per-member persona models |
 | Phase 4 | ⏳ Optional | Hardening: rate limits, auth, priority queuing |
 
-See `Design.md` §10 for the full development timeline.
+See `docs/design/system.md` §10 for the full development timeline.

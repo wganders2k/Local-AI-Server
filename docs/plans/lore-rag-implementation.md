@@ -357,4 +357,4 @@ The tasks should be implemented in this sequence to keep things testable at each
 6. **`discord-bot/config.py`** — add new env vars
 7. **`discord-bot/bot.py`** — wire RAG context into lore_command
 8. **`discord-bot/formatters.py`** — chunk_count already flows through; verify footer text
-9. **`.env.example`** + **`DiscordBot-Design.md`** — documentation updates
+9. **`.env.example`** + **`docs/design/discord-bot.md`** — documentation updates

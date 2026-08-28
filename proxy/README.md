@@ -28,7 +28,7 @@ The proxy will prepend the system prompt to the request's `messages` array (Open
 
 ## Design Reference
 
-See `Design.md` §4a (Inference Backend), §6 (Proxy State Machine), and §7 (Docker Compose).
+See `../docs/design/system.md` §4a (Inference Backend), §6 (Proxy State Machine), and §7 (Docker Compose).
 
 ## File structure
 

@@ -226,11 +226,9 @@ services:
       - PROXY_URL=${PROXY_URL}
       - MAX_QUEUE_DEPTH=${MAX_QUEUE_DEPTH:-3}
       - RATE_LIMIT_PER_USER=${RATE_LIMIT_PER_USER:-5}
-      - TYPING_INDICATOR_INTERVAL=${TYPING_INDICATOR_INTERVAL:-5}
       - RAG_SERVICE_URL=http://rag-service:8001
-      - LORE_TOP_K=${LORE_TOP_K:-5}
       - RAG_ENABLED=${RAG_ENABLED:-true}
-      - LORE_CONTEXT_PATH=${LORE_CONTEXT_PATH:-prompts/lore_context.md}
+      - LORE_CONTEXT_PATH=${LORE_CONTEXT_PATH:-bot_context/lore/context.md}
     volumes:
       # Absolute, not ./relative. Compose resolves relative binds against the
       # directory it is invoked from, so recreating this stack through dockge
@@ -238,11 +236,16 @@ services:
       # empty directory — the bot then starts with no lore context and an empty
       # thread registry, and nothing in the logs says the mount moved.
       - /home/peacow/local-ai-server/discord-bot/data:/app/data  # Persistent thread registry
-      - /home/peacow/local-ai-server/discord-bot/prompts:/app/prompts:ro  # Local-only lore context (gitignored)
-      # Lore thread transcripts. Out of the repo because they hold verbatim
-      # server history — every excerpt a /lore run retrieved — and they belong
-      # with the archive that produced them, not in version control. Lives on
-      # the mergerfs pool; the store's atomic temp+rename was verified there.
+      # Lore thread transcripts, and the server-specific lore context file.
+      # Out of the repo because they hold verbatim server history — every
+      # excerpt a /lore run retrieved, and the real-name alias index — and they
+      # belong with the archive that produced them, not in version control.
+      # Lives on the mergerfs pool; the store's atomic temp+rename was verified
+      # there.
+      #
+      # NOT mounted: /app/prompts. Those are the prompt templates, committed
+      # code baked into the image — binding the host directory over them would
+      # shadow the image's copies with the working tree.
       - /mnt/storage/array/DiscordArchive/bot_context:/app/bot_context
 
   # ──────────────────────────────────────────────────────────
@@ -362,6 +365,12 @@ services:
       # HTTP method permissions (default: only GET is allowed)
       POST: "1"         # Allow POST — container create/start, image pull
       DELETE: "1"       # Allow DELETE — container removal (--rm flag)
+      # HAProxy timeouts — DCE exports can take up to an hour, so the long-lived
+      # /wait and /attach HTTP connections must survive that duration. Default is
+      # 600s which causes "error waiting for container: unexpected EOF".
+      SERVER_TIMEOUT: "7200"
+      TIMEOUT_CLIENT: "7200"
+      TIMEOUT_CONNECT: "10"
 
   # ──────────────────────────────────────────────────────────
   # History Service

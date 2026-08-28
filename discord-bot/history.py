@@ -7,9 +7,14 @@ and cleared on bot restart.
 """
 
 from collections import defaultdict, deque
-from typing import Deque, Dict, List, Optional, Tuple
+from typing import Deque, Dict, List, Tuple
 
-from config import create_empty_history
+from config import HISTORY_MAX_TURNS
+
+
+def create_empty_history() -> Deque[dict]:
+    """Factory for an empty conversation history deque, capped at HISTORY_MAX_TURNS."""
+    return deque(maxlen=HISTORY_MAX_TURNS)
 
 
 class ConversationHistory:
