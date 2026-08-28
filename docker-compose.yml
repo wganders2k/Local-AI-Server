@@ -354,6 +354,16 @@ services:
     restart: unless-stopped
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Overrides the image's stock HAProxy template to raise the
+      # client/server timeouts from 10m to 2h. `docker compose run` on the
+      # DCE exporter holds POST /containers/{id}/wait open for the whole
+      # export (observed up to ~35min), and at 10m the proxy severed that
+      # connection mid-export, making `docker compose` report exit 125
+      # ("unexpected EOF") even though the export itself had succeeded.
+      # (SERVER_TIMEOUT/TIMEOUT_CLIENT env vars were tried first — this
+      # image's entrypoint.sh never reads them, only ${BIND_CONFIG} via
+      # sed, so they were silently doing nothing. See docker-socket-proxy/haproxy.cfg.template.)
+      - ./docker-socket-proxy/haproxy.cfg.template:/usr/local/etc/haproxy/haproxy.cfg.template:ro
     ports:
       - "127.0.0.1:2375:2375"
     environment:
@@ -365,12 +375,6 @@ services:
       # HTTP method permissions (default: only GET is allowed)
       POST: "1"         # Allow POST — container create/start, image pull
       DELETE: "1"       # Allow DELETE — container removal (--rm flag)
-      # HAProxy timeouts — DCE exports can take up to an hour, so the long-lived
-      # /wait and /attach HTTP connections must survive that duration. Default is
-      # 600s which causes "error waiting for container: unexpected EOF".
-      SERVER_TIMEOUT: "7200"
-      TIMEOUT_CLIENT: "7200"
-      TIMEOUT_CONNECT: "10"
 
   # ──────────────────────────────────────────────────────────
   # History Service
