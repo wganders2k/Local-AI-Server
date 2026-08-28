@@ -39,6 +39,21 @@ order; literal search matches exact text across every message in time order and
 reports totals. The prompt in [`prompts/lore_agent.md`](prompts/lore_agent.md)
 spends most of its length teaching the model which to reach for.
 
+## Privileged intents
+
+Both must be enabled in the Discord Developer Portal or the bot will not start:
+
+| Intent | Why |
+|---|---|
+| `MESSAGE_CONTENT` | `on_message` reads message text inside `/chat` and `/lore` threads |
+| `SERVER_MEMBERS` | Display-name resolution for message labelling |
+
+Slash commands alone would need neither. `/chat` is what reintroduced the requirement.
+
+## Message labelling
+
+User messages are prefixed with the sender's display name — `[Alice]: rate my strats` — in both `/mimic` and `/chat`. Channels and threads have several participants, and without labels the model sees one undifferentiated user. The labelled form is what is stored in history, so attribution survives across turns.
+
 ## File structure
 
 ```
@@ -124,6 +139,18 @@ lives in [`config.py`](config.py) with the reasoning attached.
 > `AGENT_CTX_LIMIT` in `config.py` must mirror `ctx-size` for `AGENT_MODEL` in
 > [`models.ini`](../models.ini). Nothing enforces the pairing; if you change one,
 > change the other or the budget maths is silently wrong.
+
+## Timeouts
+
+Connect 10s, read 300s, total 320s (`PROXY_*_TIMEOUT` in `config.py`). Long because
+a request may wait on an 18 GB model swap *and* on the arbiter preempting a junior
+GPU tenant before the first token arrives. The read timeout is a gap-between-reads,
+not a total deadline — which is why every long generation is streamed rather than
+buffered; see `ProxyClient.chat_stream`.
+
+The RAG client has its own 30s timeout and degrades to empty context rather than
+raising, so a slow retrieval costs the agent one tool result instead of failing the
+command.
 
 ## Tests
 

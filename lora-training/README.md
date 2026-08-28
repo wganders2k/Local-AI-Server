@@ -64,12 +64,19 @@ no model is loaded and no VRAM is held while it asks.
 
 ## Being killed is the normal path
 
-The trainer is configured with `stop_timeout: 0` in
-[arbiter/jobs.yaml](../arbiter/jobs.yaml) — SIGKILL, no grace period. That is
-deliberate. Unsaved work is discarded either way, so a graceful shutdown would
-buy nothing and spend the only budget that matters: the LLM's time to first
-token. A training step on a 35B can be five to ten seconds away; SIGKILL bounds
-the handover to cgroup teardown.
+`supervisor.py` sends the worker SIGKILL, not SIGTERM, and gives it no grace
+period. That is deliberate. Unsaved work is discarded either way, so a graceful
+shutdown would buy nothing and spend the only budget that matters: the LLM's
+time to first token. A training step on a 35B can be five to ten seconds away;
+SIGKILL bounds the handover to process teardown.
+
+Worth being precise about where that lives, because it is easy to look for in
+the wrong file. `stop_timeout` in [arbiter/jobs.yaml](../arbiter/jobs.yaml) is
+the SIGTERM→SIGKILL grace for a `kind: container` job, and this job is
+`cooperative` — the arbiter never signals it at all. It is told, and it kills its
+own worker. So the no-grace decision is `self.child.kill()` in this directory,
+not policy over there, and setting `stop_timeout` on this job's entry would do
+nothing.
 
 What makes that safe is `checkpoints.py`. A checkpoint counts only once a
 `COMPLETE` marker sits beside it, written after the save returns. A killed save
