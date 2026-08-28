@@ -67,17 +67,34 @@ class ThreadRegistry:
         except OSError as e:
             logger.error("Failed to save registry to %s: %s", self._path, e)
 
-    def register(self, thread_id: int, model: str, name: str) -> None:
-        """Register a new chat thread with status 'active'."""
+    def register(
+        self, thread_id: int, model: str, name: str, kind: str = "chat"
+    ) -> None:
+        """
+        Register a new thread with status 'active'.
+
+        Args:
+            kind: "chat" for a plain /chat thread, "lore" for a /lore
+                thread whose conversation lives in the lore session store.
+                Entries written before this field existed read back as "chat".
+        """
         key = str(thread_id)
         self._data[key] = {
             "model": model,
             "name": name,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "status": "active",
+            "kind": kind,
         }
         self.save()
-        logger.info("Registered thread %d (%s) with model=%s", thread_id, name, model)
+        logger.info(
+            "Registered %s thread %d (%s) with model=%s", kind, thread_id, name, model
+        )
+
+    def get_kind(self, thread_id: int) -> str:
+        """Return a thread's kind, defaulting to 'chat' for pre-existing entries."""
+        entry = self._data.get(str(thread_id)) or {}
+        return entry.get("kind", "chat")
 
     def get_all(self) -> Dict[int, Dict[str, Any]]:
         """Return all entries keyed by integer thread_id."""

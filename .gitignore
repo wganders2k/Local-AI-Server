@@ -60,3 +60,20 @@ lora-training/checkpoints/
 lora-training/runs/
 # Arbiter test venv — pytest/yaml only, no GPU or Docker access needed.
 arbiter/.venv-test/
+
+# Bot runtime state.
+#
+# Lore thread transcripts have moved out of the repo entirely, to
+# /mnt/storage/array/DiscordArchive/bot_context (see the discord-bot volumes in
+# docker-compose.yml) — they hold verbatim server history and every excerpt a
+# /lore run retrieved. The path below stays ignored so the pre-migration copy,
+# and anything that recreates it, cannot be committed.
+#
+# threads.json is the thread->model registry. It was committed by mistake and
+# has been untracked (git rm --cached); the file itself still lives here and is
+# rewritten on every run, which is why it must stay ignored.
+#
+# The *.tmp entry covers the atomic temp file the stores write before rename.
+discord-bot/data/lore_sessions.json
+discord-bot/data/threads.json
+discord-bot/data/*.tmp
