@@ -239,6 +239,11 @@ services:
       # thread registry, and nothing in the logs says the mount moved.
       - /home/peacow/local-ai-server/discord-bot/data:/app/data  # Persistent thread registry
       - /home/peacow/local-ai-server/discord-bot/prompts:/app/prompts:ro  # Local-only lore context (gitignored)
+      # Lore thread transcripts. Out of the repo because they hold verbatim
+      # server history — every excerpt a /lore run retrieved — and they belong
+      # with the archive that produced them, not in version control. Lives on
+      # the mergerfs pool; the store's atomic temp+rename was verified there.
+      - /mnt/storage/array/DiscordArchive/bot_context:/app/bot_context
 
   # ──────────────────────────────────────────────────────────
   # Open WebUI (:3000)

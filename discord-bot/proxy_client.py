@@ -176,6 +176,10 @@ class ProxyClient:
         return {
             "content": message.get("content"),
             "tool_calls": message.get("tool_calls"),
+            # prompt_tokens is how full the model's context actually was for
+            # this call — the only trustworthy number for context accounting,
+            # since estimating from characters drifts badly on tool-result text.
+            "usage": data.get("usage"),
             # Thinking models return their chain of thought separately. The agent
             # loop feeds it back so the model can see why it made its previous
             # choices; without it, it re-derives its plan from an almost
@@ -187,6 +191,9 @@ class ProxyClient:
         self,
         model: str,
         messages: list[dict],
+        usage_sink: dict | None = None,
+        tools: list[dict] | None = None,
+        enable_thinking: bool = True,
     ) -> AsyncGenerator[str, None]:
         """
         Stream a chat completion from the proxy using Server-Sent Events.
@@ -194,6 +201,29 @@ class ProxyClient:
         Args:
             model: Model alias (e.g. "mimic_user3", "lore").
             messages: List of message dicts with "role" and "content".
+            usage_sink: Optional dict updated in place with the token counts
+                from the final SSE chunk (prompt_tokens, completion_tokens,
+                and prompt_tokens_details.cached_tokens). A sink rather than a
+                return value so this stays a plain AsyncGenerator[str] for
+                callers that only want the text.
+            tools: Optional tool schemas. Passing them does not invite a tool
+                call so much as keep the prompt SHAPE constant: the chat
+                template renders tool schemas into the prompt, so a no-tools
+                request shares almost no prefix with a tools request. In a
+                conversation that alternates between the two, every call is a
+                cold prefill — measured at sim_best 0.161 versus 0.995 when the
+                shape holds. Pass the same tools you passed the surrounding
+                calls, and instruct the model in-prompt not to use them.
+            enable_thinking: False suppresses the model's reasoning block via
+                the chat template. The agent model is a hybrid reasoner and
+                deliberates by default even on mechanical work — a research
+                digest measured 6,230 completion tokens for a ~1,400-token
+                answer, 184s of it reasoning. Turning it off cut an equivalent
+                call from 52.2s/724 tokens to 1.0s/27 with the same output.
+                Leave it on for anything requiring judgement; turn it off for
+                summarising and compression. Note that reasoning_effort is only
+                partially honoured by this build (14.1s at "none"), so this is
+                the control that actually works.
 
         Yields:
             Non-empty content strings from each SSE delta chunk.
@@ -208,44 +238,58 @@ class ProxyClient:
             "messages": messages,
             "stream": True,
         }
+        if tools:
+            payload["tools"] = tools
+        if not enable_thinking:
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
+        if usage_sink is not None:
+            # Without this the streamed response carries no token counts at all.
+            payload["stream_options"] = {"include_usage": True}
 
+        # client.stream() keeps the body unread so chunks surface as the model
+        # emits them. client.post() would buffer the whole response first,
+        # which makes PROXY_READ_TIMEOUT a deadline on the entire generation
+        # and leaves the backend generating into a dropped socket on timeout.
         try:
-            response = await client.post(
+            async with client.stream(
+                "POST",
                 "/v1/chat/completions",
                 json=payload,
-            )
+            ) as response:
+                if response.status_code != 200:
+                    body = (await response.aread()).decode("utf-8", "replace")
+                    raise ProxyError(
+                        f"Proxy returned error {response.status_code}: {body[:200]}",
+                        status_code=response.status_code,
+                    )
+
+                async for line in response.aiter_lines():
+                    if not line or not line.startswith("data: "):
+                        continue
+                    data = line[len("data: "):]
+                    if data == "[DONE]":
+                        continue
+                    try:
+                        chunk = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    if usage_sink is not None and chunk.get("usage"):
+                        usage_sink.update(chunk["usage"])
+                    choices = chunk.get("choices", [])
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta", {})
+                    content = delta.get("content", "")
+                    if content:
+                        yield content
         except httpx.ConnectError:
             raise ProxyError(
                 "The AI backend is currently unreachable. Try again in a moment."
             )
         except httpx.TimeoutException:
             raise ProxyError(
-                "Request timed out. The model may be busy."
+                "The model stopped sending output. It may be overloaded."
             )
-
-        if response.status_code != 200:
-            raise ProxyError(
-                f"Proxy returned error {response.status_code}: {response.text[:200]}",
-                status_code=response.status_code,
-            )
-
-        async for line in response.aiter_lines():
-            if not line or not line.startswith("data: "):
-                continue
-            data = line[len("data: "):]
-            if data == "[DONE]":
-                continue
-            try:
-                chunk = json.loads(data)
-            except json.JSONDecodeError:
-                continue
-            choices = chunk.get("choices", [])
-            if not choices:
-                continue
-            delta = choices[0].get("delta", {})
-            content = delta.get("content", "")
-            if content:
-                yield content
 
     async def get_queue_depth(self) -> int:
         """
