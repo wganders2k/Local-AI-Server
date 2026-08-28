@@ -1,0 +1,19 @@
+# The image needs the source and the prompt templates. Nothing else.
+#
+# Without this, `COPY . .` bakes in the test venv (~50MB), the caches, and a
+# stale copy of data/ that the bind mount then shadows at runtime — so the
+# image carries a thread registry it never reads.
+.venv-test/
+__pycache__/
+*.pyc
+.pytest_cache/
+tests/
+pytest.ini
+
+# Runtime state. Bind-mounted at /app/data; a baked-in copy is never read and
+# would be a stale registry inside the image.
+data/
+
+# Host-local lore context, if a pre-migration copy is still lying around. It
+# holds real names and belongs on the bot_context volume, never in an image.
+prompts/lore_context.md
