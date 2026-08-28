@@ -16,7 +16,7 @@ cost knowingly.
 Research is stored as flat text messages, never as raw ``tool_calls`` /
 ``role="tool"`` messages: leaving tool markup in context made the model imitate
 it and emit tool-call syntax as its answer. See
-``_flatten_research_for_synthesis`` in agent_tools.py.
+``_flatten_research_for_synthesis`` in lore/research.py.
 """
 
 import hashlib

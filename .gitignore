@@ -6,9 +6,13 @@
 dce.env
 
 # Server-specific system prompt context (real names, aliases) — keep local.
-# The *.example.md template stays committed.
-discord-bot/prompts/*.md
-!discord-bot/prompts/*.example.md
+#
+# discord-bot/prompts/ is ordinary committed code now: the prompt templates the
+# bot renders, baked into the image. Only the context file is host-local, and it
+# lives on the bot_context volume beside the session store (LORE_CONTEXT_PATH),
+# not here. The path below stays ignored so the pre-migration copy, and anything
+# that recreates it, cannot be committed.
+discord-bot/prompts/lore_context.md
 
 # Large model files
 *.gguf
@@ -60,6 +64,9 @@ lora-training/checkpoints/
 lora-training/runs/
 # Arbiter test venv — pytest/yaml only, no GPU or Docker access needed.
 arbiter/.venv-test/
+# Bot test venv — discord.py/httpx/pytest, so the lore package can be tested
+# without building the image.
+discord-bot/.venv-test/
 
 # Bot runtime state.
 #
