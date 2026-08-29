@@ -22,7 +22,6 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from config import (
-    AGENT_CTX_LIMIT,
     AGENT_MODEL,
     LORE_OFFER_TTL_SECONDS,
     LORE_SWEEP_INTERVAL_SECONDS,
@@ -35,6 +34,7 @@ from discord_io import post_lore_answer
 from formatters import build_lore_embeds
 from lore.agent import run_agent_loop, run_lore_turn, seed_session_from_run
 from lore.compaction import maybe_compact_session
+from lore.context_window import discover, ensure_discovered, limit as ctx_limit
 from lore.session import LoreSession
 from proxy_client import ProxyError
 
@@ -59,8 +59,9 @@ def _lore_footer(session: LoreSession, metrics=None, searched: bool = False) -> 
     thread — which did no searching of its own — can omit it.
     """
     used = session.last_context_tokens
-    pct = (used / AGENT_CTX_LIMIT * 100) if AGENT_CTX_LIMIT else 0.0
-    bits = [f"🧠 {used:,}/{AGENT_CTX_LIMIT:,} ({pct:.0f}%)"]
+    total = ctx_limit()
+    pct = (used / total * 100) if total else 0.0
+    bits = [f"🧠 {used:,}/{total:,} ({pct:.0f}%)"]
     if searched:
         calls = metrics.total_tool_calls
         bits.append(f"{calls} search{'' if calls == 1 else 'es'}")
@@ -81,6 +82,12 @@ class LoreCog(commands.Cog):
         return self.bot.services
 
     async def cog_load(self) -> None:
+        # Read the agent model's real context window from the backend. Runs
+        # before the gateway connects, and compose gates the bot on a healthy
+        # proxy, so this normally succeeds; if it does not, the fallback in
+        # config.py carries the budget and /lore retries per turn.
+        await discover(self.services.proxy)
+
         # Offers nobody reacted to have no event that would ever fire, so they
         # are only ever removed here and when a new offer is made.
         self.services.sessions.sweep_offers(LORE_OFFER_TTL_SECONDS)
@@ -110,6 +117,10 @@ class LoreCog(commands.Cog):
     ):
         """Handle the /lore slash command — agentic RAG with tool calling."""
         services = self.services
+
+        # Cheap no-op once discovered; the recovery path if the proxy was not
+        # reachable at startup.
+        await ensure_discovered(services.proxy)
 
         # No rate limit check — lore queries are long-running and don't benefit
         # from it. Queue depth still applies: reject if the backend is busy.
@@ -345,6 +356,8 @@ class LoreCog(commands.Cog):
         if session is None:
             logger.warning("No lore session for thread %d — ignoring", thread.id)
             return
+
+        await ensure_discovered(services.proxy)
 
         if not services.limiter.is_allowed(message.author.id):
             await thread.send(

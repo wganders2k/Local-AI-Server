@@ -27,7 +27,6 @@ from typing import Optional
 
 from config import (
     AGENT_CTX_HARD_PCT,
-    AGENT_CTX_LIMIT,
     AGENT_CTX_SOFT_PCT,
     AGENT_MODEL,
     AGENT_MAX_ROUNDS,
@@ -35,6 +34,7 @@ from config import (
     AGENT_TEMPERATURE,
     LORE_FOLLOWUP_MAX_ROUNDS,
 )
+from lore.context_window import limit as ctx_limit
 from lore.metrics import AgentMetrics
 from lore.progress import ProgressReporter
 from lore.prompts import build_lore_followup_prompt, build_system_prompt
@@ -453,7 +453,8 @@ async def run_lore_turn(
 
     metrics = AgentMetrics()
     used = session.last_context_tokens
-    pct = session.pct_of(AGENT_CTX_LIMIT)
+    ctx_total = ctx_limit()
+    pct = session.pct_of(ctx_total)
 
     logger.info("=" * 60)
     logger.info(
@@ -462,7 +463,7 @@ async def run_lore_turn(
     )
     logger.info(
         "Session context before turn: %s (%d%% of limit), %d search block(s)",
-        f"{used:,}/{AGENT_CTX_LIMIT:,}", pct * 100, session.searches,
+        f"{used:,}/{ctx_total:,}", pct * 100, session.searches,
     )
     logger.info("=" * 60)
 
@@ -480,7 +481,7 @@ async def run_lore_turn(
     extra: list[dict] = []
     if allow_tools and pct >= AGENT_CTX_SOFT_PCT:
         logger.info("Context at %.0f%% — telling the model its budget", pct * 100)
-        extra.append(_budget_notice(used, AGENT_CTX_LIMIT))
+        extra.append(_budget_notice(used, ctx_total))
 
     direct_answer: Optional[str] = None
     tool_messages: list[dict] = []
@@ -625,6 +626,6 @@ def seed_session_from_run(
         "Lore session seeded for thread %d — %d research block(s), "
         "estimated context %s/%s",
         thread_id, len(blocks),
-        f"{session.last_context_tokens:,}", f"{AGENT_CTX_LIMIT:,}",
+        f"{session.last_context_tokens:,}", f"{ctx_limit():,}",
     )
     return session

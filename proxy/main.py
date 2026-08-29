@@ -28,7 +28,6 @@ from config import (
     IDLE_EVICT_UNLOAD_TIMEOUT,
     LLAMA_PERMANENT,
     LLAMA_SWAPPABLE,
-    SWAPPABLE_MODELS,
 )
 from arbiter import ArbiterClient
 from state import state
@@ -465,7 +464,7 @@ async def proxy(path: str, request: Request) -> Response:
         return await _forward(LLAMA_PERMANENT, request, model=model)
 
     # Swappable path: serialise via lock
-    if model in SWAPPABLE_MODELS or model is not None:
+    if model is not None:
         state.increment_queue()
         state.record_request()
         state.llm_request_started()
@@ -513,7 +512,7 @@ async def proxy(path: str, request: Request) -> Response:
             state.decrement_queue()
 
             try:
-                if model in SWAPPABLE_MODELS:
+                if model:
                     if state.current_model != model:
                         logger.info(
                             f"Model switch: {state.current_model} → {model} "

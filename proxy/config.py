@@ -4,9 +4,6 @@ import os
 LLAMA_PERMANENT = os.environ.get("LLAMA_PERMANENT", "http://localhost:11435")
 LLAMA_SWAPPABLE = os.environ.get("LLAMA_SWAPPABLE", "http://localhost:11434")
 
-# System prompts config path
-SYSTEM_PROMPTS_PATH = os.environ.get("SYSTEM_PROMPTS_PATH", "../system_prompts.ini")
-
 # The GPU arbiter. The proxy asks it for the card and tells it when idle; it owns
 # every other decision about who runs, so this is the proxy's whole interface to
 # the GPU.
@@ -42,25 +39,5 @@ IDLE_EVICT_UNLOAD_TIMEOUT = float(os.environ.get("IDLE_EVICT_UNLOAD_TIMEOUT", "6
 # re-downloading the GGUF, not the proxy.
 AUTOCOMPLETE_MODELS: set[str] = {
     "autocomplete",
-}
-
-# Models that compete for the swappable slot.
-# These are the aliases defined in models.ini.
-# The router loads a model on first request and evicts it when a different
-# model is requested. The proxy serialises access via asyncio.Lock.
-SWAPPABLE_MODELS: set[str] = {
-    "brain",
-    "brain-dense",  # Qwen3.6-27B — agentic RAG tool-calling model
-    "brain-dense-heretic",
-    "agent",
-    "mimic_user1",
-    "mimic_user2",
-    "mimic_user3",
-    "mimic_user4",
-    "mimic_user5",
-    "mimic_user6",
-    "lore",
-    "chat",
-    "image-caption",
 }
 

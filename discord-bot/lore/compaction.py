@@ -10,7 +10,8 @@ answer at all.
 
 import logging
 
-from config import AGENT_CTX_COMPACT_PCT, AGENT_CTX_LIMIT, AGENT_MODEL
+from config import AGENT_CTX_COMPACT_PCT, AGENT_MODEL
+from lore.context_window import limit as ctx_limit
 from lore.agent import stream_answer
 from lore.metrics import AgentMetrics
 from lore.prompts import build_compaction_messages
@@ -112,7 +113,7 @@ async def maybe_compact_session(
     Called after a turn has been answered and posted, so the cost lands between
     messages rather than in front of the user's answer.
     """
-    pct = session.pct_of(AGENT_CTX_LIMIT)
+    pct = session.pct_of(ctx_limit())
     if pct < AGENT_CTX_COMPACT_PCT:
         return False
     logger.info(

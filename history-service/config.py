@@ -36,8 +36,8 @@ ARCHIVE_STATE_DIR: str = "/archive/state"
 # Channel filtering
 # ──────────────────────────────────────────────────────────────
 
-# Comma-separated list of channel IDs to exclude from DCE export.
-# Example: EXCLUDED_CHANNELS=123456789012345678,987654321098765432
+# Comma-separated list of channel IDs *or names* to exclude from DCE export.
+# Example: EXCLUDED_CHANNELS=123456789012345678,bot-zone
 EXCLUDED_CHANNELS: List[str] = [
     x.strip() for x in os.environ.get("EXCLUDED_CHANNELS", "").split(",") if x.strip()
 ]

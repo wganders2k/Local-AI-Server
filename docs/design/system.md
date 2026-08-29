@@ -173,13 +173,20 @@ All swappable models are defined in [`models.ini`](models.ini). The proxy refere
 | `chat-chinese` | Qwen3.6-35B-A3B UD-IQ4_NL | Open WebUI |
 | `bomb-you` | Qwen3.5-35B-A3B-Uncensored IQ4_XS | Open WebUI, uncensored |
 
-**Commented out:** `mimic_user1`–`mimic_user6` and `image-caption`. Both are still referenced elsewhere — in `proxy/config.py`'s `SWAPPABLE_MODELS`, in `system_prompts.ini`, and by the bot's `/mimic` autocomplete — so those paths reach llama-server and find nothing. Re-enable the sections before using `/mimic` or image captioning.
+**Commented out:** `mimic_user1`–`mimic_user6` and `image-caption`. They are still referenced by the bot's `/mimic` autocomplete, so those paths reach llama-server and find nothing. Re-enable the sections before using `/mimic` or image captioning.
 
-### 5.1 Configuration is not single-source
+### 5.1 Configuration is single-source, by slot
 
-Model identity is currently spread across `models.ini` (presets), `docker-compose.yml` (permanent slot), `proxy/config.py` (`SWAPPABLE_MODELS`), `discord-bot/config.py` (`MIMIC_PERSONAS`, `AGENT_MODEL`), `system_prompts.ini`, and `scripts/download_models.py`. These drift — the sets above disagree in both directions today. Consolidating them is tracked in [`TODO.md`](../TODO.md).
+Model identity lives in exactly two places, by slot: `models.ini` (swappable: alias → GGUF
+path + inference params) and the `llama-permanent` `command:` in `docker-compose.yml`
+(permanent/autocomplete). `scripts/download_models.py` derives its swappable download list
+from `models.ini` directly, so adding or removing a local model is a `models.ini` edit and
+nothing else. The proxy does not parse any model list of its own — it forwards any
+non-autocomplete model name to the swappable slot and lets llama-server decide.
 
-Mitigating this: `SWAPPABLE_MODELS` is advisory rather than a gate. The proxy forwards any non-autocomplete model name to the swappable slot and lets llama-server decide, so a preset missing from that set still works. The set only affects swap logging.
+Everywhere else that names an alias (`discord-bot/config.py`'s `AGENT_MODEL`,
+`history-service`'s `IMAGE_CAPTION_MODEL`) is a client's own choice of which alias to call,
+not a second copy of model identity — see `CONVENTIONS.md` §2.
 
 ### 5.2 Adding a mimic persona
 
@@ -221,9 +228,7 @@ This lives in the proxy rather than the arbiter deliberately: nothing else may u
 
 ### 6.3 What the proxy does not do
 
-**It does not inject system prompts.** `proxy/system_prompts.py` and `system_prompts.ini` exist and the INI is bind-mounted, but `main.py` never imports the loader — the code is inert. Every system prompt in use is constructed client-side: mimic prompts from `MIMIC_PROMPT_TEMPLATE` in the bot's config, the `/lore` agent's prompts in `agent_tools.py`, and Open WebUI's per-model prompts in its own UI. `/chat` threads send no system prompt at all.
-
-Either delete the dead loader or wire it up; leaving it in place invites edits to `system_prompts.ini` that silently do nothing.
+**It does not inject system prompts.** Every system prompt in use is constructed client-side: mimic prompts from `MIMIC_PROMPT_TEMPLATE` in the bot's config, the `/lore` agent's prompts in `agent_tools.py`, and Open WebUI's per-model prompts in its own UI. `/chat` threads send no system prompt at all.
 
 **It does not report GPU state.** `/status` returns proxy state only — current model, queue depth, in-flight count, model age. What is on the card and why is `/gpu/status` on the arbiter. Asking two services the same question is how they end up disagreeing.
 
@@ -256,7 +261,7 @@ See [`docker-compose.yml`](docker-compose.yml) for full definitions.
 
 **Model files** live on the host at `MODELS_DIR` (default `/srv/models`) and are bind-mounted read-only into both llama-server containers. They are not in named volumes, so `make nuke` does not delete downloaded weights.
 
-**Absolute host paths.** Several configs are bind-mounted by absolute path under `/home/peacow/local-ai-server` (`models.ini`, `system_prompts.ini`, `arbiter/jobs.yaml`, `prometheus.yml`, `dce-compose.yml`, `dce.env`). Deploying elsewhere means editing those.
+**Absolute host paths.** Several configs are bind-mounted by absolute path under `/home/peacow/local-ai-server` (`models.ini`, `arbiter/jobs.yaml`, `prometheus.yml`, `dce-compose.yml`). Deploying elsewhere means editing those.
 
 ### 7.1 Surviving driver upgrades
 
@@ -288,7 +293,7 @@ Blocked today: the persona presets are commented out in `models.ini` (§5).
 
 ### 8.2 `/chat model` — thread-based conversation
 
-Creates a public thread bound to a model alias. Every subsequent message in that thread is streamed to that model, with no system prompt and no slash command. The model list is autocompleted live from the proxy's `/v1/models`, so any alias llama-server knows about is selectable — including ones absent from `SWAPPABLE_MODELS`.
+Creates a public thread bound to a model alias. Every subsequent message in that thread is streamed to that model, with no system prompt and no slash command. The model list is autocompleted live from the proxy's `/v1/models`, so any alias llama-server knows about is selectable.
 
 Messages are labelled with the sender's display name (`[Alice]: …`) so the model can track who is speaking when several people share a thread. Responses stream and are split at sentence boundaries to fit Discord's 2000-character limit.
 
@@ -385,9 +390,7 @@ Endpoints: `GET /health`, `GET /status`, `POST /evaluate`, `POST /reparse` (rebu
 
 Earlier revisions of this document described a three-path training trigger (threshold check, training-window scheduler, force-all) backed by `training_trigger.py`, `training_state.py`, and `llama_registrar.py`. **None of those files exist.** No `training_state.json` is written, and there is no training window.
 
-What remains is a vestige: after a merge, `main.py` calls `_notify_lora_training()`, which POSTs to `http://lora-training:11438/notify` — a service that does not exist, on a port belonging to the arbiter. It fails and logs a warning.
-
-Training is started by a human running `make train-submit` and by nothing else (§10). Either delete `_notify_lora_training()` or point it somewhere real.
+Training is started by a human running `make train-submit` and by nothing else (§10).
 
 ### 9a.4 Why not merge into the RAG service
 
@@ -492,7 +495,6 @@ Note that the parameters in this file are the *server's* defaults for an alias; 
 |---|---|---|
 | A cooperative job lies about releasing the card | Low | Bounded by timeout; a timeout is a refusal. Genuinely unverifiable — the known cost of not holding systemd's user manager |
 | `required_mb` understates a job's peak, causing OOM | Medium | Declare peak, not steady state; already caused one failure at 4478 MiB free vs 4096 declared |
-| Config drift between `models.ini`, `proxy/config.py`, and the bot | **Occurring now** | `SWAPPABLE_MODELS` is advisory so drift degrades rather than breaks; consolidation tracked in `docs/TODO.md` |
 | Driver upgrade kills every GPU container | Medium | systemd unit recreates on failed start; unattended-upgrades pinned. Has happened once, cost four days |
 | A training run never gets the card | Medium | By design — it needs a 600s idle window. `make train-status` reports holder and free VRAM before suspecting a fault |
 | Baked-in disclaimer appears in mimic output | Medium | `DISCLAIMER_PATTERNS` regex strip in the bot, plus system prompt instruction |

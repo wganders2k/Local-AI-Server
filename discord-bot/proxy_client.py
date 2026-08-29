@@ -318,13 +318,17 @@ class ProxyClient:
         data = response.json()
         return data.get("queue_depth", 0)
 
-    async def list_models(self) -> list[str]:
+    async def _models_payload(self) -> list[dict]:
         """
-        Query the proxy /v1/models endpoint for available model IDs.
+        The raw ``data`` array from the proxy /v1/models endpoint.
 
         Returns:
-            List of model name strings. Returns an empty list on failure
-            so that autocomplete degrades gracefully.
+            One dict per model, or an empty list on any failure — callers
+            degrade rather than raise.
+
+        The request forwards straight through the proxy to llama-server's
+        router and neither loads a model nor acquires the GPU, so it is safe
+        to call at startup and from autocomplete.
         """
         client = await self._get_client()
         try:
@@ -337,9 +341,53 @@ class ProxyClient:
 
         try:
             data = response.json()
-            return [m.get("id", "") for m in data.get("data", []) if m.get("id")]
-        except (ValueError, KeyError):
+        except ValueError:
             return []
+
+        entries = data.get("data")
+        return entries if isinstance(entries, list) else []
+
+    async def list_models(self) -> list[str]:
+        """
+        Query the proxy /v1/models endpoint for available model IDs.
+
+        Returns:
+            List of model name strings. Returns an empty list on failure
+            so that autocomplete degrades gracefully.
+        """
+        return [m.get("id", "") for m in await self._models_payload() if m.get("id")]
+
+    async def model_context_sizes(self) -> dict[str, int]:
+        """
+        Context window per model, as llama-server itself will run them.
+
+        In router mode each /v1/models entry carries the full argv the server
+        would launch that model with, including --ctx-size, whether or not it
+        is currently loaded. Reading it here means the bot's context budget
+        comes from llama-server's own parse of models.ini rather than from a
+        constant somebody has to remember to update.
+
+        Returns:
+            {model_id: ctx_size}. Models whose size cannot be read are omitted
+            rather than guessed at, and an unreachable proxy yields {}.
+        """
+        sizes: dict[str, int] = {}
+        for entry in await self._models_payload():
+            model_id = entry.get("id")
+            args = (entry.get("status") or {}).get("args")
+            if not model_id or not isinstance(args, list):
+                continue
+            # llama-server normalises to the long form, but accept the short
+            # one too rather than silently reporting no size if that changes.
+            for flag in ("--ctx-size", "-c"):
+                if flag not in args:
+                    continue
+                try:
+                    sizes[model_id] = int(args[args.index(flag) + 1])
+                except (IndexError, TypeError, ValueError):
+                    pass
+                break
+        return sizes
 
     async def close(self) -> None:
         """Close the underlying HTTP client."""

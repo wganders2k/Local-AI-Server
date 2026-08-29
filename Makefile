@@ -279,10 +279,11 @@ rag-status:
 ## Set HF_TOKEN environment variable for private or gated HuggingFace repos.
 ##
 ## To add or change a model:
-##   1. Edit the MODELS list in scripts/download_models.py
-##   2. Update models.ini (for swappable slot) or docker-compose.yml (for permanent slot)
-##   3. Run: make models-download
-##   4. Run: make restart-llama-swappable  (or restart-llama-permanent)
+##   1. Swappable slot: edit models.ini (the download list is derived from it).
+##      Permanent slot: edit PERMANENT_MODELS in scripts/download_models.py and
+##      the llama-permanent command: in docker-compose.yml.
+##   2. Run: make models-download
+##   3. Run: make restart-llama-swappable  (or restart-llama-permanent)
 VENV := scripts/.venv
 PYTHON := $(VENV)/bin/python3
 PIP := $(VENV)/bin/pip

@@ -124,7 +124,7 @@ Suggestions come from `MIMIC_SYSTEM_PROMPTS.keys()`, capped at Discord's 25-choi
 
 ### 5.2 Model autocomplete (`/chat`)
 
-Suggestions come from the proxy's `/v1/models`, i.e. from llama-server itself. Any alias actually loaded in the preset file is selectable, including ones absent from `SWAPPABLE_MODELS` in `proxy/config.py`. If the proxy is unreachable, the list is empty rather than an error.
+Suggestions come from the proxy's `/v1/models`, i.e. from llama-server itself. Any alias actually loaded in the preset file is selectable. If the proxy is unreachable, the list is empty rather than an error.
 
 ### 5.3 Adding a persona
 

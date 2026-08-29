@@ -121,17 +121,18 @@ def export_channel(
     os.makedirs(host_output_dir, exist_ok=True)
     
     # Build docker compose run command.
-    # The compose file is mounted at /etc/dce-compose.yml and .env at /etc/dce.env.
-    user_str = _current_user_string()
-
-    # Build docker compose run command.
-    # The compose file is mounted at /etc/dce-compose.yml and .env at /etc/dce.env.
+    # The compose file is mounted at /etc/dce-compose.yml. DISCORD_TOKEN needs
+    # no --env-file: this subprocess inherits history-service's own process
+    # environment, which already has DISCORD_TOKEN (docker-compose.yml), and
+    # Compose's variable substitution prefers an inherited env var over any
+    # --env-file anyway.
     # --user ensures DCE writes files owned by the same UID/GID as appuser
     # so the history-service process can later manage (delete/rewrite) them.
+    user_str = _current_user_string()
+
     cmd = [
         "docker", "compose",
         "-f", "/etc/dce-compose.yml",
-        "--env-file", "/etc/dce.env",
         "run", "--rm", "--user", user_str,
         "discord-chat-exporter",
         "export",
@@ -263,13 +264,15 @@ def evaluate_and_export(
     state = load_state()
     needs_export = channels_needing_export(state, channels)
 
-    # Filter out excluded channels
+    # Filter out excluded channels (match by ID or by name)
     if EXCLUDED_CHANNELS:
+        before_count = len(needs_export)
         needs_export = [
             ch for ch in needs_export
             if ch["channel_id"] not in EXCLUDED_CHANNELS
+            and ch["channel_name"] not in EXCLUDED_CHANNELS
         ]
-        logger.info(f"Filtered out {len(EXCLUDED_CHANNELS)} excluded channels")
+        logger.info(f"Filtered out {before_count - len(needs_export)} excluded channels")
     
     total_results: Dict[str, int] = {}
     

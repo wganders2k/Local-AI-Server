@@ -71,7 +71,6 @@ local-ai-server/
 ├── docker-compose.yml      # All services
 ├── Makefile                # Common server operations (make help)
 ├── models.ini              # llama-server presets for the swappable slot
-├── system_prompts.ini      # Per-alias system prompts, injected by the proxy
 ├── prometheus.yml          # Scrape config
 ├── dce-compose.yml         # One-shot DiscordChatExporter definition
 ├── .env.example            # Environment template — copy to .env
@@ -104,7 +103,7 @@ cp .env.example .env
 
 Set at minimum `DISCORD_TOKEN` and `DISCORD_GUILD_ID`. If you run Open WebUI or Grafana behind authentik SSO, also set `OPENWEBUI_CLIENT_ID` / `OPENWEBUI_CLIENT_SECRET`, `GRAFANA_CLIENT_ID` / `GRAFANA_CLIENT_SECRET`, and `GRAFANA_ADMIN_PASSWORD` — these are read by `docker-compose.yml` but are **not yet listed in `.env.example`**.
 
-The compose file bind-mounts several configs by absolute path under `/home/peacow/local-ai-server` (`models.ini`, `system_prompts.ini`, `arbiter/jobs.yaml`, `prometheus.yml`, `dce-compose.yml`, `dce.env`). Deploying elsewhere means editing those paths.
+The compose file bind-mounts several configs by absolute path under `/home/peacow/local-ai-server` (`models.ini`, `arbiter/jobs.yaml`, `prometheus.yml`, `dce-compose.yml`). Deploying elsewhere means editing those paths.
 
 ### 2. Download model files
 
@@ -192,7 +191,6 @@ history  GET  /health  /status                  POST /evaluate  /reparse  /clear
 
 - **`models.ini`** — every swappable-slot preset. Each `[section]` is a named alias with its GGUF path and inference parameters.
 - **`docker-compose.yml`** — the permanent-slot model, via the `--model` flag on `llama-permanent`.
-- **`system_prompts.ini`** — per-alias system prompts, injected by the proxy.
 
 Currently enabled aliases in `models.ini`:
 
@@ -207,9 +205,9 @@ Currently enabled aliases in `models.ini`:
 | `chat-chinese` | Qwen3.6-35B-A3B UD-IQ4_NL | Open WebUI |
 | `bomb-you` | Qwen3.5-35B-A3B-Uncensored IQ4_XS | Open WebUI |
 
-**Commented out and therefore unavailable:** `mimic_user1`–`mimic_user6` and `image-caption`. They are still listed in `proxy/config.py`'s `SWAPPABLE_MODELS` and `system_prompts.ini`, and `/mimic` still offers them via autocomplete — but a request reaches llama-server and finds no such preset. Re-enable the sections in `models.ini` before using `/mimic` or image captioning.
+**Commented out and therefore unavailable:** `mimic_user1`–`mimic_user6` and `image-caption`. `/mimic` still offers them via autocomplete — but a request reaches llama-server and finds no such preset. Re-enable the sections in `models.ini` before using `/mimic` or image captioning.
 
-`SWAPPABLE_MODELS` in `proxy/config.py` is advisory rather than a gate: the proxy forwards *any* non-autocomplete model name to the swappable slot and lets llama-server decide. It is out of sync with `models.ini` in both directions.
+The proxy does not gate on a model list of its own: it forwards *any* non-autocomplete model name to the swappable slot and lets llama-server decide. `models.ini` is the single source of truth for what's actually available.
 
 ### Switching a model or quant
 
@@ -251,7 +249,7 @@ make rag-ingest    →  rag-service chunks the JSONL by conversation, embeds wit
 
 Archive tiers live on cold storage at `/mnt/storage_cold/array/DiscordArchive/{raw,archive,state}` — bind mounts, so they survive `make nuke`.
 
-Automatic retraining is **not wired up**. `history-service` still calls `_notify_lora_training()` after a merge, which POSTs to `http://lora-training:11438/notify` — a service that does not exist. It fails harmlessly and is logged at warning level. A training run starts only when a human runs `make train-submit`.
+Automatic retraining is **not wired up**. A training run starts only when a human runs `make train-submit`.
 
 ## LoRA Training
 
@@ -293,16 +291,12 @@ cd history-service && python -m pytest tests -q                # channel state, 
 
 `arbiter/tests/test_scheduler.py` is the one worth knowing about: it pins the guarantees the design rests on — that nothing is ever started, that `acquire` never reports success while a junior tenant survives, that a lease never outlives its holder, and that priority alone decides who wins.
 
-There is no repo-wide test runner and no CI. `discord-bot` and `rag` have no tests.
+There is no repo-wide test runner and no CI. `rag` has no tests.
 
 ## Known gaps
 
 Things the docs describe accurately but that are broken, inert, or unfinished in the code — tracked in full in [`docs/TODO.md`](docs/TODO.md):
 
 - **`/mimic` has no backing preset.** The `mimic_user*` sections are commented out in `models.ini` while the bot still offers them via autocomplete.
-- **The proxy's system-prompt loader is dead code.** `system_prompts.ini` is bind-mounted and editing it does nothing.
-- **`history-service` notifies a service that doesn't exist.** `_notify_lora_training()` POSTs to `http://lora-training:11438/notify`; it fails and logs a warning.
-- **`EXCLUDED_CHANNELS` never reaches its container** — read by `history-service/config.py`, not passed by `docker-compose.yml`.
-- **Model config is spread across six files** and has drifted in both directions between `models.ini` and `proxy/config.py`.
 
 The documents in [`docs/plans/`](docs/plans/) are point-in-time design records, not current-state docs, and are left as written.

@@ -1,21 +1,13 @@
 
-### Chores
-* Consolidate all model config/names/etc to one source of truth. Currently all this info is split across a few too many files (models.ini, proxy/config.py, discord-bot/config.py, system_prompts.ini, docker-compose.yml, scripts/download_models.py). This causes adding new models or tweaking configs to be a headache.
-  * These have now actually drifted, in both directions: `proxy/config.py` lists `mimic_user1..6`, `agent`, `chat`, and `image-caption`, none of which exist as presets; `models.ini` defines `gemma-brain-dense`, `chat-liberal`, `chat-chinese`, and `bomb-you`, none of which are in `SWAPPABLE_MODELS`. It degrades rather than breaks — the proxy forwards unknown names to the swappable slot anyway — but it means neither file can be trusted as the list.
-
 ### OpenWebUI Search
 * Set up SearXNG + redis or similar search provider to improve chatbot utility
 
 ### Discord Bot
 * Re-enable `/mimic`: the `mimic_user*` presets are commented out in `models.ini`, so every persona the autocomplete offers resolves to a model llama-server doesn't have.
 * Persona autocomplete reads a hardcoded dict and can advertise models that don't exist. `/chat` already does this properly by reading the proxy's `/v1/models` — copy that.
-* No tests. Only service in the repo without a `tests/` directory; the agent loop and the streaming split logic are the parts worth covering.
 * `/admin-clear-history` stays disabled until there's a role check.
 
 ### Dead code / half-wired things
-* `proxy/system_prompts.py` is never imported by `proxy/main.py`. `system_prompts.ini` is bind-mounted and edits to it do nothing. Either wire the loader up or delete both — a config file that silently has no effect is worse than no config file.
-* `history-service/main.py` calls `_notify_lora_training()` after every merge, which POSTs to `http://lora-training:11438/notify` — a service that doesn't exist, on a port belonging to the arbiter. Fails harmlessly and logs a warning. Delete it or point it somewhere real.
-* `EXCLUDED_CHANNELS` is read by `history-service/config.py` but never passed into the container by `docker-compose.yml`, so setting it has no effect. One line in the service definition fixes it.
 * `LORE_TOP_K` defaults disagree: 10 in `discord-bot/config.py`, 5 in `docker-compose.yml`.
 
 ### Training
@@ -29,5 +21,17 @@
 * `docker-compose.yml` bind-mounts configs by absolute `/home/peacow/local-ai-server` paths, so the repo only runs from that location.
 
 ### Done
+* ~~Consolidate all model config to one source of truth~~ — model identity now lives in
+  exactly two places: `models.ini` (swappable slot) and the `llama-permanent` command:
+  in `docker-compose.yml` (permanent slot). `proxy/config.py`'s `SWAPPABLE_MODELS` set is
+  gone (it was advisory only); `scripts/download_models.py` derives its swappable download
+  list from `models.ini` directly.
+* ~~`proxy/system_prompts.py` / `system_prompts.ini` are dead code~~ — both deleted; no
+  loader, no bind mount.
+* ~~`history-service` notifies a service that doesn't exist~~ — `_notify_lora_training()`
+  deleted.
+* ~~`EXCLUDED_CHANNELS` never reaches its container~~ — passed through in
+  `docker-compose.yml`, and the filter now matches by channel name or id.
+* ~~Discord bot has no tests~~ — `discord-bot/tests/` now has 6 test files covering the agent loop, formatters, prompts, research, session, and tools.
 * ~~Break ground on the Discord bot~~ — `/mimic`, `/chat` (thread-based), and `/lore` (agentic RAG) all shipped.
 * ~~Proxy + Homepage integration: job history records and an endpoint returning homepage-compatible JSON~~ — built, then superseded by Prometheus + Grafana. `/history` and `/history/summary` remain as `[]` stubs for compatibility; re-implement against the Prometheus API if the panels are ever wanted back.
