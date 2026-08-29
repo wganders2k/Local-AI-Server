@@ -49,8 +49,16 @@ PROXY_CONNECTION_TIMEOUT: int = 10
 PROXY_READ_TIMEOUT: int = 300
 PROXY_TOTAL_TIMEOUT: int = 320
 
-# Thread registry
-THREAD_REGISTRY_PATH: str = os.environ.get("THREAD_REGISTRY_PATH", "data/threads.json")
+# Thread registry: thread_id -> model, and whether a thread is chat or lore.
+#
+# On the bot_context volume with the lore sessions, NOT in the repo. It used to
+# live in discord-bot/data/, which put runtime state inside the working tree —
+# and a branch switch that crossed the commit removing the (then-tracked) file
+# deleted it out from under the running container's bind mount, taking every
+# thread binding with it. Runtime state does not belong anywhere git writes.
+THREAD_REGISTRY_PATH: str = os.environ.get(
+    "THREAD_REGISTRY_PATH", "bot_context/threads.json"
+)
 
 # ──────────────────────────────────────────────────────────────
 # RAG Service Configuration
@@ -71,15 +79,21 @@ AGENT_TOP_K: int = 10             # Default chunks per tool call (higher than lo
 
 # Context-window accounting.
 #
-# AGENT_CTX_LIMIT must mirror `ctx-size` for the AGENT_MODEL entry in
-# models.ini (currently brain-dense-heretic, models.ini:75). Nothing enforces
-# the pairing — if you change one, change the other, or the budget maths is
-# silently wrong. This is not academic: a heavy /lore run has been observed
-# holding 65,530 of these 96,000 tokens at round 10, before any thread
-# follow-up history accumulates.
-AGENT_CTX_LIMIT: int = 96000
+# The real limit is read from the proxy at startup — see
+# lore/context_window.py, which asks /v1/models for the argv llama-server would
+# launch AGENT_MODEL with and takes --ctx-size from it. Call
+# context_window.limit(), never this constant.
+#
+# This is only the fallback for a bot that cannot reach the proxy, and it is
+# also the value discovery is checked against: a mismatch is logged as a stale
+# constant. Keep it equal to `ctx-size` for the AGENT_MODEL entry in models.ini
+# (currently the [brain-dense-heretic] section).
+#
+# The number matters. A heavy /lore run has been observed holding 65,530 of
+# these 96,000 tokens at round 10, before any thread follow-up accumulates.
+AGENT_CTX_LIMIT_FALLBACK: int = 96000
 
-# Fractions of AGENT_CTX_LIMIT at which the agent changes behaviour.
+# Fractions of the discovered context limit at which the agent changes behaviour.
 #   SOFT    — start telling the model what is left, so it can wind down searching
 #   COMPACT — collapse the oldest research into a summary to reclaim room
 #   HARD    — stop searching entirely and answer, whatever the model wants

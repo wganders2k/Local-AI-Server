@@ -157,8 +157,7 @@ async def evaluate() -> dict:
 
     Called by host cron (monthly). Evaluates all channels in the
     guild, invokes DCE for channels with activity since last export,
-    merges raw exports into per-user JSONL archive, and notifies
-    lora-training service of new data.
+    and merges raw exports into per-user JSONL archive.
     """
     logger.info("Channel evaluation triggered via POST /evaluate")
 
@@ -176,9 +175,6 @@ async def evaluate() -> dict:
 
         # Run export pipeline (blocking subprocess calls) in thread pool
         new_message_counts = await asyncio.to_thread(evaluate_and_export, channels)
-
-        # Notify lora-training (blocking HTTP call) in thread pool
-        await asyncio.to_thread(_notify_lora_training, new_message_counts)
 
         return {
             "status": "complete",
@@ -397,30 +393,6 @@ def _fetch_discord_channels() -> list:
     except Exception as e:
         logger.error(f"Failed to fetch Discord channels: {e}")
         return []
-
-
-def _notify_lora_training(new_message_counts: dict) -> None:
-    """
-    Notify lora-training service that new data is available.
-
-    Args:
-        new_message_counts: Mapping of user_id → new message count.
-    """
-    if not new_message_counts:
-        return
-
-    try:
-        with httpx.Client(timeout=10.0) as client:
-            resp = client.post(
-                "http://lora-training:11438/notify",
-                json={"users": list(new_message_counts.keys())},
-            )
-            if resp.status_code == 200:
-                logger.info(f"Notified lora-training of {len(new_message_counts)} users with new data")
-            else:
-                logger.warning(f"lora-training notify returned HTTP {resp.status_code}")
-    except Exception as e:
-        logger.warning(f"Failed to notify lora-training: {e}")
 
 
 # ──────────────────────────────────────────────────────────────

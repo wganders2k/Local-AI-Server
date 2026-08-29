@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
-from config import AGENT_CTX_LIMIT
+from lore.context_window import limit as ctx_limit
 
 
 @dataclass
@@ -26,7 +26,7 @@ class AgentMetrics:
 
     # Token accounting. prompt/completion/cached describe the most recent call;
     # peak_context_tokens is the high-water mark across the whole run, which is
-    # the number that matters against AGENT_CTX_LIMIT.
+    # the number that matters against the model's context window.
     prompt_tokens: int = 0
     completion_tokens: int = 0
     cached_tokens: int = 0
@@ -73,14 +73,15 @@ class AgentMetrics:
     @property
     def context_pct(self) -> float:
         """Peak context occupancy as a fraction of the model's window."""
-        return self.peak_context_tokens / AGENT_CTX_LIMIT if AGENT_CTX_LIMIT else 0.0
+        return self.peak_context_tokens / ctx_limit() if ctx_limit() else 0.0
 
     def context_line(self) -> str:
         """One-line context summary for the round log."""
         used = self.context_used
-        pct = (used / AGENT_CTX_LIMIT * 100) if AGENT_CTX_LIMIT else 0.0
+        limit = ctx_limit()
+        pct = (used / limit * 100) if limit else 0.0
         return (
-            f"context={used:,}/{AGENT_CTX_LIMIT:,} ({pct:.0f}%) "
+            f"context={used:,}/{limit:,} ({pct:.0f}%) "
             f"cached={self.cached_tokens:,}"
         )
 
@@ -91,7 +92,7 @@ class AgentMetrics:
             f"tools={self.tools_used!r}, "
             f"avg_llm={sum(self.llm_response_times)/max(len(self.llm_response_times),1):.2f}s, "
             f"avg_rag={sum(self.rag_query_times)/max(len(self.rag_query_times),1):.2f}s, "
-            f"peak_context={self.peak_context_tokens:,}/{AGENT_CTX_LIMIT:,} "
+            f"peak_context={self.peak_context_tokens:,}/{ctx_limit():,} "
             f"({self.context_pct * 100:.0f}%), "
             f"generated={self.total_completion_tokens:,} tok"
         )

@@ -45,8 +45,12 @@ Text that is host-local instead — anything holding real names or server-specif
 content — lives on a mounted volume, never in `prompts/`, and never in the repo.
 
 A constant that has to agree with something outside the file says so in a
-comment naming the other place. See `AGENT_CTX_LIMIT` in
-`discord-bot/config.py`, which must mirror `models.ini`.
+comment naming the other place. Better still: if that other place can be
+*queried* at runtime, query it, and keep the constant only as a fallback for
+when the query fails. `discord-bot/lore/context_window.py` reads the agent's
+context window from the proxy rather than trusting a number somebody has to
+remember to update, and logs a warning when the fallback has gone stale — a
+pairing that used to be maintained by hand and checked by nobody.
 
 ## 3. Comments explain *why*, with numbers
 

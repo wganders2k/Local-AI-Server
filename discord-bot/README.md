@@ -129,16 +129,20 @@ warning and answers without the alias index.
 | `RATE_LIMIT_PER_USER` | ❌ | `5` | Max requests per user per minute |
 | `RAG_SERVICE_URL` | ❌ | `http://rag-service:8001` | RAG service base URL |
 | `RAG_ENABLED` | ❌ | `true` | Set false to run without `/lore` retrieval |
-| `THREAD_REGISTRY_PATH` | ❌ | `data/threads.json` | Thread → model registry |
+| `THREAD_REGISTRY_PATH` | ❌ | `bot_context/threads.json` | Thread → model registry |
 | `LORE_SESSION_PATH` | ❌ | `bot_context/lore/sessions.json` | Lore thread transcripts |
 | `LORE_CONTEXT_PATH` | ❌ | `bot_context/lore/context.md` | Host-local server background for the `/lore` prompt |
 
 Tuning that is not environment-driven — round caps, context thresholds, TTLs —
 lives in [`config.py`](config.py) with the reasoning attached.
 
-> `AGENT_CTX_LIMIT` in `config.py` must mirror `ctx-size` for `AGENT_MODEL` in
-> [`models.ini`](../models.ini). Nothing enforces the pairing; if you change one,
-> change the other or the budget maths is silently wrong.
+The agent's context window is **read from the backend at startup**, not
+configured: `lore/context_window.py` asks the proxy's `/v1/models` for the argv
+llama-server would launch `AGENT_MODEL` with and takes `--ctx-size` from it. So
+editing `ctx-size` in [`models.ini`](../models.ini) is enough — nothing in the bot
+needs changing to match. `AGENT_CTX_LIMIT_FALLBACK` in `config.py` is only used if
+the proxy is unreachable, and a disagreement between the two is logged as a stale
+constant.
 
 ## Timeouts
 

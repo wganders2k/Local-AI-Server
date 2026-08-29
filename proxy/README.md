@@ -15,13 +15,11 @@ It has no GPU access. Giving it any would be a second answer to a question the a
 
 ## What it deliberately does not do
 
-**It does not inject system prompts.** [`system_prompts.py`](system_prompts.py) and the bind-mounted `system_prompts.ini` exist, but `main.py` never imports the loader — the code is inert and editing the INI has no effect. Every prompt in use is built client-side: mimic prompts in the bot's `config.py`, the `/lore` agent's in `agent_tools.py`, Open WebUI's in its own UI. `/chat` threads send none at all.
-
-This is unfinished business, not a design stance: either wire the loader up or delete it, because a config file that silently does nothing is worse than no config file.
+**It does not inject system prompts.** Every prompt in use is built client-side: mimic prompts in the bot's `config.py`, the `/lore` agent's in `agent_tools.py`, Open WebUI's in its own UI. `/chat` threads send none at all.
 
 **It does not report GPU state.** `/status` returns proxy state only. What is on the card and why is `/gpu/status` on the arbiter — asking two services the same question is how they end up disagreeing.
 
-**It does not gate on the model list.** `SWAPPABLE_MODELS` is advisory. Any request carrying a model name that isn't an autocomplete alias goes to the swappable slot and llama-server decides whether it knows it; a request with no model in the body is forwarded unlocked (this is what makes `GET /v1/models` work). The set only labels swap logging, so a preset missing from it still works — and today it disagrees with `models.ini` in both directions.
+**It does not gate on the model list.** Any request carrying a model name that isn't an autocomplete alias goes to the swappable slot and llama-server decides whether it knows it; a request with no model in the body is forwarded unlocked (this is what makes `GET /v1/models` work). The model list is whatever `models.ini` defines — the proxy doesn't parse it, `GET /v1/models` just forwards to `llama-swappable` and surfaces its own parse.
 
 ## Idle eviction
 
@@ -63,7 +61,6 @@ GPU metrics are the arbiter's — it is the only component that reads the card.
 | `IDLE_EVICT_SECONDS` | `600` | Idle time before unloading |
 | `IDLE_EVICT_POLL_SECONDS` | `30` | How often the evictor checks |
 | `IDLE_EVICT_UNLOAD_TIMEOUT` | `60` | How long to wait for an unload to take effect |
-| `SYSTEM_PROMPTS_PATH` | `../system_prompts.ini` | Read by the inert loader only |
 
 Changing how the LLM ranks against the trainer is an edit to [`arbiter/jobs.yaml`](../arbiter/jobs.yaml), not to anything here.
 
@@ -74,10 +71,9 @@ proxy/
 ├── Dockerfile
 ├── requirements.txt
 ├── main.py            # FastAPI app, routing, idle evictor, metrics, forwarding
-├── config.py          # URLs, model sets, arbiter identity, eviction tuning
+├── config.py          # URLs, arbiter identity, eviction tuning
 ├── state.py           # OrchestratorState — lock, queue depth, in-flight, current model
 ├── arbiter.py         # ArbiterClient — acquire / release
-├── system_prompts.py  # INI loader — currently unused by main.py
 └── tests/
     ├── test_gpu_gate.py      # the lease is acquired before forwarding, released only when idle
     └── test_idle_evictor.py  # unload is verified, not assumed

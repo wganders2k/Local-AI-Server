@@ -183,7 +183,6 @@ services:
     environment:
       - LLAMA_PERMANENT=http://llama-permanent:8080
       - LLAMA_SWAPPABLE=http://llama-swappable:8080
-      - MODELS_INI_PATH=/models.ini
       - ARBITER_URL=http://arbiter:11438
       # Which entry in arbiter/jobs.yaml this proxy is. It sends only this name;
       # its priority and what gets stopped for it are decided there. Must match a
@@ -196,9 +195,6 @@ services:
       # models, which is why this stays here rather than moving to the arbiter.
       - IDLE_EVICT_ENABLED=${IDLE_EVICT_ENABLED:-true}
       - IDLE_EVICT_SECONDS=${IDLE_EVICT_SECONDS:-600}
-    volumes:
-      - /home/peacow/local-ai-server/models.ini:/models.ini:ro
-      - /home/peacow/local-ai-server/system_prompts.ini:/system_prompts.ini:ro
     healthcheck:
       test:
         - CMD
@@ -235,13 +231,15 @@ services:
       # (-w /opt/dockge/stacks/local-ai-server) silently repoints these at an
       # empty directory — the bot then starts with no lore context and an empty
       # thread registry, and nothing in the logs says the mount moved.
-      - /home/peacow/local-ai-server/discord-bot/data:/app/data  # Persistent thread registry
-      # Lore thread transcripts, and the server-specific lore context file.
+      # Lore thread transcripts, the thread registry, and the server-specific
+      # lore context file.
       # Out of the repo because they hold verbatim server history — every
       # excerpt a /lore run retrieved, and the real-name alias index — and they
       # belong with the archive that produced them, not in version control.
       # Lives on the mergerfs pool; the store's atomic temp+rename was verified
-      # there.
+      # there. The registry moved here from discord-bot/data/ after a branch
+      # switch deleted it from under this mount — runtime state must not live
+      # inside the working tree.
       #
       # NOT mounted: /app/prompts. Those are the prompt templates, committed
       # code baked into the image — binding the host directory over them would
@@ -401,10 +399,10 @@ services:
       - IMAGE_CAPTION_WINDOW_START=${IMAGE_CAPTION_WINDOW_START:-3}
       - IMAGE_CAPTION_WINDOW_END=${IMAGE_CAPTION_WINDOW_END:-6}
       - IMAGE_CAPTION_MAX_FILE_SIZE_MB=${IMAGE_CAPTION_MAX_FILE_SIZE_MB:-10}
+      - EXCLUDED_CHANNELS=${EXCLUDED_CHANNELS:-}
     volumes:
       - /mnt/storage_cold/array/DiscordArchive:/archive    # Cold storage bind mount
       - /home/peacow/local-ai-server/dce-compose.yml:/etc/dce-compose.yml:ro  # DCE compose config
-      - /home/peacow/local-ai-server/dce.env:/etc/dce.env:ro  # DCE needs DISCORD_TOKEN from dce.env
 
   # ──────────────────────────────────────────────────────────
   # Prometheus
@@ -470,7 +468,5 @@ services:
 volumes:
   open_webui_data: null
   chroma_data: null
-  history_data: null
-  lora_outputs: null
   grafana_data: null
 networks: {}
