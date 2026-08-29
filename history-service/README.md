@@ -13,8 +13,6 @@ Background service that orchestrates Discord message collection via DiscordChatE
 
 **It does not trigger LoRA training.** Earlier revisions of this document described a three-path training trigger backed by `training_trigger.py`, `training_state.py`, and `llama_registrar.py`, a `training_state.json`, a 3–6 AM training window, and an automatic `models.ini` update after each merge. **None of that exists.** There is no training state, no window, no dispatch, and no registrar.
 
-What remains is a vestige: after each merge, `main.py` calls `_notify_lora_training()`, which POSTs to `http://lora-training:11438/notify` — a service that does not exist, on a port that belongs to the arbiter. It fails, logs a warning, and is otherwise inert. Either delete it or point it somewhere real.
-
 A training run is started by a human running `make train-submit` and by nothing else. See [`lora-training/README.md`](../lora-training/README.md).
 
 **It does not filter.** Turning the archive into a training dataset is Tier 3's job, and Tier 3 does not exist yet.
@@ -67,7 +65,7 @@ A failed export leaves the channel's state untouched, so the next run retries th
 
 ### How DCE is invoked
 
-Not through the main `docker-compose.yml`. The service runs `docker compose -f /etc/dce-compose.yml run` against a dedicated one-service compose file, with the token supplied from a separate `/etc/dce.env` — both bind-mounted read-only. Docker access goes through `docker-socket-proxy` (`DOCKER_HOST=tcp://docker-socket-proxy:2375`), not the real socket.
+Not through the main `docker-compose.yml`. The service runs `docker compose -f /etc/dce-compose.yml run` against a dedicated one-service compose file, bind-mounted read-only. `DISCORD_TOKEN` isn't passed separately — the subprocess inherits it from history-service's own process environment, which Compose's variable substitution prefers over any `--env-file`. Docker access goes through `docker-socket-proxy` (`DOCKER_HOST=tcp://docker-socket-proxy:2375`), not the real socket.
 
 `--user` is passed through to `docker compose run` so DCE writes files owned by the invoking user rather than root; without it, `POST /clear` hits permission errors trying to remove them.
 
@@ -97,7 +95,7 @@ Bound to `127.0.0.1:11437`. No authentication.
 | `DISCORD_TOKEN` | ✅ | — | Same token as the bot |
 | `DISCORD_GUILD_ID` | ✅ | — | Target guild |
 | `PROXY_URL` | ❌ | `http://proxy:11436` | Used by the captioner |
-| `EXCLUDED_CHANNELS` | ❌ | *(empty)* | Comma-separated channel IDs never exported |
+| `EXCLUDED_CHANNELS` | ❌ | *(empty)* | Comma-separated channel IDs or names never exported |
 | `IMAGE_CAPTION_ENABLED` | ❌ | `false` | Enables the captioning job |
 | `IMAGE_CAPTION_MODEL` | ❌ | `image-caption` | Must match an alias in `models.ini` |
 | `IMAGE_CAPTION_BATCH_SIZE` | ❌ | `10` | Images per run |

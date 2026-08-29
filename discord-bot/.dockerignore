@@ -10,8 +10,8 @@ __pycache__/
 tests/
 pytest.ini
 
-# Runtime state. Bind-mounted at /app/data; a baked-in copy is never read and
-# would be a stale registry inside the image.
+# Runtime state. Now lives on the bot_context volume, not here — but keep this
+# excluded so any leftover directory cannot be baked into an image.
 data/
 
 # Host-local lore context, if a pre-migration copy is still lying around. It

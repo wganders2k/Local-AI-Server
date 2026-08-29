@@ -2,9 +2,6 @@
 *.env
 *.env.local
 
-# DCE-specific secrets file (contains DISCORD_TOKEN) — populate manually from .env
-dce.env
-
 # Server-specific system prompt context (real names, aliases) — keep local.
 #
 # discord-bot/prompts/ is ordinary committed code now: the prompt templates the
@@ -76,9 +73,11 @@ discord-bot/.venv-test/
 # /lore run retrieved. The path below stays ignored so the pre-migration copy,
 # and anything that recreates it, cannot be committed.
 #
-# threads.json is the thread->model registry. It was committed by mistake and
-# has been untracked (git rm --cached); the file itself still lives here and is
-# rewritten on every run, which is why it must stay ignored.
+# threads.json is the thread->model registry. It has moved to the bot_context
+# volume alongside the sessions, because living inside the working tree meant a
+# branch switch could (and did) delete it from under the running container. The
+# path below stays ignored so a stale copy cannot be committed if anything
+# recreates discord-bot/data/.
 #
 # The *.tmp entry covers the atomic temp file the stores write before rename.
 discord-bot/data/lore_sessions.json

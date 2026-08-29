@@ -5,6 +5,17 @@ download_models.py — Download all GGUF model files for the Local AI Server sta
 Downloads models from HuggingFace Hub into:
   /srv/models/<publisher>/<repo>/filename.gguf
 
+The swappable-slot download list is derived from models.ini — every active
+(un-commented) [section]'s `model = ` path is parsed into a repo_id, filename,
+and local_dir. To add or remove a swappable model, edit models.ini only; this
+script needs no matching edit. A section's HuggingFace repo id is assumed to be
+its on-disk <publisher>/<repo> path, with any exception listed in
+HF_REPO_OVERRIDES below.
+
+The permanent slot (autocomplete) is configured directly in docker-compose.yml
+(the `llama-permanent` command:), not models.ini, so its GGUFs are listed
+explicitly in PERMANENT_MODELS.
+
 Usage:
   python scripts/download_models.py [--models-dir /path/to/models] [--dry-run]
 
@@ -14,9 +25,17 @@ Requirements:
 Environment variables:
   HF_TOKEN       — HuggingFace token (required for gated/private repos)
   MODELS_DIR     — Override default model storage directory (default: /srv/models)
+
+To add or change a model:
+  1. Swappable: add/edit a [section] in models.ini.
+     Permanent: edit PERMANENT_MODELS below and the llama-permanent command:
+     in docker-compose.yml.
+  2. Run: make models-download
+  3. Run: make restart-llama-swappable  (or restart-llama-permanent)
 """
 
 import argparse
+import configparser
 import os
 import sys
 from pathlib import Path
@@ -30,20 +49,17 @@ except ImportError:
     sys.exit(1)
 
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+MODELS_INI_PATH = REPO_ROOT / "models.ini"
+
 # ──────────────────────────────────────────────────────────────────────────────
-# Model manifest
-# Each entry defines one GGUF file to download.
-#
-# Fields:
-#   repo_id    — HuggingFace repo (owner/repo-name)
-#   filename   — exact filename within the repo
-#   local_dir  — subdirectory under MODELS_DIR to save into
-#                format: <publisher>/<model-name>
-#   slot       — "permanent" or "swappable" (informational only)
-#   notes      — human-readable description
+# Permanent slot (:11435) — configured directly in docker-compose.yml's
+# llama-permanent command:, not derived. Kept as an explicit list here so
+# `make models-download` still fetches both candidate GGUFs even though only
+# one is loaded at a time; swap back by editing the command: line, no re-fetch
+# needed.
 # ──────────────────────────────────────────────────────────────────────────────
-MODELS = [
-    # ── Permanent slot (:11435) ──────────────────────────────────────────────
+PERMANENT_MODELS = [
     {
         "repo_id":   "unsloth/Qwen3.5-2B-GGUF",
         "filename":  "Qwen3.5-2B-IQ4_NL.gguf",
@@ -58,72 +74,48 @@ MODELS = [
         "slot":      "permanent",
         "notes":     "Autocomplete model — ~1.65 GB VRAM",
     },
-
-    # ── Swappable slot (:11434) ──────────────────────────────────────────────
-    {
-        "repo_id":   "unsloth/gemma-4-26B-A4B-it-GGUF",
-        "filename":  "gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf",
-        "local_dir": "unsloth/gemma-4-26B-A4B-it-GGUF",
-        "slot":      "swappable",
-        "notes":     "openwebui chat — ~17.6 GB VRAM",
-    },
-    # {
-    #     "repo_id":   "unsloth/Qwen3.5-35B-A3B-GGUF",
-    #     "filename":  "Qwen3.5-35B-A3B-UD-IQ4_NL.gguf",
-    #     "local_dir": "unsloth/Qwen3.5-35B-A3B-GGUF",
-    #     "slot":      "swappable",
-    #     "notes":     "legacy — ~17.8 GB VRAM",
-    # },
-    {
-        "repo_id":   "unsloth/Qwen3.6-27B-GGUF",
-        "filename":  "Qwen3.6-27B-Q4_K_M.gguf",
-        "local_dir": "unsloth/Qwen3.6-27B-GGUF",
-        "slot":      "swappable",
-        "notes":     "Brain (coding assistant) — ~16.8 GB VRAM",
-    },
-    {
-        "repo_id":   "DavidAU/Qwen3.6-27B-Heretic-Uncensored-FINETUNE-NEO-CODE-Di-IMatrix-MAX-GGUF",
-        "filename":  "Qwen3.6-27B-NEO-CODE-HERE-2T-OT-Q4_K_M.gguf",
-        "local_dir": "DavidAU/Qwen3.6-27B-Heretic-Uncensored-FINETUNE-NEO-CODE-Di-IMatrix-MAX-GGUF",
-        "slot":      "swappable",
-        "notes":     "Brain (coding assistant uncensored) — ~16.9 GB VRAM",
-    },
-    {
-        "repo_id":   "unsloth/gemma-4-31B-it-GGUF",
-        "filename":  "gemma-4-31B-it-Q4_K_M.gguf",
-        "local_dir": "unsloth/gemma-4-31B-it-GGUF",
-        "slot":      "swappable",
-        "notes":     "Gemma Brain (coding assistant) — ~18.3 GB VRAM",
-    },
-    {
-        "repo_id":   "unsloth/Qwen3.6-35B-A3B-GGUF",
-        "filename":  "Qwen3.6-35B-A3B-UD-IQ4_NL.gguf",
-        "local_dir": "unsloth/Qwen3.6-35B-A3B-GGUF",
-        "slot":      "swappable",
-        "notes":     "Brain 2.0 (coding assistant) + openwebui chat (shared GGUF, different params) — ~17.8 GB VRAM",
-    },
-    {
-        "repo_id":   "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF",
-        "filename":  "Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf",
-        "local_dir": "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF",
-        "slot":      "swappable",
-        "notes":     "Agent (coding assistant)— ~17.8 GB VRAM",
-    },
-    {
-        "repo_id":   "HauhauCS/Qwen3.5-35B-A3B-Uncensored-HauhauCS-Aggressive",
-        "filename":  "Qwen3.5-35B-A3B-Uncensored-HauhauCS-Aggressive-IQ4_XS.gguf",
-        "local_dir": "HauhauCS/Qwen3.5-35B-A3B-Uncensored",
-        "slot":      "swappable",
-        "notes":     "Mimic personas + image captioning — ~18 GB VRAM (shared GGUF)",
-    },
-    # {
-    #     "repo_id":   "unsloth/gemma-3-12b-it-GGUF",
-    #     "filename":  "gemma-3-12b-it-UD-Q8_K_XL.gguf",
-    #     "local_dir": "unsloth/gemma-3-12b-it-GGUF",
-    #     "slot":      "swappable",
-    #     "notes":     "Lore assistant — ~14.4 GB VRAM",
-    # },
 ]
+
+# Cases where a GGUF's on-disk <publisher>/<repo> path (as used in models.ini
+# and MODELS_DIR) doesn't match its actual HuggingFace repo id.
+HF_REPO_OVERRIDES: dict[str, str] = {
+    "HauhauCS/Qwen3.5-35B-A3B-Uncensored": "HauhauCS/Qwen3.5-35B-A3B-Uncensored-HauhauCS-Aggressive",
+}
+
+
+def load_swappable_models(models_ini_path: Path) -> list[dict]:
+    """
+    Derive the swappable-slot download list from models.ini's active sections.
+    Commented-out (`;`-prefixed) sections are invisible to configparser and are
+    correctly skipped. De-duplicates by resolved GGUF path — several aliases
+    share a file (e.g. brain/chat-chinese, lore/chat-liberal).
+    """
+    parser = configparser.ConfigParser(interpolation=None)
+    parser.read(models_ini_path)
+
+    seen_paths: dict[str, dict] = {}
+    for section in parser.sections():
+        model_path = parser[section].get("model")
+        if not model_path:
+            continue
+        if model_path in seen_paths:
+            continue
+
+        # /srv/models/<publisher>/<repo>/<filename>.gguf
+        rel = Path(model_path).relative_to("/srv/models")
+        local_dir = str(rel.parent)
+        filename = rel.name
+        repo_id = HF_REPO_OVERRIDES.get(local_dir, local_dir)
+
+        seen_paths[model_path] = {
+            "repo_id":   repo_id,
+            "filename":  filename,
+            "local_dir": local_dir,
+            "slot":      "swappable",
+            "notes":     f"[{section}] and any alias sharing this GGUF",
+        }
+
+    return list(seen_paths.values())
 
 
 def sizeof_fmt(num_bytes: int) -> str:
@@ -179,11 +171,11 @@ def download_model(entry: dict, models_dir: Path, dry_run: bool, hf_token: str |
 
     except RepositoryNotFoundError:
         print(f"  ✗ ERROR: Repository '{entry['repo_id']}' not found.")
-        print(f"         Check the repo_id in scripts/download_models.py")
+        print(f"         Check HF_REPO_OVERRIDES in scripts/download_models.py")
         return False
     except EntryNotFoundError:
         print(f"  ✗ ERROR: File '{entry['filename']}' not found in '{entry['repo_id']}'.")
-        print(f"         Check the filename in scripts/download_models.py")
+        print(f"         Check the model= path in models.ini")
         return False
     except Exception as e:
         print(f"  ✗ ERROR: {e}")
@@ -200,6 +192,11 @@ def main() -> None:
         help="Root directory for model storage (default: /srv/models or $MODELS_DIR)",
     )
     parser.add_argument(
+        "--models-ini",
+        default=os.environ.get("MODELS_INI", str(MODELS_INI_PATH)),
+        help="Path to models.ini (default: repo root)",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print what would be downloaded without actually downloading",
@@ -213,21 +210,25 @@ def main() -> None:
     args = parser.parse_args()
 
     models_dir = Path(args.models_dir).resolve()
+    models_ini_path = Path(args.models_ini).resolve()
     hf_token = os.environ.get("HF_TOKEN")
 
     print(f"\n{'=' * 60}")
     print(f"  Local AI Server — Model Downloader")
     print(f"{'=' * 60}")
     print(f"  Models dir : {models_dir}")
+    print(f"  models.ini : {models_ini_path}")
     print(f"  HF token   : {'set' if hf_token else 'not set (public repos only)'}")
     if args.dry_run:
         print(f"  Mode       : DRY RUN — no files will be downloaded")
     if args.slot != "all":
         print(f"  Slot filter: {args.slot} only")
 
+    all_models = PERMANENT_MODELS + load_swappable_models(models_ini_path)
+
     # Filter by slot if requested
     models_to_download = [
-        m for m in MODELS
+        m for m in all_models
         if args.slot == "all" or m["slot"] == args.slot
     ]
 
