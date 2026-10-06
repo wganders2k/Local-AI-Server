@@ -453,8 +453,20 @@ services:
       # Logging out of grafana ends the authentik session too,
       # otherwise the next visit silently logs straight back in.
       - GF_AUTH_SIGNOUT_REDIRECT_URL=https://auth.wganderbox.ca/application/o/grafana/end-session/
+
+      # ── Trading bot ─────────────────────────────────────────
+      # Read-only db login for the provisioned trading-db datasource.
+      # Must match GRAFANA_DB_PASSWORD in the trading-bot stack's .env.
+      - TRADING_DB_GRAFANA_PASSWORD=${TRADING_DB_GRAFANA_PASSWORD}
     volumes:
       - grafana_data:/var/lib/grafana
+      # Trading-bot datasource + dashboard, versioned in that stack's
+      # repo. trading-db is reachable because it joins this network.
+      - /home/peacow/dockge/stacks/trading-bot/grafana/datasource.yaml:/etc/grafana/provisioning/datasources/trading-bot.yaml:ro
+      - /home/peacow/dockge/stacks/trading-bot/grafana/dashboards.yaml:/etc/grafana/provisioning/dashboards/trading-bot.yaml:ro
+      # Directory, not file: editors replace files on save, which a
+      # single-file bind mount would not follow.
+      - /home/peacow/dockge/stacks/trading-bot/grafana:/etc/grafana/dashboards/trading-bot:ro
 
   # ──────────────────────────────────────────────────────────
   # Named volumes
