@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from config import (
+    AGENT_CTX_COMPACT_PCT,
     AGENT_CTX_HARD_PCT,
     AGENT_CTX_SOFT_PCT,
     AGENT_MODEL,
@@ -34,74 +35,19 @@ from config import (
     AGENT_TEMPERATURE,
     LORE_FOLLOWUP_MAX_ROUNDS,
 )
+from lore.compaction import TOOL_CHARS_PER_TOKEN, compact_tool_rounds
 from lore.context_window import limit as ctx_limit
 from lore.metrics import AgentMetrics
 from lore.progress import ProgressReporter
 from lore.prompts import build_lore_followup_prompt, build_system_prompt
 from lore.research import _flatten_research_for_synthesis, render_research_blocks
 from lore.session import LoreSession
+from lore.streaming import stream_answer
 from lore.tools import TOOLS, execute_tool
 from proxy_client import ProxyClient, ProxyError
 from rag_client import RAGClient
 
 logger = logging.getLogger("mimic-bot.lore.agent")
-
-# How often the "generating final answer" status message is refreshed while the
-# synthesis streams. Discord allows roughly 5 edits per 5s on one message; the
-# point here is only to show the answer is still coming, so keep it well under.
-_SYNTHESIS_PROGRESS_INTERVAL = 10.0
-
-
-async def stream_answer(
-    proxy_client: ProxyClient,
-    model: str,
-    messages: list[dict],
-    *,
-    status: Optional[ProgressReporter] = None,
-    tools: Optional[list[dict]] = None,
-    enable_thinking: bool = True,
-) -> tuple[str, dict]:
-    """
-    Stream one completion, refreshing a status message as it arrives.
-
-    Streamed rather than buffered everywhere it is used, for two reasons. The
-    read timeout is a gap-between-reads, so on a buffered call it becomes a
-    deadline on the entire generation — a ~50k-token synthesis that prefills for
-    50s and then writes a long answer ran past it routinely. And dropping the
-    socket on a streamed request actually cancels the work upstream, instead of
-    leaving the backend to generate into nothing while holding the GPU.
-
-    Args:
-        tools: Pass the same tools as the surrounding calls even when the model
-            must not use them — see ProxyClient.chat_stream for why dropping
-            them cold-prefills the whole conversation.
-        enable_thinking: False for mechanical work (summarising, compression).
-
-    Returns:
-        (text, usage) — the joined completion, unstripped, and the backend's
-        usage dict (empty if it reported none).
-    """
-    usage: dict = {}
-    parts: list[str] = []
-    chars = 0
-    last_edit = time.monotonic()
-
-    async for token in proxy_client.chat_stream(
-        model,
-        messages,
-        usage_sink=usage,
-        tools=tools,
-        enable_thinking=enable_thinking,
-    ):
-        parts.append(token)
-        chars += len(token)
-        if status is not None and time.monotonic() - last_edit >= _SYNTHESIS_PROGRESS_INTERVAL:
-            last_edit = time.monotonic()
-            await status.generating(chars)
-
-    text = "".join(parts)
-    logger.info("Streamed %d chars in %d chunk(s)", len(text), len(parts))
-    return text, usage
 
 
 @dataclass
@@ -137,8 +83,14 @@ async def _run_tool_rounds(
     Drive tool-calling rounds until the model answers or the budget runs out.
 
     Shared by the opening /lore run and by thread follow-ups so there is one
-    implementation of round handling, tool dispatch, reasoning passthrough and
-    progress reporting.
+    implementation of round handling, tool dispatch, reasoning passthrough,
+    context guarding and progress reporting.
+
+    Context is checked after every round, before the next request is sent:
+    at AGENT_CTX_COMPACT_PCT the oldest half of the results is condensed, and if
+    that still leaves the next request at AGENT_CTX_HARD_PCT or more, searching
+    stops and the caller answers from what it has. Without this, a long run
+    grows ~10k tokens a round until the backend rejects the request outright.
 
     Args:
         messages: Conversation to extend. Mutated in place with the assistant
@@ -151,10 +103,11 @@ async def _run_tool_rounds(
     Returns:
         (direct_answer, tool_messages). ``direct_answer`` is the model's prose
         when it chose to answer rather than search again, or None if the round
-        budget was exhausted — in which case the caller must synthesise from
-        ``tool_messages``.
+        budget was exhausted or context ran short — in which case the caller
+        must synthesise from ``tool_messages``.
     """
     tool_messages: list[dict] = []
+    compactions = 0
 
     for round_num in range(max_rounds):
         metrics.rounds_executed += 1
@@ -205,6 +158,7 @@ async def _run_tool_rounds(
         if status:
             await status.searching(round_num + 1, max_rounds)
 
+        result_chars = 0
         for tc in tool_calls:
             function_name = tc.get("function", {}).get("name", "")
             raw_args = tc.get("function", {}).get("arguments", "{}")
@@ -224,6 +178,7 @@ async def _run_tool_rounds(
                 function_name, function_args, rag_client, metrics=metrics
             )
             logger.info("Tool %s returned %d chars", function_name, len(tool_result))
+            result_chars += len(tool_result)
 
             # The model's own reasoning rides along on the first tool call of
             # the round: dropping it left the model able to see *what* it had
@@ -249,6 +204,30 @@ async def _run_tool_rounds(
 
         if status:
             await status.analyzing(round_num + 1, max_rounds)
+
+        # The last usage report predates this round's results, so add them on.
+        limit = ctx_limit()
+        projected = metrics.context_used + result_chars // TOOL_CHARS_PER_TOKEN
+        if projected < AGENT_CTX_COMPACT_PCT * limit:
+            continue
+
+        compactions += 1
+        if status:
+            await status.condensing(round_num + 1, max_rounds)
+        logger.info(
+            "Next request projected at %s/%s (%.0f%%) — compacting research",
+            f"{projected:,}", f"{limit:,}", projected / limit * 100,
+        )
+        projected -= await compact_tool_rounds(
+            messages, tool_messages, proxy_client, metrics, compactions
+        )
+        if projected >= AGENT_CTX_HARD_PCT * limit:
+            logger.warning(
+                "Still projected at %.0f%% after compaction (>= %.0f%% hard limit) "
+                "— stopping search",
+                projected / limit * 100, AGENT_CTX_HARD_PCT * 100,
+            )
+            return None, tool_messages
 
     logger.warning("Max rounds (%d) reached — forcing final answer", max_rounds)
     return None, tool_messages
@@ -327,7 +306,9 @@ async def run_agent_loop(
         # role="tool" messages in context and the model kept imitating them,
         # emitting tool-call markup as its answer. See the helper for why that
         # markup reaches the user instead of being parsed out.
-        synthesis_messages = _flatten_research_for_synthesis(messages, user_question)
+        # From tool_messages rather than messages: it carries any research
+        # condensed mid-loop in a form the flattener recognises.
+        synthesis_messages = _flatten_research_for_synthesis(tool_messages, user_question)
         # No tools in this request either way — the synthesis prompt carries no
         # tool-calling pattern to continue, which is the whole point of
         # flattening it. See stream_answer() for why it is streamed.
