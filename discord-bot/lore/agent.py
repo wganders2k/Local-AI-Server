@@ -32,6 +32,7 @@ from config import (
     AGENT_MODEL,
     AGENT_MAX_ROUNDS,
     AGENT_MAX_ROUNDS_HARD_CAP,
+    AGENT_MAX_REPEATED_SEARCHES,
     AGENT_TEMPERATURE,
     LORE_FOLLOWUP_MAX_ROUNDS,
 )
@@ -40,7 +41,12 @@ from lore.context_window import limit as ctx_limit
 from lore.metrics import AgentMetrics
 from lore.progress import ProgressReporter
 from lore.prompts import build_lore_followup_prompt, build_system_prompt
-from lore.research import _flatten_research_for_synthesis, render_research_blocks
+from lore.research import (
+    SEARCH_NOTE_PREFIX,
+    _flatten_research_for_synthesis,
+    drop_seen_chunks,
+    render_research_blocks,
+)
 from lore.session import LoreSession
 from lore.streaming import stream_answer
 from lore.tools import TOOLS, execute_tool
@@ -78,6 +84,7 @@ async def _run_tool_rounds(
     max_rounds: int,
     status: Optional[ProgressReporter] = None,
     label: str = "Agent",
+    seen_keys: Optional[set[str]] = None,
 ) -> tuple[Optional[str], list[dict]]:
     """
     Drive tool-calling rounds until the model answers or the budget runs out.
@@ -85,6 +92,12 @@ async def _run_tool_rounds(
     Shared by the opening /lore run and by thread follow-ups so there is one
     implementation of round handling, tool dispatch, reasoning passthrough,
     context guarding and progress reporting.
+
+    Each result is stripped of chunks the conversation already holds before it
+    is appended, and an exact repeat of an earlier call is refused rather than
+    run — at temperature 0.1 a search that found nothing useful was reissued
+    verbatim for 17 rounds. After AGENT_MAX_REPEATED_SEARCHES refusals the loop
+    stops searching.
 
     Context is checked after every round, before the next request is sent:
     at AGENT_CTX_COMPACT_PCT the oldest half of the results is condensed, and if
@@ -99,15 +112,21 @@ async def _run_tool_rounds(
         max_rounds: Hard cap on rounds.
         status: Progress reporter, or None.
         label: Prefix for log lines, so the two callers are distinguishable.
+        seen_keys: chunk_key() of chunks already in ``messages`` from earlier
+            turns. Copied, not mutated.
 
     Returns:
         (direct_answer, tool_messages). ``direct_answer`` is the model's prose
         when it chose to answer rather than search again, or None if the round
-        budget was exhausted or context ran short — in which case the caller
-        must synthesise from ``tool_messages``.
+        budget was exhausted, context ran short or the model kept repeating
+        itself — in which case the caller must synthesise from
+        ``tool_messages``.
     """
     tool_messages: list[dict] = []
     compactions = 0
+    shown = set(seen_keys or ())
+    ran: dict[str, int] = {}  # call signature -> round it first ran in
+    repeats = 0
 
     for round_num in range(max_rounds):
         metrics.rounds_executed += 1
@@ -174,10 +193,28 @@ async def _run_tool_rounds(
                 function_args = {}
 
             metrics.total_tool_calls += 1
-            tool_result = await execute_tool(
-                function_name, function_args, rag_client, metrics=metrics
-            )
-            logger.info("Tool %s returned %d chars", function_name, len(tool_result))
+            signature = json.dumps([function_name, function_args], sort_keys=True)
+            if signature in ran:
+                repeats += 1
+                logger.warning(
+                    "Repeat of round %d's %s call — refused (%d/%d)",
+                    ran[signature], function_name, repeats, AGENT_MAX_REPEATED_SEARCHES,
+                )
+                tool_result = (
+                    f"{SEARCH_NOTE_PREFIX} You already ran this exact search in "
+                    f"round {ran[signature]}, and its results are above. Running it "
+                    "again returns the same thing. Change the wording, the tool or "
+                    "the scope (a channel or date range), or answer from what you have."
+                )
+            else:
+                ran[signature] = round_num + 1
+                raw = await execute_tool(
+                    function_name, function_args, rag_client, metrics=metrics
+                )
+                tool_result = drop_seen_chunks(raw, shown)
+                logger.info(
+                    "Tool %s returned %d chars, %d new", function_name, len(raw), len(tool_result),
+                )
             result_chars += len(tool_result)
 
             # The model's own reasoning rides along on the first tool call of
@@ -205,6 +242,12 @@ async def _run_tool_rounds(
         if status:
             await status.analyzing(round_num + 1, max_rounds)
 
+        if repeats >= AGENT_MAX_REPEATED_SEARCHES:
+            logger.warning(
+                "%d repeated search(es) refused — stopping search", repeats
+            )
+            return None, tool_messages
+
         # The last usage report predates this round's results, so add them on.
         limit = ctx_limit()
         projected = metrics.context_used + result_chars // TOOL_CHARS_PER_TOKEN
@@ -219,7 +262,8 @@ async def _run_tool_rounds(
             f"{projected:,}", f"{limit:,}", projected / limit * 100,
         )
         projected -= await compact_tool_rounds(
-            messages, tool_messages, proxy_client, metrics, compactions
+            messages, tool_messages, proxy_client, metrics, compactions,
+            shown_keys=shown,
         )
         if projected >= AGENT_CTX_HARD_PCT * limit:
             logger.warning(
@@ -471,7 +515,7 @@ async def run_lore_turn(
         work = session.build_messages(extra=extra)
         direct_answer, tool_messages = await _run_tool_rounds(
             work, proxy_client, rag_client, metrics, max_rounds,
-            status=status, label="Lore follow-up",
+            status=status, label="Lore follow-up", seen_keys=session.seen_keys,
         )
         if direct_answer:
             logger.info(

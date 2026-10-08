@@ -34,6 +34,58 @@ _RAG_CHUNK_SEPARATOR = "\n\n---\n\n"
 # conversation carries no tag.
 CONDENSED_KIND = "condensed"
 
+# Starts a note the tool loop writes into a result itself — a repeated search
+# refused, or excerpts omitted as already shown. Notes steer the model in the
+# moment; they are not research, so render_research_blocks() leaves them out.
+SEARCH_NOTE_PREFIX = "[Search note]"
+
+
+def split_chunks(result: str) -> list[str]:
+    """The retrieved chunks in one tool result, stripped, empties dropped."""
+    return [c.strip() for c in result.split(_RAG_CHUNK_SEPARATOR) if c.strip()]
+
+
+def drop_seen_chunks(result: str, seen: set[str]) -> str:
+    """
+    Strip chunks the conversation already holds from a fresh tool result.
+
+    Applied to each result before it is appended, never to one already in
+    context: earlier messages stay byte-identical, so the backend's prefix
+    cache survives. Searches overlap heavily — 289 of 460 chunks in one
+    25-round run were repeats — so this is most of what keeps a long run small.
+
+    Args:
+        seen: chunk_key() of every chunk already in context. Mutated in place
+            with the chunks kept.
+
+    Returns:
+        The result unchanged if nothing repeated; otherwise the new chunks plus
+        a note saying how many were omitted, or only a note if none were new.
+    """
+    chunks = split_chunks(result)
+    fresh: list[str] = []
+    for chunk in chunks:
+        key = chunk_key(chunk)
+        if key in seen:
+            continue
+        seen.add(key)
+        fresh.append(chunk)
+
+    dropped = len(chunks) - len(fresh)
+    if not dropped:
+        return result
+    if not fresh:
+        return (
+            f"{SEARCH_NOTE_PREFIX} All {len(chunks)} excerpt(s) this search "
+            "returned were already shown earlier in this conversation — it found "
+            "nothing new. Change the wording, the tool or the scope, or answer "
+            "from what you have."
+        )
+    return _RAG_CHUNK_SEPARATOR.join(fresh + [
+        f"{SEARCH_NOTE_PREFIX} {dropped} of {len(chunks)} excerpt(s) omitted — "
+        "already shown earlier in this conversation."
+    ])
+
 def _flatten_research_for_synthesis(
     messages: list[dict],
     user_question: str,
@@ -162,9 +214,8 @@ def render_research_blocks(
         label = search_labels.get(msg.get("tool_call_id", "")) or "(unlabelled search)"
 
         fresh: list[str] = []
-        for chunk in result.split(_RAG_CHUNK_SEPARATOR):
-            chunk = chunk.strip()
-            if not chunk:
+        for chunk in split_chunks(result):
+            if chunk.startswith(SEARCH_NOTE_PREFIX):
                 continue
             key = chunk_key(chunk)
             if key in keys:

@@ -137,7 +137,10 @@ async def test_exhausting_the_round_budget_falls_back_to_synthesis(fake_rag):
 
 async def test_max_rounds_is_hard_capped(fake_rag):
     fake_rag.retrieve_result = ("chunk", 1)
-    proxy = FakeProxy([tool_call()] * 30)
+    # Distinct queries, or the repeat guard would end the run first.
+    proxy = FakeProxy([
+        tool_call(args=json.dumps({"query": f"q{i}"})) for i in range(30)
+    ])
     result = await run_agent_loop(
         user_question="q", proxy_client=proxy, rag_client=fake_rag,
         status=RecordingStatus(), channel_names=[], max_rounds=9999,
@@ -281,3 +284,85 @@ async def test_still_too_full_after_compacting_stops_searching(fake_rag):
     assert result.ok
     assert result.metrics.rounds_executed == 1
     assert result.answer.strip() == "synthesised answer"
+
+
+# ---------------------------------------------------------------------------
+# Repeats
+# ---------------------------------------------------------------------------
+
+
+async def test_a_repeated_search_is_refused_not_rerun(fake_rag):
+    fake_rag.retrieve_result = ("chunk", 1)
+    proxy = RecordingProxy([tool_call_at(100, "a"), tool_call_at(100, "a"), final("ok")])
+
+    await run_agent_loop(
+        user_question="q", proxy_client=proxy, rag_client=fake_rag,
+        status=RecordingStatus(), channel_names=[],
+    )
+
+    assert len(fake_rag.calls) == 1
+    refusal = [m for m in proxy.tool_requests[-1] if m["role"] == "tool"][-1]
+    assert "already ran this exact search in round 1" in refusal["content"]
+
+
+async def test_repeating_itself_ends_the_search(fake_rag):
+    fake_rag.retrieve_result = ("chunk", 1)
+    # The loop that motivated this: one query, reissued until the budget ran out.
+    proxy = RecordingProxy([tool_call_at(100, "a")] * 25)
+
+    result = await run_agent_loop(
+        user_question="q", proxy_client=proxy, rag_client=fake_rag,
+        status=RecordingStatus(), channel_names=[], max_rounds=25,
+    )
+
+    assert result.metrics.rounds_executed == 3  # AGENT_MAX_REPEATED_SEARCHES = 2
+    assert result.answer.strip() == "synthesised answer"
+
+
+async def test_chunks_already_in_context_are_not_appended_again(fake_rag):
+    proxy = RecordingProxy([tool_call_at(100, "a"), tool_call_at(100, "b"), final("ok")])
+    first = True
+
+    async def retrieve(query, **kw):
+        nonlocal first
+        result = ("old", 1) if first else ("old\n\n---\n\nnew", 2)
+        first = False
+        return result
+
+    fake_rag.retrieve = retrieve
+    await run_agent_loop(
+        user_question="q", proxy_client=proxy, rag_client=fake_rag,
+        status=RecordingStatus(), channel_names=[],
+    )
+
+    results = [m["content"] for m in proxy.tool_requests[-1] if m["role"] == "tool"]
+    assert results[0] == "old"
+    assert results[1].startswith("new")
+    assert "1 of 2 excerpt(s) omitted" in results[1]
+    # The earlier result is untouched, so the cached prefix still matches.
+    assert proxy.tool_requests[-1][:4] == proxy.tool_requests[-2][:4]
+
+
+async def test_condensed_chunks_can_be_shown_again():
+    from lore.compaction import compact_tool_rounds
+    from lore.metrics import AgentMetrics
+    from lore.session import chunk_key
+
+    def pair(i, text):
+        return [
+            {"role": "assistant", "content": None, "tool_calls": [
+                {"id": i, "function": {"name": "search_discord_history",
+                                       "arguments": json.dumps({"query": i})}}]},
+            {"role": "tool", "tool_call_id": i, "content": text},
+        ]
+
+    messages = pair("a", "old") + pair("b", "kept")
+    tool_messages = list(messages)
+    shown = {chunk_key("old"), chunk_key("kept")}
+
+    await compact_tool_rounds(
+        messages, tool_messages, RecordingProxy([]), AgentMetrics(), 1,
+        shown_keys=shown,
+    )
+
+    assert shown == {chunk_key("kept")}

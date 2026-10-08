@@ -4,6 +4,8 @@ import json
 
 from lore.research import (
     CONDENSED_KIND,
+    SEARCH_NOTE_PREFIX,
+    drop_seen_chunks,
     _flatten_research_for_synthesis,
     render_research_blocks,
 )
@@ -112,3 +114,35 @@ def test_an_untagged_user_message_is_not_research():
     # plain user messages; only the tagged copy counts.
     msgs = [{"role": "user", "content": "the question"}]
     assert render_research_blocks(msgs) == ([], 0)
+
+
+SEP = "\n\n---\n\n"
+
+
+def test_a_result_with_nothing_seen_is_returned_unchanged():
+    seen: set[str] = set()
+    assert drop_seen_chunks("a" + SEP + "b", seen) == "a" + SEP + "b"
+    assert len(seen) == 2
+
+
+def test_seen_chunks_are_dropped_with_a_note():
+    seen: set[str] = set()
+    drop_seen_chunks("a", seen)
+    out = drop_seen_chunks("a" + SEP + "b", seen)
+    assert out.split(SEP)[0] == "b"
+    assert "1 of 2 excerpt(s) omitted" in out
+
+
+def test_a_result_with_nothing_new_becomes_only_a_note():
+    seen: set[str] = set()
+    drop_seen_chunks("a", seen)
+    assert drop_seen_chunks("a", seen).startswith(SEARCH_NOTE_PREFIX)
+
+
+def test_notes_are_not_rendered_as_research():
+    note = f"{SEARCH_NOTE_PREFIX} 1 of 2 excerpt(s) omitted"
+    msgs = [call("a", query="pigs"), result("a", "oink" + SEP + note),
+            call("b", query="pigs"), result("b", f"{SEARCH_NOTE_PREFIX} refused")]
+    blocks, _ = render_research_blocks(msgs)
+    assert len(blocks) == 1
+    assert SEARCH_NOTE_PREFIX not in blocks[0]
