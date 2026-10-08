@@ -22,8 +22,8 @@ from config import AGENT_CTX_COMPACT_PCT, AGENT_MODEL
 from lore.context_window import limit as ctx_limit
 from lore.metrics import AgentMetrics
 from lore.prompts import build_compaction_messages
-from lore.research import CONDENSED_KIND, render_research_blocks
-from lore.session import LoreSession
+from lore.research import CONDENSED_KIND, render_research_blocks, split_chunks
+from lore.session import LoreSession, chunk_key
 from lore.streaming import stream_answer
 from proxy_client import ProxyClient, ProxyError
 
@@ -154,6 +154,7 @@ async def compact_tool_rounds(
     proxy_client: ProxyClient,
     metrics: AgentMetrics,
     n: int,
+    shown_keys: Optional[set[str]] = None,
 ) -> int:
     """
     Condense the oldest half of a run's tool results, mid-loop.
@@ -168,6 +169,9 @@ async def compact_tool_rounds(
 
     Args:
         n: Which compaction this is within the run, for the summary's label.
+        shown_keys: The loop's record of chunks in context. The condensed
+            chunks are removed from it, so a later search that finds one again
+            shows it in full rather than calling it already shown.
 
     Returns:
         Estimated tokens reclaimed — 0 if nothing was changed.
@@ -200,6 +204,12 @@ async def compact_tool_rounds(
         if summary is None:
             return 0
         content = _condensed_content(n, "earlier searches from this run", summary)
+
+    if shown_keys is not None:
+        for m in victims:
+            if m.get("role") == "tool":
+                for chunk in split_chunks(m.get("content") or ""):
+                    shown_keys.discard(chunk_key(chunk))
 
     for target, tag in ((messages, {}), (tool_messages, {"kind": CONDENSED_KIND})):
         first = next(i for i, m in enumerate(target) if id(m) in victim_ids)
