@@ -74,6 +74,9 @@ RAG_ENABLED: bool = os.environ.get("RAG_ENABLED", "true").lower() == "true"
 AGENT_MODEL: str = "brain-dense-heretic"  # Qwen3.6-27B — tool-calling capable model
 AGENT_MAX_ROUNDS: int = 10        # Default max tool-call rounds before forcing a final answer
 AGENT_MAX_ROUNDS_HARD_CAP: int = 25  # Hard cap for user-specified rounds in /lore
+# Identical tool calls are refused rather than re-run; after this many refusals
+# in one run, searching stops and the answer is written from what was found.
+AGENT_MAX_REPEATED_SEARCHES: int = 2
 AGENT_TEMPERATURE: float = 0.1    # Low temperature for deterministic tool calling
 AGENT_TOP_K: int = 10             # Default chunks per tool call (higher than lore's 5)
 
