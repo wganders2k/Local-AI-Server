@@ -28,6 +28,12 @@ logger = logging.getLogger("mimic-bot.lore.research")
 # whole results that are byte-identical.
 _RAG_CHUNK_SEPARATOR = "\n\n---\n\n"
 
+# Tags a summary that lore.compaction put into a run's tool_messages in place of
+# the results it condensed. render_research_blocks() passes it through as a
+# block of its own. Never sent to the backend: the copy placed in the live
+# conversation carries no tag.
+CONDENSED_KIND = "condensed"
+
 def _flatten_research_for_synthesis(
     messages: list[dict],
     user_question: str,
@@ -94,7 +100,8 @@ def render_research_blocks(
 
     Args:
         messages: A conversation containing assistant/``tool_calls`` messages
-            and their matching ``role="tool"`` results.
+            and their matching ``role="tool"`` results, plus any CONDENSED_KIND
+            summaries, which are kept whole.
         seen_keys: Chunk identities already shown. Mutated in place, so a
             lore session can pass its own set and have a later turn skip
             material an earlier turn already put in the transcript. Pass None
@@ -144,6 +151,9 @@ def render_research_blocks(
 
     blocks: list[str] = []
     for msg in messages:
+        if msg.get("kind") == CONDENSED_KIND:
+            blocks.append(msg["content"])
+            continue
         if msg.get("role") != "tool":
             continue
         result = (msg.get("content") or "").strip()

@@ -5,6 +5,8 @@ This is the test the restructure was for: lore/ has no discord dependency, so
 the loop can be exercised without a gateway, a token, or a network.
 """
 
+import json
+
 import pytest
 
 from lore.agent import LoreRunResult, run_agent_loop, stream_answer
@@ -42,6 +44,7 @@ class RecordingStatus:
     async def thinking(self, r, m): self.events.append("thinking")
     async def searching(self, r, m): self.events.append("searching")
     async def analyzing(self, r, m): self.events.append("analyzing")
+    async def condensing(self, r, m): self.events.append("condensing")
     async def writing(self): self.events.append("writing")
     async def generating(self, chars=None): self.events.append("generating")
     async def complete(self, q): self.events.append("complete")
@@ -181,3 +184,100 @@ async def test_stream_answer_forwards_tools_to_keep_the_prompt_shape():
     proxy = FakeProxy([])
     await stream_answer(proxy, "model", [], tools=[{"a": 1}])
     assert proxy.tool_payloads == [[{"a": 1}]]
+
+
+# ---------------------------------------------------------------------------
+# Context guard
+# ---------------------------------------------------------------------------
+
+
+class RecordingProxy(FakeProxy):
+    """A FakeProxy that keeps every request and tells summaries apart."""
+
+    def __init__(self, turns):
+        super().__init__(turns, stream_text="synthesised answer")
+        self.tool_requests: list[list[dict]] = []
+        self.stream_requests: list[tuple[list[dict], bool]] = []
+
+    async def chat_with_tools(self, model, messages, tools, temperature):
+        self.tool_requests.append([dict(m) for m in messages])
+        return await super().chat_with_tools(model, messages, tools, temperature)
+
+    async def chat_stream(self, model, messages, usage_sink=None, tools=None,
+                          enable_thinking=True):
+        self.stream_requests.append((messages, enable_thinking))
+        # Compaction is the only call made with thinking off.
+        text = "the gist" if not enable_thinking else self._stream_text
+        if usage_sink is not None:
+            usage_sink.update({"prompt_tokens": 10, "completion_tokens": 4})
+        yield text
+
+
+def tool_call_at(prompt_tokens, call_id):
+    turn = tool_call(args=json.dumps({"query": call_id}))
+    turn["tool_calls"][0]["id"] = call_id
+    turn["usage"] = {"prompt_tokens": prompt_tokens, "completion_tokens": 20}
+    return turn
+
+
+async def test_nearing_the_limit_condenses_the_oldest_results(fake_rag):
+    fake_rag.retrieve_result = ("chunk", 1)
+    # The window is the 96k fallback: 75k lands past the 75% compaction mark.
+    proxy = RecordingProxy([
+        tool_call_at(100, "a"), tool_call_at(200, "b"), tool_call_at(75_000, "c"),
+        final("done"),
+    ])
+    status = RecordingStatus()
+
+    result = await run_agent_loop(
+        user_question="q", proxy_client=proxy, rag_client=fake_rag,
+        status=status, channel_names=[],
+    )
+
+    assert result.answer == "done"
+    assert status.events.count("condensing") == 1
+    compactions = [m for m, thinking in proxy.stream_requests if not thinking]
+    assert len(compactions) == 1
+
+    sent = proxy.tool_requests[-1]
+    assert any(
+        m["role"] == "user" and m["content"].startswith("[Condensed research 1]")
+        for m in sent
+    )
+    # The oldest result went; the call that produced it went with it.
+    assert [m["tool_call_id"] for m in sent if m["role"] == "tool"] == ["b", "c"]
+    assert [m["tool_calls"][0]["id"] for m in sent if m.get("tool_calls")] == ["b", "c"]
+    # The tag that lets synthesis find the summary never reaches the backend.
+    assert all("kind" not in m for m in sent)
+    assert any(m.get("kind") == "condensed" for m in result.tool_messages)
+
+
+async def test_condensed_research_reaches_the_synthesis_prompt(fake_rag):
+    fake_rag.retrieve_result = ("chunk", 1)
+    proxy = RecordingProxy([
+        tool_call_at(100, "a"), tool_call_at(200, "b"), tool_call_at(75_000, "c"),
+    ])
+
+    await run_agent_loop(
+        user_question="q", proxy_client=proxy, rag_client=fake_rag,
+        status=RecordingStatus(), channel_names=[], max_rounds=3,
+    )
+
+    synthesis, thinking = proxy.stream_requests[-1]
+    assert thinking
+    assert "the gist" in synthesis[-1]["content"]
+
+
+async def test_still_too_full_after_compacting_stops_searching(fake_rag):
+    fake_rag.retrieve_result = ("chunk", 1)
+    # One result cannot be condensed, so 90k (94%) is still over the 85% line.
+    proxy = RecordingProxy([tool_call_at(90_000, "a")] + [tool_call()] * 5)
+
+    result = await run_agent_loop(
+        user_question="q", proxy_client=proxy, rag_client=fake_rag,
+        status=RecordingStatus(), channel_names=[],
+    )
+
+    assert result.ok
+    assert result.metrics.rounds_executed == 1
+    assert result.answer.strip() == "synthesised answer"

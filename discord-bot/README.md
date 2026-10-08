@@ -73,7 +73,8 @@ discord-bot/
 │   ├── prompts.py       #   assembles prompts from prompts/*.md
 │   ├── tools.py         #   tool schemas + the executor behind them
 │   ├── agent.py         #   the tool-calling loop
-│   ├── compaction.py    #   condensing a thread's oldest research
+│   ├── streaming.py     #   streaming one completion, with progress
+│   ├── compaction.py    #   condensing oldest research, mid-run or between turns
 │   ├── research.py      #   rendering tool results as plain text, dedup
 │   ├── session.py       #   LoreSession + its JSON store
 │   ├── metrics.py       #   timing and token accounting
