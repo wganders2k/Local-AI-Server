@@ -95,8 +95,10 @@ AGENT_CTX_LIMIT_FALLBACK: int = 96000
 
 # Fractions of the discovered context limit at which the agent changes behaviour.
 #   SOFT    — start telling the model what is left, so it can wind down searching
-#   COMPACT — collapse the oldest research into a summary to reclaim room
+#   COMPACT — collapse the oldest research into a summary to reclaim room,
+#             both between thread turns and between rounds of a single run
 #   HARD    — stop searching entirely and answer, whatever the model wants
+#             (a thread checks before a turn; a run checks after compacting)
 AGENT_CTX_SOFT_PCT: float = 0.70
 AGENT_CTX_COMPACT_PCT: float = 0.75
 AGENT_CTX_HARD_PCT: float = 0.85

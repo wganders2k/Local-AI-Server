@@ -2,7 +2,11 @@
 
 import json
 
-from lore.research import _flatten_research_for_synthesis, render_research_blocks
+from lore.research import (
+    CONDENSED_KIND,
+    _flatten_research_for_synthesis,
+    render_research_blocks,
+)
 
 
 def call(tool_call_id, name="search_discord_history", **args):
@@ -92,3 +96,19 @@ def test_flattening_produces_a_two_message_exchange():
 def test_flattening_with_no_results_says_so_plainly():
     flat = _flatten_research_for_synthesis([], "q")
     assert "could not find" in flat[1]["content"]
+
+
+def test_condensed_research_passes_through_in_order():
+    condensed = {"role": "user", "content": "[Condensed research 1] gist",
+                 "kind": CONDENSED_KIND}
+    msgs = [condensed, call("b", query="cows"), result("b", "moo")]
+    blocks, _ = render_research_blocks(msgs)
+    assert blocks[0] == "[Condensed research 1] gist"
+    assert blocks[1].startswith('[Search 2] "cows"')
+
+
+def test_an_untagged_user_message_is_not_research():
+    # The live conversation holds the question and any condensed summary as
+    # plain user messages; only the tagged copy counts.
+    msgs = [{"role": "user", "content": "the question"}]
+    assert render_research_blocks(msgs) == ([], 0)
