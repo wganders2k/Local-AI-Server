@@ -132,7 +132,7 @@ help:
 up:
 	docker compose up -d
 
-## Stop and remove containers (named volumes are preserved)
+## Stop and remove containers (data in /opt/appdata is preserved)
 down:
 	docker compose down
 
@@ -253,13 +253,13 @@ shell-rag:
 rag-ingest:
 	docker compose exec rag-service python -c "import httpx; r = httpx.post('http://localhost:8001/ingest', json={}, timeout=600); print(r.text)"
 
-## Show ChromaDB collection stats & volume path
+## Show ChromaDB collection stats & data path
 rag-status:
-	@echo "=== ChromaDB volume path ==="
-	@docker volume inspect local-ai-server_chroma_data --format '{{.Mountpoint}}'
+	@echo "=== ChromaDB data path ==="
+	@echo /opt/appdata/chroma
 	@echo ""
 	@echo "=== Data directory contents ==="
-	@ls -la $$(docker volume inspect local-ai-server_chroma_data --format '{{.Mountpoint}}')/
+	@ls -la /opt/appdata/chroma/
 	@echo ""
 	@echo "=== Collection document counts ==="
 	@docker compose exec rag-service python -c "import chromadb; client = chromadb.HttpClient(host='chromadb', port='8000'); cols = client.list_collections(); [print(f'  {c.name}: {client.get_collection(c.name).count()} documents') for c in cols]" 2>/dev/null || echo "  (RAG/ChromaDB not reachable)"
@@ -422,15 +422,14 @@ gpu-status:
 
 # ── Destructive ────────────────────────────────────────────
 
-## ⚠️  DESTRUCTIVE: Stop everything and remove ALL named volumes.
-## This wipes Open WebUI data, ChromaDB data, and training state.
-## GGUF model files in /srv/models are NOT deleted — they are bind-mounted,
-## not stored in named volumes. Re-run `make models-download` is NOT needed.
-## You will need to re-ingest lore data afterwards.
+## ⚠️  DESTRUCTIVE: Stop everything and remove containers and anonymous volumes.
+## Open WebUI and ChromaDB data are bind mounts under /opt/appdata
+## (open-webui, chroma) since 2026-11-04, so this no longer wipes them;
+## delete those directories by hand for a true reset (then re-ingest lore).
+## GGUF model files in /srv/models are bind-mounted and are NOT deleted.
 nuke:
-	@echo "⚠️  WARNING: This will delete ALL named volumes including"
-	@echo "   Open WebUI data and ChromaDB lore data."
-	@echo "   GGUF model files in /srv/models are preserved."
+	@echo "⚠️  WARNING: This will remove all containers and anonymous volumes."
+	@echo "   /opt/appdata/{open-webui,chroma} and /srv/models are preserved."
 	@echo "   Press Ctrl+C within 5 seconds to cancel..."
 	@sleep 5
 	docker compose down -v

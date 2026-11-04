@@ -102,7 +102,7 @@ Two models serve this area, and the split is deliberate:
 │                               └───────────────────────│ worker       │ │
 │                                                       └──────────────┘ │
 │   CPU-only: rag-service ─▶ chromadb    history-service ─▶ DCE          │
-│   Observability: prometheus :9091 ─▶ grafana :3002                     │
+│   Observability: proxy /metrics ─▶ host monitoring stack (Grafana)     │
 └────────────────────────────────────────────────────────────────────────┘
         ▲                     ▲                    ▲
     VS Code /             Open WebUI           Discord Bot
@@ -251,8 +251,6 @@ See [`docker-compose.yml`](docker-compose.yml) for full definitions.
 | `open-webui` | `ghcr.io/open-webui/open-webui:main` | `:3000` | — | SQLite built-in; authentik SSO |
 | `rag-service` | `./rag` | — | — | CPU-only |
 | `chromadb` | `chromadb/chroma:latest` | — | — | Vector store |
-| `prometheus` | `prom/prometheus:latest` | `:9091` | — | 9090 was taken |
-| `grafana` | `grafana/grafana:latest` | `:3002` | — | 3000/3001 taken; authentik SSO |
 | `docker-socket-proxy` | `tecnativa/docker-socket-proxy` | `127.0.0.1:2375` | — | Restricted Docker API |
 | `lora-trainer` | `./lora-training` | — | `managed` | Never auto-starts |
 | `discord-chat-exporter` | `tyrrrz/discordchatexporter` | — | `manual` | One-shot CLI |
@@ -261,7 +259,7 @@ See [`docker-compose.yml`](docker-compose.yml) for full definitions.
 
 **Model files** live on the host at `MODELS_DIR` (default `/srv/models`) and are bind-mounted read-only into both llama-server containers. They are not in named volumes, so `make nuke` does not delete downloaded weights.
 
-**Absolute host paths.** Several configs are bind-mounted by absolute path under `/home/peacow/local-ai-server` (`models.ini`, `arbiter/jobs.yaml`, `prometheus.yml`, `dce-compose.yml`). Deploying elsewhere means editing those.
+**Absolute host paths.** Several configs are bind-mounted by absolute path under `/home/peacow/local-ai-server` (`models.ini`, `arbiter/jobs.yaml`, `dce-compose.yml`). Deploying elsewhere means editing those.
 
 ### 7.1 Surviving driver upgrades
 
@@ -440,7 +438,7 @@ make train-submit CONFIG=configs/smoke.yaml
 
 ## 11. Observability
 
-Prometheus (`:9091`) scrapes the proxy and a glances exporter every 5s; Grafana (`:3002`) visualises. This replaced an in-proxy job-history store, whose endpoints remain as `[]` stubs.
+A separate host-wide monitoring stack (Prometheus + Grafana on `:3002`) scrapes the proxy's `/metrics` every 5s. This replaced an in-proxy job-history store, whose endpoints remain as `[]` stubs.
 
 Proxy metrics: `proxy_requests_total{model,status}`, `proxy_active_requests`, `proxy_tokens_total{model,token_type}`, `proxy_queue_depth`, `proxy_request_duration_seconds`, `proxy_current_model_info{model}`, `proxy_model_age_seconds`, `proxy_llm_requests_inflight`, `proxy_llm_idle_seconds`.
 
