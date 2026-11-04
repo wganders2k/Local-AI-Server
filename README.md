@@ -30,7 +30,7 @@ One card, several tenants. The proxy owns *which model answers a request*; the a
 │  └─────────────┘  └──────────────────────┘           └──────────────┘  │
 │                                                                        │
 │   CPU-only: rag-service ─▶ chromadb   history-service ─▶ DCE           │
-│   Observability: prometheus :9091 ─▶ grafana :3002                     │
+│   Observability: proxy /metrics ─▶ host monitoring stack (Grafana)     │
 └────────────────────────────────────────────────────────────────────────┘
         ▲                     ▲                    ▲
     VS Code /             Open WebUI           Discord Bot
@@ -71,7 +71,6 @@ local-ai-server/
 ├── docker-compose.yml      # All services
 ├── Makefile                # Common server operations (make help)
 ├── models.ini              # llama-server presets for the swappable slot
-├── prometheus.yml          # Scrape config
 ├── dce-compose.yml         # One-shot DiscordChatExporter definition
 ├── .env.example            # Environment template — copy to .env
 │
@@ -89,7 +88,7 @@ local-ai-server/
 └── CONVENTIONS.md          # Repo layout and code conventions
 ```
 
-GGUF files live on the host at `$MODELS_DIR/<publisher>/<model>/file.gguf` (default `/srv/models`) and are bind-mounted read-only. They are not in a named volume, so `make nuke` does not touch them.
+GGUF files live on the host at `$MODELS_DIR/<publisher>/<model>/file.gguf` (default `/srv/models`) and are bind-mounted read-only. `make nuke` does not touch them, nor Open WebUI/ChromaDB data in `/opt/appdata`.
 
 ## Quick Start
 
@@ -101,9 +100,9 @@ cd Local-AI-Server
 cp .env.example .env
 ```
 
-Set at minimum `DISCORD_TOKEN` and `DISCORD_GUILD_ID`. If you run Open WebUI or Grafana behind authentik SSO, also set `OPENWEBUI_CLIENT_ID` / `OPENWEBUI_CLIENT_SECRET`, `GRAFANA_CLIENT_ID` / `GRAFANA_CLIENT_SECRET`, and `GRAFANA_ADMIN_PASSWORD` — these are read by `docker-compose.yml` but are **not yet listed in `.env.example`**.
+Set at minimum `DISCORD_TOKEN` and `DISCORD_GUILD_ID`. If you run Open WebUI behind authentik SSO, also set `OPENWEBUI_CLIENT_ID` / `OPENWEBUI_CLIENT_SECRET` — these are read by `docker-compose.yml` but are **not yet listed in `.env.example`**.
 
-The compose file bind-mounts several configs by absolute path under `/home/peacow/local-ai-server` (`models.ini`, `arbiter/jobs.yaml`, `prometheus.yml`, `dce-compose.yml`). Deploying elsewhere means editing those paths.
+The compose file bind-mounts several configs by absolute path under `/home/peacow/local-ai-server` (`models.ini`, `arbiter/jobs.yaml`, `dce-compose.yml`). Deploying elsewhere means editing those paths.
 
 ### 2. Download model files
 
@@ -155,7 +154,7 @@ The permanent slot currently serves `qwen2.5-coder-1.5b-q8_0` (~1.65 GB VRAM); t
 | `make dce-evaluate` (alias `history-refresh`) | Trigger channel evaluation + targeted exports |
 | `make dce-export-full` / `dce-export-guild` / `dce-export-channel` | Manual DCE exports |
 | `make enable-autocomplete` / `disable-autocomplete` / `status-autocomplete` | Permanent-slot toggle |
-| `make nuke` | ⚠️ Wipe all named volumes (GGUFs in `$MODELS_DIR` survive) |
+| `make nuke` | ⚠️ Remove containers + anonymous volumes (`/opt/appdata` and `$MODELS_DIR` survive) |
 
 ## Services
 
@@ -170,8 +169,6 @@ The permanent slot currently serves `qwen2.5-coder-1.5b-q8_0` (~1.65 GB VRAM); t
 | `open-webui` | `:3000` | — | Chat UI (authentik SSO; `chat.wganderbox.ca`) |
 | `rag-service` | — | — | Ingest + retrieval, CPU-only |
 | `chromadb` | — | — | Vector store |
-| `prometheus` | `:9091` | — | Scrapes the proxy and glances |
-| `grafana` | `:3002` | — | Dashboards (authentik SSO; `grafana.wganderbox.ca`) |
 | `docker-socket-proxy` | `127.0.0.1:2375` | — | Restricted Docker API for arbiter + history-service |
 | `lora-trainer` | — | `managed` | Preemptible QLoRA trainer |
 | `discord-chat-exporter` | — | `manual` | One-shot export CLI |
@@ -266,7 +263,7 @@ Per-persona mimic training is not built. `configs/smoke.yaml` (Qwen3-0.6B) exist
 
 ## Monitoring
 
-Prometheus (`:9091`) scrapes `proxy:11436/metrics` and a glances exporter every 5s; Grafana is on `:3002`. The proxy exports request counts, token counts, queue depth, request duration, in-flight requests, idle seconds, and current-model/model-age gauges. GPU metrics come from the arbiter — it is the only component that reads the card, so there is one answer rather than two.
+Prometheus and Grafana are not part of this stack: they run in a separate, host-wide monitoring stack, which scrapes the proxy's `/metrics` on `:11436` every 5s (Grafana on `:3002`, `grafana.wganderbox.ca`). The proxy exports request counts, token counts, queue depth, request duration, in-flight requests, idle seconds, and current-model/model-age gauges. GPU metrics come from the arbiter — it is the only component that reads the card, so there is one answer rather than two.
 
 ## Boot
 

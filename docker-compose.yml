@@ -262,7 +262,9 @@ services:
       proxy:
         condition: service_healthy
     volumes:
-      - open_webui_data:/app/backend/data
+      # Bind mount (was named volume open_webui_data until 2026-11-04) so all
+      # app state lives under /opt/appdata, where the nightly backup expects it.
+      - /opt/appdata/open-webui:/app/backend/data
     environment:
       - OPENAI_API_BASE_URL=http://proxy:11436/v1
       - OPENAI_API_KEY=local
@@ -325,7 +327,8 @@ services:
     image: chromadb/chroma:latest
     restart: unless-stopped
     volumes:
-      - chroma_data:/data
+      # Bind mount (was named volume chroma_data until 2026-11-04).
+      - /opt/appdata/chroma:/data
 
   # ──────────────────────────────────────────────────────────
   # DiscordChatExporter — CLI-only, run via `docker compose run`
@@ -405,80 +408,17 @@ services:
       - /home/peacow/local-ai-server/dce-compose.yml:/etc/dce-compose.yml:ro  # DCE compose config
 
   # ──────────────────────────────────────────────────────────
-  # Prometheus
-  # Scrapes /metrics endpoint from the proxy service.
-  # Exposed on port 9091 (9090 was already allocated).
+  # Prometheus + Grafana moved to the dockge "monitoring" stack
+  # on 2026-11-04 (server-wide, not LLM-specific). Prometheus
+  # scrapes the proxy at 192.168.2.55:11436/metrics; Grafana is
+  # still on :3002. Config: ~/server-ops/monitoring (private).
   # ──────────────────────────────────────────────────────────
-  prometheus:
-    image: prom/prometheus:latest
-    restart: unless-stopped
-    volumes:
-      - /home/peacow/local-ai-server/prometheus.yml:/etc/prometheus/prometheus.yml
-    ports:
-      - "9091:9090"
 
   # ──────────────────────────────────────────────────────────
-  # Grafana
-  # Visualization layer for Prometheus metrics.
-  # Exposed on port 3002 (3000 is used by Open WebUI, 3001 was already allocated).
-  # Default login: admin / admin
+  # Persistent data
+  # No named volumes since 2026-11-04: Open WebUI and ChromaDB
+  # state are bind mounts under /opt/appdata (open-webui, chroma),
+  # GGUF model files live at MODELS_DIR (default: /srv/models),
+  # bind-mounted read-only. `make nuke` touches none of these.
   # ──────────────────────────────────────────────────────────
-  grafana:
-    image: grafana/grafana:latest
-    restart: unless-stopped
-    ports:
-      - "3002:3000"
-    environment:
-      # Break-glass local admin. Was "admin" on a hostname reachable
-      # from the internet; now a generated value in .env. Normal
-      # access is SSO — this is only for when authentik is down.
-      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}
-      # Grafana builds the OAuth redirect from this, so it must be
-      # the public URL rather than the container's own address.
-      - GF_SERVER_ROOT_URL=https://grafana.wganderbox.ca
-
-      # ── SSO (authentik) ─────────────────────────────────────
-      - GF_AUTH_GENERIC_OAUTH_ENABLED=true
-      - GF_AUTH_GENERIC_OAUTH_NAME=authentik
-      - GF_AUTH_GENERIC_OAUTH_CLIENT_ID=${GRAFANA_CLIENT_ID}
-      - GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET=${GRAFANA_CLIENT_SECRET}
-      - GF_AUTH_GENERIC_OAUTH_SCOPES=openid email profile
-      - GF_AUTH_GENERIC_OAUTH_USE_PKCE=true
-      - GF_AUTH_GENERIC_OAUTH_AUTH_URL=https://auth.wganderbox.ca/application/o/authorize/
-      - GF_AUTH_GENERIC_OAUTH_TOKEN_URL=https://auth.wganderbox.ca/application/o/token/
-      - GF_AUTH_GENERIC_OAUTH_API_URL=https://auth.wganderbox.ca/application/o/userinfo/
-      # Membership of the authentik group "grafana-admins" grants
-      # Admin; everyone else who can reach the app gets Viewer.
-      - GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_PATH=contains(groups[*], 'grafana-admins') && 'Admin' || 'Viewer'
-      # Logging out of grafana ends the authentik session too,
-      # otherwise the next visit silently logs straight back in.
-      - GF_AUTH_SIGNOUT_REDIRECT_URL=https://auth.wganderbox.ca/application/o/grafana/end-session/
-
-      # ── Trading bot ─────────────────────────────────────────
-      # Read-only db login for the provisioned trading-db datasource.
-      # Must match GRAFANA_DB_PASSWORD in the trading-bot stack's .env.
-      - TRADING_DB_GRAFANA_PASSWORD=${TRADING_DB_GRAFANA_PASSWORD}
-    volumes:
-      - grafana_data:/var/lib/grafana
-      # Trading-bot datasource + dashboard, versioned in that stack's
-      # repo. trading-db is reachable because it joins this network.
-      - /home/peacow/dockge/stacks/trading-bot/grafana/datasource.yaml:/etc/grafana/provisioning/datasources/trading-bot.yaml:ro
-      - /home/peacow/dockge/stacks/trading-bot/grafana/dashboards.yaml:/etc/grafana/provisioning/dashboards/trading-bot.yaml:ro
-      # Directory, not file: editors replace files on save, which a
-      # single-file bind mount would not follow.
-      - /home/peacow/dockge/stacks/trading-bot/grafana:/etc/grafana/dashboards/trading-bot:ro
-
-  # ──────────────────────────────────────────────────────────
-  # Named volumes
-  # All persistent data lives here. Survives container restarts
-  # and rebuilds. Use `make nuke` to wipe everything (destructive).
-  # Note: GGUF model files are NOT in a named volume — they live
-  # on the host at MODELS_DIR (default: /srv/models) and are bind-
-  # mounted read-only. This means `make nuke` does NOT delete
-  # downloaded model weights.
-  # ──────────────────────────────────────────────────────────
-volumes:
-  open_webui_data: null
-  chroma_data: null
-  grafana_data: null
 networks: {}
