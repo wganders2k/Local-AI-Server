@@ -32,6 +32,12 @@ _USER_MENTION_RE = re.compile(r"<@!?(\d+)>")
 _CHANNEL_MENTION_RE = re.compile(r"<#(\d+)>")
 _ROLE_MENTION_RE = re.compile(r"<@&\d+>")
 _CUSTOM_EMOJI_RE = re.compile(r"<a?:(\w+):\d+>")
+# build_dataset.replace_links: URLs become markers, long digit runs a placeholder,
+# so no snowflake reaches an adapter that was trained never to see one.
+_DISCORD_FILE_RE = re.compile(r"https?://(?:cdn\.discordapp\.com|media\.discordapp\.net)/\S+")
+_DISCORD_LINK_RE = re.compile(r"https?://(?:\w+\.)?discord(?:app)?\.com/channels/\S+")
+_URL_DOMAIN_RE = re.compile(r"https?://(?:www\.)?([^/\s?#:]+)\S*")
+_LONG_NUMBER_RE = re.compile(r"\d{15,}")
 
 
 def _read_json(path: str) -> Optional[dict]:
@@ -71,8 +77,12 @@ def normalise_message(
     channel_name_for_id: Callable[[str], str],
 ) -> str:
     """Raw Discord markup -> what training saw. `name_for_id` should already apply aliases."""
+    text = _DISCORD_FILE_RE.sub("[attachment]", text)
+    text = _DISCORD_LINK_RE.sub("[message link]", text)
+    text = _URL_DOMAIN_RE.sub(lambda m: f"[link: {m.group(1).lower()}]", text)
     text = _USER_MENTION_RE.sub(lambda m: "@" + name_for_id(m.group(1)), text)
     text = _CHANNEL_MENTION_RE.sub(lambda m: "#" + channel_name_for_id(m.group(1)), text)
     text = _ROLE_MENTION_RE.sub("@role", text)
     text = _CUSTOM_EMOJI_RE.sub(r":\1:", text)
+    text = _LONG_NUMBER_RE.sub("[long number]", text)
     return text.strip()
