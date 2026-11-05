@@ -64,7 +64,13 @@ jobs:
   # is simply nothing holding the lease. The arbiter has no notion of submission
   # and needs none, which is what makes "should this run?" a question it never
   # has to answer. Its predecessor started a run whenever free VRAM appeared.
+  #
+  # required_mb is the *peak* of the largest config that gets submitted — one
+  # number per job, not per config, so the smoke run waits for the same window.
+  # Measured 2026-11-04: Gemma 4 12B QLoRA at 1024 tokens, batch 1, holds
+  # 14303 MiB (nvidia-smi, including the CUDA context and allocator cache).
+  # 16000 is that plus headroom for the longest batches and eval passes.
   - name: lora-trainer
     kind: cooperative
     priority: -10
-    required_mb: 4096
+    required_mb: 16000

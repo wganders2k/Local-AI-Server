@@ -17,20 +17,19 @@ from datetime import datetime, timezone
 
 import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI
 
 from config import (
     DISCORD_GUILD_ID,
     DISCORD_TOKEN,
+    EXCLUDED_CHANNELS,
     HOST,
     IMAGE_CAPTION_ENABLED,
     IMAGE_CAPTION_WINDOW_END,
     IMAGE_CAPTION_WINDOW_START,
     PORT,
-    PROXY_URL,
 )
-from channel_state import load_state, reset_state
+from channel_state import reset_state
 from dce_orchestrator import evaluate_and_export
 from image_captioner import process_pending_batch
 from jsonl_store import get_message_count, get_all_user_ids, clear_all
@@ -200,6 +199,12 @@ async def reparse() -> dict:
     every JSON file found using the DCE parser, and appends new records
     to the per-user JSONL archive. Skips duplicates via message_id.
 
+    Messages already archived get the parser-owned fields (type, reference,
+    is_pinned, mentions) refreshed from the parse, so a parser change reaches
+    old records too — re-running this after one is the backfill. Nothing else
+    on an archived record is touched. Where a message appears in several
+    exports, the latest export wins.
+
     This endpoint does NOT call the Discord API or invoke DCE subprocesses.
     Use it to iterate on parser changes without waiting for fresh exports.
     """
@@ -207,7 +212,9 @@ async def reparse() -> dict:
 
     try:
         from dce_parser import parse_dce_export_directory
+        from dce_parser import PARSER_OWNED_FIELDS
         from jsonl_store import append_messages as _append_messages
+        from jsonl_store import refresh_fields as _refresh_fields
 
         raw_dir = os.path.join("/archive", "raw")
         if not os.path.isdir(raw_dir):
@@ -229,12 +236,15 @@ async def reparse() -> dict:
                 "directories_scanned": 0,
                 "total_records_parsed": 0,
                 "total_records_appended": 0,
+                "total_records_refreshed": 0,
                 "users_updated": 0,
             }
 
         total_parsed = 0
-        total_appended = 0
-        users_touched: set = set()
+        excluded = 0
+        # user_id -> message_id -> record. Gathered across every export before
+        # writing, so each user's file is rewritten at most once.
+        latest: dict = {}
 
         for dirname in export_dirs:
             dirpath = os.path.join(raw_dir, dirname)
@@ -243,18 +253,35 @@ async def reparse() -> dict:
             # Parse returns {user_id: [records]}
             user_records = await asyncio.to_thread(parse_dce_export_directory, dirpath)
             total_parsed += sum(len(recs) for recs in user_records.values())
-
             for uid, records in user_records.items():
-                if records:
-                    appended = await asyncio.to_thread(_append_messages, uid, records)
-                    total_appended += appended
-                    users_touched.add(uid)
+                by_id = latest.setdefault(uid, {})
+                for rec in records:
+                    # The raw exports predate some exclusions, so the rule
+                    # /evaluate applies before exporting is applied here too.
+                    if rec.get("channel_id") in EXCLUDED_CHANNELS or rec.get("channel_name") in EXCLUDED_CHANNELS:
+                        excluded += 1
+                        continue
+                    by_id[rec["message_id"]] = rec
+
+        total_appended = 0
+        total_refreshed = 0
+        users_touched: set = set()
+        for uid, by_id in latest.items():
+            records = sorted(by_id.values(), key=lambda r: (r.get("timestamp", ""), r["message_id"]))
+            appended = await asyncio.to_thread(_append_messages, uid, records)
+            refreshed = await asyncio.to_thread(_refresh_fields, uid, records, PARSER_OWNED_FIELDS)
+            total_appended += appended
+            total_refreshed += refreshed
+            if appended or refreshed:
+                users_touched.add(uid)
 
         return {
             "status": "complete",
             "directories_scanned": len(export_dirs),
             "total_records_parsed": total_parsed,
             "total_records_appended": total_appended,
+            "total_records_refreshed": total_refreshed,
+            "total_records_excluded": excluded,
             "users_updated": len(users_touched),
         }
 

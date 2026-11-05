@@ -123,15 +123,21 @@ train_worker.py     load, train, checkpoint, exit. Knows nothing about the GPU
                     lease and talks to nothing over the network
 arbiter.py          the GPU calls — acquire, release, wait_until_wanted
 checkpoints.py      COMPLETE-marker discovery and pruning
+build_dataset.py    archive -> one persona's train/eval JSONL (CPU, no lease)
+export_adapter.py   finished adapter -> GGUF LoRA for llama-server (CPU, no lease)
+sample_persona.py   held-out outputs side by side, or a recorded blind A/B
 configs/smoke.yaml  Qwen3-0.6B — validates the handover in minutes
-tests/              checkpoint safety under an unclean stop; refusal handling
+configs/mimic_gemma4_12b.yaml   the persona run, one copy per member
+tests/              checkpoint safety under an unclean stop; refusal handling;
+                    every dataset filter
 ```
 
 `requirements.txt` is pinned because this stack renames constructor arguments
-between minor releases (`torch_dtype` → `dtype`, `max_seq_length` → `max_length`)
-and `train_worker.py` passes both by name. The Dockerfile skips the pinned
-`torch` line — it comes from the CUDA base image, and installing it again would
-pull a second copy.
+between minor releases (`torch_dtype` → `dtype`, `max_seq_length` → `max_length`,
+`warmup_ratio` → a float `warmup_steps`) and `train_worker.py` passes them by
+name. Gemma 4 forced the jump to transformers 5.x / TRL 1.x; re-run the smoke
+config after any re-pin. The Dockerfile skips the pinned `torch` line — it comes
+from the CUDA base image, and installing it again would pull a second copy.
 
 ## The window this actually gets
 
@@ -170,18 +176,85 @@ sits at `Exited (0)` and stays there.
 
 ## Phase 2 — the mimic personas
 
-Not built. The harness is model-agnostic; the persona work is a config plus a
-merge step:
+**Decided** (2026-11-04): per-member adapters, with the members' agreement, on
+an abliterated **Gemma 4 12B** first. The 35B-A3B comes later, once the pipeline
+is proven on a model that fits with room to spare.
 
-- `configs/mimic.yaml` — QLoRA on the 35B-A3B base against the history-service
-  per-user JSONL. Turn `load_in_4bit` on and raise `required_mb` to ~16000 in
-  `arbiter/jobs.yaml`. Swap in Unsloth here, where the memory saving decides
-  whether the run fits at all. **Not approved** — training a model on per-user
-  message history has not been discussed as a decision, only inherited from an
-  earlier design sketch.
-- `merge.py` — merge the adapter, export GGUF, write a `[mimic_<user>]` section
-  into `models.ini`. None exist yet, despite `mimic_user1..6` already being
-  listed in `proxy/config.py`.
+```
+make train-fetch   MODEL=culturerevolt/gemma-4-12b-heretic-abliterated   # once
+make train-dataset USER_ID=<discord id> PERSONA=mimic_user1 NAME=<display name>
+make train-submit  CONFIG=configs/mimic_gemma4_12b.yaml
+make train-export  CONFIG=configs/mimic_gemma4_12b.yaml PERSONA=mimic_user1
+make train-sample  PERSONA=mimic_user1 MODELS="mimic-base mimic_user1"
+```
+
+None of these but `train-submit` asks for the GPU: they are one-off containers
+from the same image, safe beside live inference and beside a waiting run.
+
+### The data (Tier 3)
+
+`build_dataset.py` reassembles the per-author archive into channel timelines and
+emits one example per reply: the preceding turns (≤12, broken by a 30-minute
+silence) as a `[name]: text` user turn, the member's reply as the completion.
+TRL's prompt/completion format puts the loss on the reply only. The system
+prompt is rendered from `discord-bot/prompts/mimic_persona.md` — mounted, not
+copied — so the adapter trains on the prompt `/mimic` sends.
+
+Dropped as targets: attachment-only, link-only, under 8 characters, bare pings
+(under 8 characters once mentions are removed — identified ones from the
+archive's `mentions`, plus any whole message of the form `@…` that recurs, which
+catches role pings);
+all still kept as context. Also conversation openers with no context. Dropped
+everywhere: bot messages, `/` and `!` commands (on this server, overwhelmingly
+music-bot `!p`/`!play`), every message `type` but `Default` and `Reply` (pin
+events, thread creation, poll results — the archive keeps them, tagged),
+`EXCLUDED_CHANNELS` and the Makefile's `TRAIN_EXCLUDED_CHANNELS` (channels kept
+in the archive for lore but not trained on, e.g. #grant-chronicle). A member who
+has posted from several accounts is built from all of them:
+`USER_ID=<old id>,<new id>`.
+
+Mentions the archive could identify (its `mentions` field) render as "@name",
+using the same name as the speaker labels, so "[will]:" and "@will" read as one
+person. That name is the member's Discord handle unless
+`/archive/training/names.json` gives them an alias — a hand-filled
+`{user_id: {"alias": ...}}` file kept beside the data, not in the repo, because
+it holds real names. Blank aliases keep the handle. Emails, phone numbers and street addresses are scrubbed from
+both sides. **Captions never enter** — history-service marks them
+`caption_excluded_from_training`; an attachment shows up as `[attachment]`.
+The newest 5% is held out as eval, by time rather than at random, so
+near-duplicate neighbours cannot sit on both sides.
+
+Output lands in `/mnt/storage_cold/array/DiscordArchive/training/<persona>/`,
+keyed on the alias so committed configs never name a member, and on the archive
+disk rather than in the repo because it is real messages.
+
+### The base, and why the GGUF must match
+
+`culturerevolt/gemma-4-12b-heretic-abliterated` is trained on (BF16 safetensors,
+4-bit at load); the same author's Q4_K_M GGUF is what llama-server serves. A LoRA
+is a delta against specific weights: over any other base it loads without
+complaint and produces mush. The model is multimodal, so `target_modules` is a
+regex scoped to `language_model.layers` — a bare suffix list would also catch
+projections outside the text decoder.
+
+### Serving: adapters, not merges
+
+`export_adapter.py` runs llama.cpp's `convert_lora_to_gguf.py` (tag pinned in the
+Dockerfile) and writes `/srv/models/lora/<persona>-lora.gguf` — tens of MB. Each
+persona is a `models.ini` section pointing the shared base at its adapter, so six
+personas cost one base on disk, not six re-quantised models.
+
+### Judging a run
+
+Eval loss falls for a model that learns to hedge, so it is not the verdict.
+`sample_persona.py --blind` shows two models' replies to the same held-out
+conversations in shuffled order and logs your pick to
+`/home/peacow/lora-outputs/experiments.jsonl`. Change one variable per run
+against the baseline — data shape (context length, merge window, min length,
+system prompt or not), then learning rate/epochs, rank and target modules,
+rsLoRA/DoRA, dropout/NEFTune — each in its own config under
+`configs/experiments/` with its own `output_dir`. The config keys for all of
+these pass straight through `train_worker.py`.
 
 From the original design: 1–2 epochs, and always train from the fresh base
 checkpoint — never on top of a previously merged model, which compounds drift

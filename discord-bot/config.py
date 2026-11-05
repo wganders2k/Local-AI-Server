@@ -170,6 +170,7 @@ MIMIC_PERSONAS: Dict[str, str] = {
     "mimic_user4": "User4",
     "mimic_user5": "User5",
     "mimic_user6": "User6",
+    "mimic_user7": "User7",
 }
 
 # ──────────────────────────────────────────────────────────────
@@ -186,10 +187,15 @@ def get_mimic_system_prompt(persona: str) -> str:
     # keeps it that way if it ever gains one.
     from prompt_loader import render
 
+    from member_names import persona_display_name
+
+    # The name the adapter's training prompt was rendered with, so the served
+    # system prompt is the trained one. Falls back to the placeholder for a
+    # persona whose dataset has not been built.
     return render(
         "mimic_persona",
         persona=persona,
-        display_name=MIMIC_PERSONAS.get(persona, persona),
+        display_name=persona_display_name(persona) or MIMIC_PERSONAS.get(persona, persona),
     )
 
 

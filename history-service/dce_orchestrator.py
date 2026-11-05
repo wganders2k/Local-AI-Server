@@ -14,9 +14,6 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from config import (
-    ARCHIVE_RAW_DIR,
-    DISCORD_GUILD_ID,
-    DISCORD_TOKEN,
     EXCLUDED_CHANNELS,
 )
 from channel_state import (

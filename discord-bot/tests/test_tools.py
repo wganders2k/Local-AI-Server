@@ -6,7 +6,6 @@ decides what to do next, so a semantic miss has to read as "try something else"
 while an exact miss has to read as "this question is settled".
 """
 
-import pytest
 
 from lore.tools import HANDLERS, TOOLS, execute_tool
 from lore.metrics import AgentMetrics

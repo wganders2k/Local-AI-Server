@@ -5,15 +5,13 @@ Tests use the actual DCE output format (lowercase fields, top-level channel
 object, "messages" array) to ensure the parser handles real data correctly.
 """
 import json
-import os
-import tempfile
+
 import pytest
 
 from dce_parser import (
     parse_dce_message,
     _parse_attachments,
     _is_image,
-    _is_system_message,
     _extract_channel_info,
     parse_dce_export_file,
     parse_dce_export_directory,
@@ -81,12 +79,12 @@ class TestParseDCEMessage:
         assert record["is_bot"] is False
         assert "attachments" not in record
 
-    def test_parse_message_with_nickname(self):
-        """Test that nickname (display name) is preferred over plain name."""
+    def test_parse_message_ignores_nickname(self):
+        """Test that the global username wins over a server nickname, which changes over time."""
         raw = _build_message(username="pcow", nickname="Walter Hartwell White")
         record = parse_dce_message(raw, channel_id="111", channel_name="general")
         assert record is not None
-        assert record["username"] == "Walter Hartwell White"
+        assert record["username"] == "pcow"
 
     def test_parse_message_without_id(self):
         """Test that messages without id are skipped."""
@@ -131,17 +129,48 @@ class TestParseDCEMessage:
         record = parse_dce_message(raw, channel_id="111", channel_name="general")
         assert record is None
 
-    def test_system_message_type_skipped(self):
-        """Test that system message types (ThreadCreated, type 20) are skipped."""
-        raw = _build_message(msg_type="ThreadCreated")
+    @pytest.mark.parametrize("msg_type", ["ChannelPinnedMessage", "ThreadCreated", "Reply", "20", "46"])
+    def test_every_type_is_kept_and_recorded(self, msg_type):
+        """Tier 2 is unfiltered: system messages stay, tagged, for consumers to filter."""
+        raw = _build_message(msg_type=msg_type)
         record = parse_dce_message(raw, channel_id="111", channel_name="general")
-        assert record is None
+        assert record["type"] == msg_type
 
-    def test_interaction_confirmation_skipped(self):
-        """Test that interaction confirmation (type 20) is skipped."""
-        raw = _build_message(msg_type="20")
+    def test_numeric_type_recorded_as_string(self):
+        record = parse_dce_message(_build_message(msg_type=0), channel_id="111", channel_name="general")
+        assert record["type"] == "0"
+
+    def test_missing_type_is_default(self):
+        raw = _build_message()
+        del raw["type"]
         record = parse_dce_message(raw, channel_id="111", channel_name="general")
-        assert record is None
+        assert record["type"] == "Default"
+
+    def test_reply_reference_recorded(self):
+        raw = _build_message(msg_type="Reply")
+        raw["reference"] = {"type": "Default", "messageId": "55", "channelId": "111", "guildId": None}
+        record = parse_dce_message(raw, channel_id="111", channel_name="general")
+        assert record["reference"] == {"message_id": "55", "channel_id": "111", "type": "Default"}
+
+    def test_pin_event_points_at_the_pinned_message(self):
+        raw = _build_message(msg_type="ChannelPinnedMessage", content="Pinned a message.")
+        raw["reference"] = {"type": "Default", "messageId": "77", "channelId": "111", "guildId": None}
+        record = parse_dce_message(raw, channel_id="111", channel_name="general")
+        assert record["reference"]["message_id"] == "77"
+
+    def test_empty_reference_omitted(self):
+        raw = _build_message()
+        raw["reference"] = {"type": "Default", "messageId": None, "channelId": None, "guildId": None}
+        record = parse_dce_message(raw, channel_id="111", channel_name="general")
+        assert "reference" not in record
+
+    def test_pinned_flag_only_when_pinned(self):
+        pinned = _build_message()
+        pinned["isPinned"] = True
+        unpinned = _build_message()
+        unpinned["isPinned"] = False
+        assert parse_dce_message(pinned, "111", "general")["is_pinned"] is True
+        assert "is_pinned" not in parse_dce_message(unpinned, "111", "general")
 
     def test_default_message_type_kept(self):
         """Test that Default type messages are kept."""
@@ -155,31 +184,27 @@ class TestParseDCEMessage:
         record = parse_dce_message(raw, channel_id="111", channel_name="general")
         assert record is not None
 
+    def test_mentions_record_who_each_name_is(self):
+        raw = _build_message(content='@Bobby "Little Tables" Droptables you coming?')
+        raw["mentions"] = [
+            {"id": "42", "name": "bobby_tables", "nickname": 'Bobby "Little Tables" Droptables'},
+            {"id": "43", "name": "pcow", "nickname": None},  # reply ping, not in the text
+        ]
+        record = parse_dce_message(raw, channel_id="111", channel_name="general")
+        assert record["mentions"] == [
+            {"user_id": "42", "username": "bobby_tables", "display": 'Bobby "Little Tables" Droptables'},
+        ]
+        assert record["content"] == raw["content"]
+
+    def test_no_mentions_no_field(self):
+        record = parse_dce_message(_build_message(), channel_id="111", channel_name="general")
+        assert "mentions" not in record
+
     def test_type_zero_string_kept(self):
         """Test that type '0' (string) messages are kept."""
         raw = _build_message(msg_type="0")
         record = parse_dce_message(raw, channel_id="111", channel_name="general")
         assert record is not None
-
-
-# ──────────────────────────────────────────────────────────────
-# _is_system_message
-# ──────────────────────────────────────────────────────────────
-
-class TestIsSystemMessage:
-    def test_default_not_skipped(self):
-        assert _is_system_message("Default") is False
-        assert _is_system_message(0) is False
-        assert _is_system_message("0") is False
-        assert _is_system_message(None) is False
-
-    def test_system_types_skipped(self):
-        for t in ["1", "2", "3", "5", "6", "7", "8", "9", "10", "11", "12",
-                   "13", "14", "15", "16", "17", "19", "20", "21", "22"]:
-            assert _is_system_message(t) is True, f"Type {t} should be skipped"
-
-    def test_thread_created_skipped(self):
-        assert _is_system_message("ThreadCreated") is True
 
 
 # ──────────────────────────────────────────────────────────────
@@ -281,20 +306,19 @@ class TestParseDCEExportFile:
         assert len(records) == 1
         assert records[0]["message_id"] == "1"
 
-    def test_parse_file_filters_system_messages(self, tmp_path):
-        """Test that system message types are filtered from export files."""
+    def test_parse_file_keeps_system_messages_but_not_bots(self, tmp_path):
+        """System messages are kept and typed; bot messages are still dropped."""
         messages = [
             _build_message(msg_id="1", author_id="u1", username="user1", content="Normal msg"),
             _build_message(msg_id="2", author_id="u1", username="user1", content="Started a thread.", msg_type="ThreadCreated"),
-            _build_message(msg_id="3", author_id="bot", username="Bot", content="✅ Chat thread created", msg_type="20"),
+            _build_message(msg_id="3", author_id="bot", username="Bot", content="✅ Chat thread created", msg_type="20", is_bot=True),
         ]
         data = _build_dce_export(messages)
         filepath = tmp_path / "export.json"
         filepath.write_text(json.dumps(data))
 
         records = parse_dce_export_file(str(filepath))
-        assert len(records) == 1
-        assert records[0]["message_id"] == "1"
+        assert [(r["message_id"], r["type"]) for r in records] == [("1", "Default"), ("2", "ThreadCreated")]
 
     def test_parse_invalid_json(self, tmp_path):
         """Test parsing a file with invalid JSON."""

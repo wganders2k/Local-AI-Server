@@ -8,7 +8,6 @@ State persisted to /archive/state/channel_state.json.
 import json
 import logging
 import os
-from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from config import ARCHIVE_STATE_DIR

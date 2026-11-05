@@ -82,7 +82,7 @@ Bound to `127.0.0.1:11437`. No authentication.
 | `GET` | `/health` | Liveness |
 | `GET` | `/status` | Users in the archive and per-user message counts |
 | `POST` | `/evaluate` | Channel evaluation + targeted DCE exports (the main entry point) |
-| `POST` | `/reparse` | Rebuild Tier 2 from every existing Tier 1 export. No Discord API calls, no DCE. Use it to iterate on parser changes |
+| `POST` | `/reparse` | Rebuild Tier 2 from every existing Tier 1 export: append new messages, refresh parser-owned fields on archived ones. No Discord API calls, no DCE. Use it after any parser change |
 | `POST` | `/clear` | ⚠️ Deletes all per-user archives, all raw exports, and resets channel state |
 | `GET` | `/archive/{user_id}/count` | Message count for one user |
 
@@ -122,12 +122,37 @@ If you are working from an older `.env`, note that `RETRAIN_THRESHOLD`, `TRAININ
   "channel_id": "111222333444555666",
   "channel_name": "general",
   "timestamp": "2025-03-15T14:23:01Z",
-  "content": "lmao those aren't strats, that's just dying slower",
+  "content": "@Sir Lags-a-Lot (AFK) lmao those aren't strats, that's just dying slower",
+  "is_bot": false,
+  "type": "Reply",
+  "reference": {"message_id": "123456789012345600", "channel_id": "111222333444555666", "type": "Default"},
+  "is_pinned": true,
+  "mentions": [{"user_id": "222333444555666777", "username": "user1", "display": "Sir Lags-a-Lot (AFK)"}],
   "attachments": []
 }
 ```
 
-The archive is **unfiltered**: every message is retained regardless of length, content type, or quality.
+`content` is DCE's text as exported, unaltered — mentions included, rendered as
+"@" + nickname. The optional fields appear only when they say something:
+
+| field | meaning |
+|---|---|
+| `type` | DCE's message type: a name where DCE has one (`Default`, `Reply`, `ChannelPinnedMessage`, `ThreadCreated`), else Discord's number as a string (`"46"`). Always present |
+| `reference` | the message this one points at: what a reply answers, a forward's source (`type: "Forward"`), what a pin event pinned |
+| `is_pinned` | the message is pinned in its channel |
+| `mentions` | who each "@Name" in `content` is. `display` is the exact text after the "@". Nicknames hold spaces and punctuation, so this is the only reliable way to resolve one |
+| `attachments` | see Image Captioning |
+
+The archive is **unfiltered**: every human message is retained regardless of
+length, type or quality — system messages included (a pin event, "Pinned a
+message.", is kept with its `type` and a `reference` to the pinned message).
+Consumers filter by `type`. The one exception is bot-authored messages, which
+the parser drops.
+
+After a parser change, `POST /reparse` brings existing records up to date: it
+appends what is new and refreshes `type`, `reference`, `is_pinned` and
+`mentions` on what is already archived, leaving everything else — captions
+included — untouched.
 
 ### Channel state (`/archive/state/channel_state.json`)
 
@@ -189,7 +214,7 @@ Discord messages are full of memes and screenshots. Without captions that conten
 }
 ```
 
-**Status:** disabled by default, and the `image-caption` preset is currently commented out in [`models.ini`](../models.ini) — so setting the flag alone is not enough. Uncomment the preset first.
+**Status: non-functional** — see the note at the top of `image_captioner.py`. The parser never marks an attachment `pending` (it keys on a `content_type` DCE does not write), so even enabled it would find nothing; every archived attachment is `skipped`. It is also disabled by default, and the `image-caption` preset is currently commented out in [`models.ini`](../models.ini) — so setting the flag alone is not enough. Uncomment the preset first.
 
 ---
 

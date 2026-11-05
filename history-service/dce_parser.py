@@ -27,41 +27,22 @@ Raw DCE file structure:
 import json
 import logging
 import os
-from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 
-# Message types to skip — system artifacts that add no conversational value.
-# "Default" (0) = normal text message — always keep.
-# "20" = interaction confirmation (bot command result).
-# "ThreadCreated" = thread creation system message.
-# Other types: ChannelNameChange, ChannelIconChange, ChannelFollowAdded,
-#   PremiumPinnedMessage, GuildMemberJoin, etc. — all system noise.
-_SKIPPED_MESSAGE_TYPES = {
-    "1",      # RecipientAdd
-    "2",      # RecipientRemove
-    "3",      # Call
-    "5",      # ChannelNameChange
-    "6",      # ChannelIconChange
-    "7",      # ChannelPinAdd
-    "8",      # GuildMemberJoin
-    "9",      # UserPremiumSubscription (Nitro boost)
-    "10",     # UserPremiumSubscriptionTier1
-    "11",     # UserPremiumSubscriptionTier2
-    "12",     # UserPremiumSubscriptionTier3
-    "13",     # ChannelFollowAdded
-    "14",     # GuildDiscoveryDisqualified
-    "15",     # GuildDiscoveryRequalified
-    "16",     # GuildDiscoveryQualified
-    "17",     # GuildBansRemoved
-    "19",     # Reply (keep the content, but handled as Default)
-    "20",     # ChatThreadCreated (interaction confirmation)
-    "21",     # VoiceChannelStatusUpdate
-    "22",     # ApplicationCommand (slash command invocation)
-    "ThreadCreated",  # Thread creation system message
-}
+# Message types are recorded, never filtered. Tier 2 is the unfiltered archive,
+# and the system messages carry structure other consumers want: a pin event
+# names the message that was pinned, a thread creation names the thread. Each
+# consumer drops the types it has no use for (lora-training/build_dataset.py
+# keeps Default and Reply).
+#
+# DCE writes a type it has a name for as that name ("Default", "Reply",
+# "ChannelPinnedMessage", "ThreadCreated") and only an unnamed one as Discord's
+# number ("20", "46"), so a consumer matching types must expect both forms.
+# An earlier skip list here held only the numbers, and so let through nearly
+# everything it meant to drop.
 
 
 def _extract_channel_info(data: dict) -> Tuple[str, str]:
@@ -80,21 +61,6 @@ def _extract_channel_info(data: dict) -> Tuple[str, str]:
     return channel_id, channel_name
 
 
-def _is_system_message(msg_type) -> bool:
-    """
-    Check if a message type should be skipped as system noise.
-
-    Args:
-        msg_type: Message type string or number from DCE.
-
-    Returns:
-        True if the message should be skipped.
-    """
-    # "Default" or 0 = normal text — always keep
-    if msg_type is None or msg_type == "Default" or msg_type == 0 or msg_type == "0":
-        return False
-    return str(msg_type) in _SKIPPED_MESSAGE_TYPES
-
 
 def parse_dce_message(
     raw: dict,
@@ -110,7 +76,8 @@ def parse_dce_message(
 
     Internal schema fields:
         message_id, user_id, username, channel_id, channel_name,
-        timestamp, content, attachments, is_bot
+        timestamp, content, is_bot, type
+        and when present: attachments, reference, is_pinned, mentions
 
     Args:
         raw: Raw DCE message dict.
@@ -122,11 +89,6 @@ def parse_dce_message(
     """
     msg_id = raw.get("id")
     if not msg_id:
-        return None
-
-    # Skip system message types
-    msg_type = raw.get("type")
-    if _is_system_message(msg_type):
         return None
 
     author = raw.get("author", {}) or {}
@@ -159,13 +121,72 @@ def parse_dce_message(
         "timestamp": timestamp,
         "content": content,
         "is_bot": is_bot,
+        "type": "Default" if raw.get("type") is None else str(raw["type"]),
     }
 
     # Only include attachments field if there are any (backward compatible)
     if attachments:
         record["attachments"] = attachments
 
+    # Optional fields, present only when they say something (like attachments)
+    reference = parse_reference(raw.get("reference"))
+    if reference:
+        record["reference"] = reference
+
+    if raw.get("isPinned"):
+        record["is_pinned"] = True
+
+    mentions = parse_mentions(raw.get("mentions"), content)
+    if mentions:
+        record["mentions"] = mentions
+
     return record
+
+
+# What the parser owns on a record beyond its identity. POST /reparse refreshes
+# these on messages already archived, so a parser change reaches old records;
+# everything else (attachments, and the captions on them) is left alone.
+PARSER_OWNED_FIELDS = ("type", "reference", "is_pinned", "mentions")
+
+
+def parse_reference(raw_reference: Optional[dict]) -> Optional[dict]:
+    """
+    The message this one points at: the message a reply answers, a forward's
+    source, the message a pin event pinned. `type` is DCE's ("Default", or
+    "Forward" for a forward). Fields DCE leaves null are omitted.
+    """
+    if not raw_reference:
+        return None
+    ref = {
+        "message_id": raw_reference.get("messageId"),
+        "channel_id": raw_reference.get("channelId"),
+        "type": raw_reference.get("type"),
+    }
+    ref = {k: str(v) for k, v in ref.items() if v}
+    return ref if ("message_id" in ref or "channel_id" in ref) else None
+
+
+def parse_mentions(raw_mentions: Optional[list], content: str) -> List[dict]:
+    """
+    Who each "@Name" in `content` refers to.
+
+    DCE renders a user mention as "@" + the server nickname (or global name)
+    at export time, and nicknames hold spaces and punctuation, so the text
+    alone cannot say where a mention ends or whose it is. DCE's `mentions`
+    list can: `display` is the exact text after "@" in `content`, `user_id`
+    is who it was. Users DCE lists but `content` never names — a reply's
+    implicit ping — are left out.
+    """
+    out = []
+    for m in raw_mentions or []:
+        display = m.get("nickname") or m.get("name") or ""
+        if display and f"@{display}" in content:
+            out.append({
+                "user_id": str(m.get("id", "")),
+                "username": m.get("name", ""),
+                "display": display,
+            })
+    return out
 
 
 def _parse_attachments(raw_attachments: list) -> List[dict]:

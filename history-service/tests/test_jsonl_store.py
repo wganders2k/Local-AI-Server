@@ -5,7 +5,6 @@ import json
 import os
 import tempfile
 import pytest
-from unittest.mock import patch
 
 from jsonl_store import (
     append_message,
@@ -15,8 +14,9 @@ from jsonl_store import (
     load_all_records,
     get_pending_captions,
     rewrite_archive,
+    refresh_fields,
+    update_records,
     _user_file_path,
-    _load_existing_ids,
     _user_id_cache,
 )
 
@@ -246,3 +246,69 @@ class TestUserFilePath:
         path = _user_file_path("12345")
         assert path.endswith("12345.jsonl")
         assert temp_archive_dir in path
+
+
+class TestRefreshFields:
+    FIELDS = ("type", "reference", "is_pinned", "mentions")
+
+    def _archived(self):
+        return {
+            "message_id": "1", "user_id": "u1", "content": "look",
+            "attachments": [{"filename": "a.png", "caption": "a cat", "caption_status": "done"}],
+            "is_pinned": True,
+        }
+
+    def test_parser_fields_refresh_and_captions_survive(self, temp_archive_dir):
+        append_messages("u1", [self._archived()])
+        parsed = {"message_id": "1", "user_id": "u1", "content": "look", "type": "Reply",
+                  "reference": {"message_id": "9"}, "attachments": [{"filename": "a.png"}]}
+
+        assert refresh_fields("u1", [parsed], self.FIELDS) == 1
+
+        rec = load_all_records("u1")[0]
+        assert rec["type"] == "Reply"
+        assert rec["reference"] == {"message_id": "9"}
+        assert "is_pinned" not in rec  # the parse no longer says it is pinned
+        assert rec["attachments"][0]["caption"] == "a cat"
+
+    def test_unchanged_records_are_not_rewritten(self, temp_archive_dir, monkeypatch):
+        rec = dict(self._archived(), type="Default")
+        append_messages("u1", [rec])
+        monkeypatch.setattr("jsonl_store.rewrite_archive", lambda *a: pytest.fail("rewrote an unchanged file"))
+
+        assert refresh_fields("u1", [dict(rec)], self.FIELDS) == 0
+
+    def test_messages_not_archived_are_ignored(self, temp_archive_dir):
+        append_messages("u1", [self._archived()])
+
+        assert refresh_fields("u1", [{"message_id": "2", "type": "Default"}], self.FIELDS) == 0
+        assert len(load_all_records("u1")) == 1
+
+    def test_update_records_sees_writes_made_after_an_earlier_read(self, temp_archive_dir):
+        append_messages("u1", [{"message_id": "1", "user_id": "u1"}])
+        stale = load_all_records("u1")  # a long job's snapshot
+        append_messages("u1", [{"message_id": "2", "user_id": "u1"}])
+
+        def mark(records):
+            records[0]["seen"] = True
+            return True
+
+        update_records("u1", mark)
+        assert [r["message_id"] for r in load_all_records("u1")] == ["1", "2"]
+        assert len(stale) == 1
+
+
+class TestRewriteKeepsPermissions:
+    def test_rewrite_keeps_the_existing_mode(self, temp_archive_dir):
+        append_messages("u1", [{"message_id": "1"}])
+        path = _user_file_path("u1")
+        os.chmod(path, 0o644)
+
+        rewrite_archive("u1", [{"message_id": "1", "type": "Default"}])
+
+        assert os.stat(path).st_mode & 0o777 == 0o644
+
+    def test_a_new_file_is_world_readable(self, temp_archive_dir):
+        rewrite_archive("u2", [{"message_id": "1"}])
+
+        assert os.stat(_user_file_path("u2")).st_mode & 0o777 == 0o644

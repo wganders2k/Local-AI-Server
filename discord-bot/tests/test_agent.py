@@ -7,7 +7,6 @@ the loop can be exercised without a gateway, a token, or a network.
 
 import json
 
-import pytest
 
 from lore.agent import LoreRunResult, run_agent_loop, stream_answer
 from lore.progress import ProgressReporter

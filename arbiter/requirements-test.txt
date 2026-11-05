@@ -1,0 +1,6 @@
+# What .venv-test/ and CI install. Runtime deps plus the test runner; no GPU or
+# Docker access is needed — the tests fake both.
+-r requirements.txt
+httpx==0.28.1  # FastAPI's TestClient is built on it; not a runtime dependency here
+pytest==9.1.1
+pytest-asyncio==1.4.0

@@ -8,7 +8,7 @@ tests pin the failure modes that would be quiet otherwise.
 
 import pytest
 
-from config import JobConfig, load_jobs
+from config import load_jobs
 
 
 def _write(tmp_path, text):
