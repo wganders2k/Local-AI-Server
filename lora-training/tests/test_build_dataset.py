@@ -10,6 +10,7 @@ Run:  .venv-test/bin/python -m pytest tests -q
 """
 
 import json
+import re
 
 import pytest
 
@@ -306,6 +307,38 @@ def test_pii_is_scrubbed_from_targets_and_context():
 
 def test_bare_digit_runs_are_not_phone_numbers():
     assert bd.scrub_pii("scored 1234567890 points") == "scored 1234567890 points"
+
+
+def test_links_become_markers_and_no_snowflake_survives():
+    examples, _ = build([
+        msg(1, OTHER, 0, "look https://cdn.discordapp.com/attachments/337040332107808768/434521920123456789/a.png"),
+        msg(2, THIRD, 1, "see https://discord.com/channels/419718473233465355/498175798123456789/498175798987654321"),
+        msg(3, TARGET, 2, "lol https://www.Twitter.com/peta/status/1100820317256208384?s=09 classic"),
+    ])
+
+    assert examples[0]["prompt"][-1]["content"] == "[bob]: look [attachment]\n[carol]: see [message link]"
+    assert examples[0]["completion"][0]["content"] == "lol [link: twitter.com] classic"
+    assert not re.search(r"\d{15,}", json.dumps(examples))
+
+
+def test_a_reply_that_is_only_a_link_marker_is_dropped():
+    _, stats = build([
+        msg(1, OTHER, 0, "send it"),
+        msg(2, TARGET, 1, "https://cdn.discordapp.com/attachments/1/2/clip.mp4 https://youtu.be/abc"),
+    ])
+
+    assert stats["dropped_link_only"] == 1
+
+
+def test_long_digit_runs_are_masked_in_context_and_dropped_as_targets():
+    examples, stats = build([
+        msg(1, OTHER, 0, "10 turned into 10-9482390847234987235982375394"),
+        msg(2, TARGET, 1, "e-676277797906854407421807398614769274640"),
+        msg(3, TARGET, 5, "that is not how maths works"),
+    ], merge_seconds=0)
+
+    assert stats["dropped_long_number"] == 1
+    assert examples[0]["prompt"][-1]["content"].startswith("[bob]: 10 turned into 10-[long number]\n")
 
 
 def test_mentions_and_custom_emoji_are_rendered_readably():

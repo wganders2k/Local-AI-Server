@@ -43,8 +43,8 @@ checkpoint_minutes: 15
 keep_checkpoints: 2
 
 lora:
-  r: 16
-  alpha: 32
+  r: 32
+  alpha: 64
   dropout: 0.0
   # A regex, not a list: Gemma 4 is multimodal, and a bare suffix list would
   # also match projections outside the language model. Some layers share K and

@@ -52,6 +52,23 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # -- text normalisation --
 
 _URL_RE = re.compile(r"https?://\S+")
+
+# Links are rewritten to what they point at, never kept. Discord's own URLs are
+# nothing but snowflakes (cdn.discordapp.com/attachments/<channel>/<message>/…,
+# discord.com/channels/<guild>/<channel>/<message>), and most others carry one
+# too (twitter.com/x/status/<id>). With ~1.5k of them in one member's context,
+# the adapter learned that a long run of digits is something people write, and
+# started writing its own. The domain stays: "they posted a tweet" is voice.
+_DISCORD_FILE_RE = re.compile(r"https?://(?:cdn\.discordapp\.com|media\.discordapp\.net)/\S+")
+_DISCORD_LINK_RE = re.compile(r"https?://(?:\w+\.)?discord(?:app)?\.com/channels/\S+")
+_URL_DOMAIN_RE = re.compile(r"https?://(?:www\.)?([^/\s?#:]+)\S*")
+# What the three above leave behind, so the drop checks can still see a link.
+_LINK_MARKER_RE = re.compile(r"\[(?:attachment|message link|link: [^\]\s]+)\]")
+# A typed run this long is an id someone pasted or keyboard-mash, never a number
+# anyone reads. 15 digits is below the shortest snowflake (17).
+_LONG_NUMBER_RE = re.compile(r"\d{15,}")
+LONG_NUMBER = "[long number]"
+
 _USER_MENTION_RE = re.compile(r"<@!?(\d+)>")
 _CHANNEL_MENTION_RE = re.compile(r"<#(\d+)>")
 _ROLE_MENTION_RE = re.compile(r"<@&\d+>")
@@ -142,17 +159,29 @@ def resolve_mentions(record: dict) -> str:
     return text
 
 
+def replace_links(text: str) -> str:
+    """Every URL -> a marker naming what it was."""
+    text = _DISCORD_FILE_RE.sub("[attachment]", text)
+    text = _DISCORD_LINK_RE.sub("[message link]", text)
+    return _URL_DOMAIN_RE.sub(lambda m: f"[link: {m.group(1).lower()}]", text)
+
+
 def normalise(text: str, usernames: dict[str, str], channels: dict[str, str]) -> str:
-    """Raw Discord markup -> what a person reading the channel would see."""
+    """Raw Discord markup -> what a person reading the channel would see. No id survives."""
+    # Links first: an email pattern would otherwise bite into a URL's userinfo.
+    text = replace_links(text)
     text = _USER_MENTION_RE.sub(lambda m: "@" + usernames.get(m.group(1), "someone"), text)
     text = _CHANNEL_MENTION_RE.sub(lambda m: "#" + channels.get(m.group(1), "channel"), text)
     text = _ROLE_MENTION_RE.sub("@role", text)
     text = _CUSTOM_EMOJI_RE.sub(r":\1:", text)
+    # Last: mention and emoji markup carry snowflakes that the lines above resolve.
+    text = _LONG_NUMBER_RE.sub(LONG_NUMBER, text)
     return scrub_pii(text).strip()
 
 
 def without_urls(text: str) -> str:
-    return _URL_RE.sub("", text).strip()
+    """Raw URLs and the markers replace_links leaves in their place, for the drop checks."""
+    return _LINK_MARKER_RE.sub("", _URL_RE.sub("", text)).strip()
 
 
 def parse_ts(value: str) -> datetime:
@@ -328,6 +357,11 @@ def build_examples(records: list[dict], system_prompt: str | None, opts: Options
             if len(without_urls(without_mentions(reply, mentions))) < opts.min_chars:
                 stats["dropped_mention_only"] += 1
                 continue
+            # Fine to read in context, but as a target it teaches the adapter to
+            # emit a placeholder — or, before replace_links, the digits themselves.
+            if LONG_NUMBER in reply:
+                stats["dropped_long_number"] += 1
+                continue
 
             context: list[Turn] = []
             later = turn
@@ -391,7 +425,9 @@ def main() -> int:
     ap.add_argument("--context-n", type=int, default=12, help="Max context turns before each reply")
     ap.add_argument("--gap-minutes", type=float, default=30.0, help="Silence that ends a conversation")
     ap.add_argument("--merge-seconds", type=float, default=120.0, help="Same-author messages this close are one turn")
-    ap.add_argument("--min-chars", type=int, default=8, help="Shorter replies are dropped as targets")
+    # 24, not Options' 8: below it a reply is mostly "lmao same", and ~30% of
+    # targets being that teaches the adapter to answer in two words.
+    ap.add_argument("--min-chars", type=int, default=24, help="Shorter replies are dropped as targets")
     ap.add_argument("--eval-fraction", type=float, default=0.05)
     ap.add_argument(
         "--names",

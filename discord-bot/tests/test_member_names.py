@@ -48,6 +48,18 @@ def test_markup_is_normalised_like_the_dataset():
     assert out == "@will and @kain in #general ping @role :kekw: :dance:"
 
 
+def test_links_and_long_numbers_are_replaced_like_the_dataset():
+    text = (
+        "<@123456789012345678> https://cdn.discordapp.com/attachments/1/2/a.png "
+        "https://discord.com/channels/4/5/6 https://www.Twitter.com/x/status/1100820317256208384 "
+        "10-9482390847234987235982375394"
+    )
+
+    out = mn.normalise_message(text, lambda uid: "will", lambda cid: "general")
+
+    assert out == "@will [attachment] [message link] [link: twitter.com] 10-[long number]"
+
+
 def test_persona_display_name_comes_from_the_build(tmp_path):
     d = _training_dir(tmp_path, stats={"args": {"display_name": "chris", "persona": "mimic_user1"}})
 

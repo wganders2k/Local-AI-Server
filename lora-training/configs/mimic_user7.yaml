@@ -1,4 +1,4 @@
-# Mimic persona — mimic_user7, generated from mimic_gemma4_12b.yaml. 3 epochs: ~420 examples is ~26 steps per epoch.
+# Mimic persona — mimic_user7, generated from mimic_gemma4_12b.yaml. 3 epochs: ~250 examples is ~15 steps per epoch.
 #
 # Copy per persona: change the three `mimic_user1`s. The dataset is built by
 #   make train-dataset USER_ID=<discord id> PERSONA=mimic_user1 NAME=<display name>
@@ -35,7 +35,8 @@ dataset:
 # new submission "resume" at its last step. v1 (2026-11-04, handles, unfiltered
 # pins/pings, untemplated prompts) is lora-outputs/mimic_user1, trained on
 # training/mimic_user1-v1.
-output_dir: /home/peacow/lora-outputs/mimic_user7
+# v1 (lora-outputs/mimic_user7) trained with raw URLs in the data, snowflake ids and all.
+output_dir: /home/peacow/lora-outputs/mimic_user7-v2
 
 # Long enough that saving (adapter + 8-bit optimizer state) is a small fraction
 # of the window, short enough that a preemption costs at most this much work.
@@ -43,8 +44,8 @@ checkpoint_minutes: 15
 keep_checkpoints: 2
 
 lora:
-  r: 16
-  alpha: 32
+  r: 32
+  alpha: 64
   dropout: 0.0
   # A regex, not a list: Gemma 4 is multimodal, and a bare suffix list would
   # also match projections outside the language model. Some layers share K and
