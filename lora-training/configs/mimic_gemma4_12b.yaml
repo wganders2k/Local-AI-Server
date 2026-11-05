@@ -1,0 +1,64 @@
+# Mimic persona — QLoRA on Gemma 4 12B (abliterated), one member.
+#
+# Copy per persona: change the three `mimic_user1`s. The dataset is built by
+#   make train-dataset USER_ID=<discord id> PERSONA=mimic_user1 NAME=<display name>
+# and the base must be fetched before submitting, so a 24 GB download never
+# happens while holding the GPU lease:
+#   make train-fetch MODEL=culturerevolt/gemma-4-12b-heretic-abliterated
+#
+# The base has to be the exact weights llama-server serves the adapter over —
+# culturerevolt/gemma-4-12b-heretic-abliterated-GGUF, same author, same weights.
+# A LoRA applied to a different base loads without complaint and produces mush.
+
+model: culturerevolt/gemma-4-12b-heretic-abliterated
+
+# 4-bit is what makes a 12B with a 262k vocabulary fit beside the CUDA context
+# and the logits. bf16 weights alone would be ~24 GB.
+load_in_4bit: true
+gradient_checkpointing: true
+
+# Rendered into the training prompts, so it must match how the persona is
+# served: the [mimic_*] sections in models.ini set the same kwargs. Thinking
+# off — a persona reply is one short line and has nothing to reason about.
+chat_template_kwargs:
+  enable_thinking: false
+
+dataset:
+  path: /archive/training/mimic_user1/train.jsonl
+  eval_path: /archive/training/mimic_user1/eval.jsonl
+  # Eval is a forward pass over every row each `eval_steps`; capping it keeps
+  # one evaluation to a minute or two rather than eating a whole idle window.
+  eval_limit: 300
+
+# One directory per run, never reused: the worker resumes from the newest
+# complete checkpoint it finds here, so a finished run's directory would make a
+# new submission "resume" at its last step. v1 (2026-11-04, handles, unfiltered
+# pins/pings, untemplated prompts) is lora-outputs/mimic_user1, trained on
+# training/mimic_user1-v1.
+output_dir: /home/peacow/lora-outputs/mimic_user1-v2
+
+# Long enough that saving (adapter + 8-bit optimizer state) is a small fraction
+# of the window, short enough that a preemption costs at most this much work.
+checkpoint_minutes: 15
+keep_checkpoints: 2
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.0
+  # A regex, not a list: Gemma 4 is multimodal, and a bare suffix list would
+  # also match projections outside the language model. Some layers share K and
+  # V (attention_k_eq_v) and have no v_proj — PEFT skips what does not exist.
+  target_modules: '.*language_model\.layers\.\d+\.(self_attn\.(q|k|v|o)_proj|mlp\.(gate|up|down)_proj)'
+
+training:
+  epochs: 1
+  batch_size: 1          # the 262k-vocab logits dominate activation memory
+  grad_accum: 16
+  learning_rate: 2.0e-4
+  # p95 context is ~400 tokens on the real archive; 1024 truncates almost
+  # nothing and halves the logits buffer against 2048.
+  max_seq_length: 1024
+  logging_steps: 10
+  eval_steps: 200
+  seed: 42

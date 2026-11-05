@@ -140,7 +140,11 @@ obvious absence.
 
 Tests run against a local `.venv-test/` (gitignored), holding only what the
 tests need — deliberately not the heavy runtime dependencies, so the suite runs
-without CUDA or a GPU.
+without CUDA or a GPU. `requirements-test.txt` at the service root defines it,
+and is exactly what CI installs; test-only packages go there, never in
+`requirements.txt`, which ships in the image. A new service with tests gets an
+entry in both `TEST_SERVICES` (Makefile) and the test matrix in
+`.github/workflows/ci.yml`, on the Python version its image ships.
 
 Test the logic, not the framework. The most useful boundary a service can have
 is one that keeps its core reachable without its transport: `discord-bot/lore/`

@@ -5,7 +5,6 @@ import json
 import os
 import tempfile
 import pytest
-from unittest.mock import patch
 
 from channel_state import (
     load_state,
@@ -13,8 +12,6 @@ from channel_state import (
     get_channel,
     update_channel,
     channels_needing_export,
-    _ensure_state_dir,
-    CHANNEL_STATE_FILE,
 )
 
 

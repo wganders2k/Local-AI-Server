@@ -5,12 +5,25 @@ Batch processor: scans pending attachments, downloads images,
 calls proxy with image-caption model, writes captions to JSONL.
 
 Runs as a scheduled job during the caption window.
+
+NON-FUNCTIONAL as of 2026-11-04 — it has never captioned anything:
+
+- Disabled: IMAGE_CAPTION_ENABLED=false in the deployed container.
+- Nothing to do even if enabled: dce_parser marks an attachment "pending"
+  only when it has a `content_type`, a field DCE never writes (DCE gives
+  id, url, fileName, fileSizeBytes). All 45,048 archived attachments are
+  "skipped".
+- The stored URLs are signed Discord CDN links that expire (`ex=`), so old
+  images would mostly fail to download.
+- process_pending_batch loads a user's records, spends minutes captioning,
+  then rewrites the file from that snapshot, discarding anything written in
+  between. A fix should apply its changes through jsonl_store.update_records.
 """
 
 import logging
 import os
 import tempfile
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import httpx
 
@@ -206,7 +219,6 @@ def process_pending_batch() -> int:
     for user_id, record, att_idx, attachment in pending:
         url = attachment.get("url", "")
         filename = attachment.get("filename", "")
-        file_size = attachment.get("file_size_bytes", 0)
         
         logger.info(f"Captioning: {filename} (user {user_id})")
         

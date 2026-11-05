@@ -15,6 +15,8 @@ os.environ.setdefault("DISCORD_TOKEN", "test-token")
 # does not exist so tests exercise the documented "running without background
 # knowledge" path rather than picking up a developer's real alias index.
 os.environ["LORE_CONTEXT_PATH"] = "tests/fixtures/absent_context.md"
+# Likewise the mimic names and persona stats, which hold real names.
+os.environ["MIMIC_TRAINING_DIR"] = "tests/fixtures/absent_training"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 

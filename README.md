@@ -1,10 +1,21 @@
 # Local AI Server
 
-(Disclaimer: documentation generated with AI assistance)
+[![CI](https://github.com/wganders2k/Local-AI-Server/actions/workflows/ci.yml/badge.svg)](https://github.com/wganders2k/Local-AI-Server/actions/workflows/ci.yml)
 
-Monorepo for a personal AI server stack running on an Ubuntu machine with an RTX 3090. Hosts a Discord bot (mimic personas, thread chat, and an agentic lore assistant), a self-hosted chat UI (Open WebUI), and a VS Code coding assistant — all fronted by a FastAPI proxy, with a single arbiter deciding who holds the GPU.
+A self-hosted, multi-tenant AI platform that runs a whole stack on a single RTX 3090: a Discord bot with an agentic RAG assistant, a private chat UI (Open WebUI behind SSO), IDE code completion, and a preemptible QLoRA fine-tuning pipeline. They all share one 24 GB card. A FastAPI orchestration proxy routes every request, and a dedicated GPU arbiter enforces priority-based admission control so that interactive traffic always wins and background training gives way.
 
-Built as a deliberate exercise in agentic development workflows — specifying, steering, and reviewing model-generated code across a multi-service system serving real users.
+It's a dozen containerized services across five Python codebases, with continuous integration, more than 270 unit tests, and Prometheus metrics, all serving real users.
+
+Built as a deliberate exercise in agentic development workflows: specifying, steering, and reviewing model-generated code across a production multi-service system.
+
+## Highlights
+
+- **GPU admission control on a single card.** A purpose-built arbiter grants and revokes GPU leases by priority, as declared in one policy file. Lower-priority work is reclaimed on demand, so a chat request never waits behind a training run.
+- **Preemptible fine-tuning.** The QLoRA trainer is designed to be SIGKILLed at any moment. A supervisor/worker split holds the lease and the CUDA context separately, and training resumes from the last verified checkpoint.
+- **Hot-swappable model fleet.** Eight named model presets (Qwen3.6, Gemma 4, and others, from 26B to 35B) load on demand through llama-server's router mode, with an idle evictor that frees VRAM for background jobs.
+- **Agentic RAG over a community's history.** `/lore` runs a multi-round tool-calling agent (up to 25 rounds) over a ChromaDB index built from an incrementally exported Discord archive, with optional image captioning.
+- **Self-healing boot.** A systemd unit detects and recovers from NVIDIA driver upgrades that would otherwise leave every GPU container unable to start.
+- **Continuous integration.** GitHub Actions lints the monorepo and runs each service's test suite in parallel on the exact Python version its production image ships, with no GPU required. See [Testing & CI](#testing--ci).
 
 ## Architecture
 
@@ -202,7 +213,7 @@ Currently enabled aliases in `models.ini`:
 | `chat-chinese` | Qwen3.6-35B-A3B UD-IQ4_NL | Open WebUI |
 | `bomb-you` | Qwen3.5-35B-A3B-Uncensored IQ4_XS | Open WebUI |
 
-**Commented out and therefore unavailable:** `mimic_user1`–`mimic_user6` and `image-caption`. `/mimic` still offers them via autocomplete — but a request reaches llama-server and finds no such preset. Re-enable the sections in `models.ini` before using `/mimic` or image captioning.
+**Commented out and therefore unavailable:** `mimic_user1` (a template awaiting its trained adapter) and `image-caption`. `/mimic` still offers `mimic_user1`–`mimic_user6` via autocomplete, but a request reaches llama-server and finds no such preset. `mimic-base` is the bare persona base, used as the control in `make train-sample`.
 
 The proxy does not gate on a model list of its own: it forwards *any* non-autocomplete model name to the swappable slot and lets llama-server decide. `models.ini` is the single source of truth for what's actually available.
 
@@ -255,11 +266,17 @@ make train-submit CONFIG=configs/smoke.yaml
 make train-logs
 make train-status
 make train-cancel
+
+# persona pipeline (none of these take the GPU)
+make train-fetch   MODEL=culturerevolt/gemma-4-12b-heretic-abliterated
+make train-dataset USER_ID=<discord id> PERSONA=mimic_user1 NAME=<display name>
+make train-export  CONFIG=configs/mimic_gemma4_12b.yaml PERSONA=mimic_user1
+make train-sample  PERSONA=mimic_user1 MODELS="mimic-base mimic_user1"
 ```
 
 The container is PID-1 `supervisor.py` holding the arbiter lease, with `train_worker.py` as a child holding the CUDA context. Preemption SIGKILLs the worker; the container survives and resumes from the last checkpoint carrying a `COMPLETE` marker. Being killed is the normal path — see [`lora-training/README.md`](lora-training/README.md) for why the split is forced and why the cadence is wall-clock rather than step-based.
 
-Per-persona mimic training is not built. `configs/smoke.yaml` (Qwen3-0.6B) exists to validate the handover in minutes.
+Per-persona training is built but not yet run on real data. `configs/mimic_gemma4_12b.yaml` trains a QLoRA adapter on an abliterated Gemma 4 12B from one member's archived replies, and `export_adapter.py` turns it into a GGUF LoRA that llama-server loads over the shared base. `configs/smoke.yaml` (Qwen3-0.6B) still exists to validate the handover in minutes. Re-run it after any change to the pinned stack.
 
 ## Monitoring
 
@@ -275,25 +292,47 @@ Installs a oneshot unit that runs `docker compose up -d --remove-orphans`, falli
 
 The fallback matters: the NVIDIA container runtime bakes versioned driver library paths into a container's mount spec at *create* time, so an unattended driver upgrade leaves every pre-existing GPU container unable to start. Restart policies don't rescue it — the failure is during container init rather than an exit, so Docker gives up and the stack stays down until someone recreates it.
 
-## Tests
+## Testing & CI
 
-Per-service pytest suites, run from each service directory. `arbiter`, `proxy`, and `lora-training` each keep a gitignored `.venv-test/` holding just the test dependencies — the trainer's deliberately excludes `torch`, so the suite runs on a machine with no GPU and no multi-GB install:
+More than 270 tests across five independent per-service pytest suites:
+
+| Suite | Tests | Covers |
+|---|---|---|
+| `discord-bot` | 96 | lore agent loop, tools, sessions, formatters |
+| `history-service` | 63 | channel state, DCE parser, JSONL store |
+| `arbiter` | 51 | scheduler guarantees, config, Docker client |
+| `lora-training` | 49 | arbiter client, checkpoints, supervisor, dataset builder |
+| `proxy` | 17 | GPU gate, idle evictor |
+
+There are per-service pytest suites for `arbiter` (scheduler, config, docker client), `proxy` (GPU gate, idle evictor), `discord-bot` (lore agent, tools, session, formatters), `history-service` (channel state, DCE parser, JSONL store), and `lora-training` (arbiter client, checkpoints, supervisor, dataset builder). Each service's `requirements-test.txt` defines its gitignored `.venv-test/` — the trainer's deliberately excludes `torch`, so every suite runs on a machine with no GPU and no multi-GB install:
 
 ```bash
-cd arbiter       && .venv-test/bin/python -m pytest tests -q   # scheduler, config, docker client
-cd proxy         && .venv-test/bin/python -m pytest tests -q   # GPU gate, idle evictor
-cd lora-training && .venv-test/bin/python -m pytest tests -q   # arbiter client, checkpoints, supervisor
-cd history-service && python -m pytest tests -q                # channel state, DCE parser, JSONL store
+make test-venvs   # create/refresh every .venv-test/ plus .venv-lint/ (re-run after editing requirements)
+make test         # run every suite; reports all failures, not just the first
+make lint         # ruff check, config in ruff.toml
 ```
+
+`make test` runs the suites with a clean environment, because the Makefile otherwise exports `.env` into them and the services read config at import time.
 
 `arbiter/tests/test_scheduler.py` is the one worth knowing about: it pins the guarantees the design rests on — that nothing is ever started, that `acquire` never reports success while a junior tenant survives, that a lease never outlives its holder, and that priority alone decides who wins.
 
-There is no repo-wide test runner and no CI. `rag` has no tests.
+### Continuous integration
+
+[GitHub Actions](.github/workflows/ci.yml) runs on every push to `main`, on every pull request, and on demand. It runs exactly what `make lint` and `make test` run locally, so local results and CI results match.
+
+- **Matrix build across services.** Each of the five suites runs as its own parallel job, pinned to the Python version its production image ships (3.11 or 3.12). Interpreter drift shows up in CI rather than in a container.
+- **Failures are isolated.** `fail-fast` is disabled, so one broken service never hides the state of the others.
+- **GPU-free by design.** The trainer's test dependencies deliberately exclude `torch`, so the whole matrix runs on stock GitHub-hosted runners.
+- **Static analysis.** A `ruff` lint job with the version pinned in lockstep with the Makefile reports problems inline on the PR diff.
+- **Security-conscious configuration.** The workflow uses a read-only `GITHUB_TOKEN`, `pull_request` (never `pull_request_target`) so fork code never runs with write access, and no secrets: CI cannot reach the server.
+- **Fast feedback.** Pip caching is keyed on each service's requirements, and concurrency groups cancel superseded runs on the same ref.
+
+CI only checks; deploying is still a deliberate `make pull` on the box. `rag` has no tests yet.
 
 ## Known gaps
 
 Things the docs describe accurately but that are broken, inert, or unfinished in the code — tracked in full in [`docs/TODO.md`](docs/TODO.md):
 
-- **`/mimic` has no backing preset.** The `mimic_user*` sections are commented out in `models.ini` while the bot still offers them via autocomplete.
+- **`/mimic` has no backing preset yet.** Each `mimic_user*` section waits on its trained adapter, while the bot already offers all six via autocomplete.
 
 The documents in [`docs/plans/`](docs/plans/) are point-in-time design records, not current-state docs, and are left as written.

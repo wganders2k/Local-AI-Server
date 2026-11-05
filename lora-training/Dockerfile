@@ -16,13 +16,37 @@ FROM pytorch/pytorch:2.9.0-cuda12.8-cudnn9-runtime
 
 WORKDIR /app
 
+# A C compiler, which the runtime base image lacks. TRL computes the loss with a
+# fused LM-head Triton kernel (it never materialises the full logits — the
+# biggest buffer with Gemma's 262k vocabulary), and Triton builds a small
+# CUDA-utils shim with gcc the first time it runs in each process.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gcc libc6-dev \
+    && rm -rf /var/lib/apt/lists/*
+
 # torch and its CUDA stack come from the base image; installing the pinned torch
 # from requirements.txt on top would pull a second copy. Everything else is
 # version-sensitive against it — see the note in requirements.txt.
 COPY requirements.txt .
-RUN grep -vE '^(torch|pytest)==' requirements.txt > /tmp/reqs.txt \
+RUN grep -vE '^torch==' requirements.txt > /tmp/reqs.txt \
     && pip install --no-cache-dir -r /tmp/reqs.txt \
     && rm /tmp/reqs.txt
+
+# llama.cpp's adapter converter, for export_adapter.py. Pinned to a release tag:
+# the converter must know the base's architecture (Gemma 4 unified needs a 2026
+# tag), and its `gguf` package is installed from the same tree rather than PyPI
+# so the two can never disagree about tensor names. Only the Python half is
+# kept — nothing here is compiled.
+ARG LLAMA_CPP_TAG=b11627
+ADD https://github.com/ggml-org/llama.cpp/archive/refs/tags/${LLAMA_CPP_TAG}.tar.gz /tmp/llama.cpp.tar.gz
+RUN mkdir -p /opt/llama.cpp \
+    && tar -xzf /tmp/llama.cpp.tar.gz -C /opt/llama.cpp --strip-components=1 \
+        llama.cpp-${LLAMA_CPP_TAG}/convert_lora_to_gguf.py \
+        llama.cpp-${LLAMA_CPP_TAG}/conversion \
+        llama.cpp-${LLAMA_CPP_TAG}/gguf-py \
+    && pip install --no-cache-dir /opt/llama.cpp/gguf-py \
+    && rm /tmp/llama.cpp.tar.gz
+ENV LLAMA_CPP_DIR=/opt/llama.cpp
 
 COPY . .
 

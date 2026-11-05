@@ -11,7 +11,8 @@ import json
 import logging
 import os
 import tempfile
-from typing import Dict, List, Optional, Set
+import threading
+from typing import Callable, Dict, Iterable, List, Set
 
 from config import ARCHIVE_DIR
 
@@ -19,6 +20,13 @@ logger = logging.getLogger(__name__)
 
 # Module-level cache: user_id -> set of known message_ids
 _user_id_cache: Dict[str, Set[str]] = {}
+
+# Held by every write. A rewrite replaces a user's whole file, so anything
+# written between reading that file and renaming over it — an appended message,
+# a caption, a refreshed field — would be silently lost. Writers come from the
+# caption job and from request handlers running in worker threads. Reentrant so
+# update_records can call rewrite_archive.
+_archive_lock = threading.RLock()
 
 
 def _ensure_archive_dir() -> None:
@@ -92,19 +100,20 @@ def append_message(user_id: str, record: dict) -> bool:
     # For large files, avoid loading all IDs into memory.
     # Instead, check the last N lines or use a simple append with
     # a periodic dedup pass. For now, load IDs for correctness.
-    existing_ids = _load_existing_ids(user_id)
-    
-    if msg_id in existing_ids:
-        return False
-    
-    try:
-        with open(path, "a") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-        _add_to_cache(user_id, {str(msg_id)})
-        return True
-    except IOError as e:
-        logger.error(f"Failed to append message for user {user_id}: {e}")
-        return False
+    with _archive_lock:
+        existing_ids = _load_existing_ids(user_id)
+
+        if msg_id in existing_ids:
+            return False
+
+        try:
+            with open(path, "a") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            _add_to_cache(user_id, {str(msg_id)})
+            return True
+        except IOError as e:
+            logger.error(f"Failed to append message for user {user_id}: {e}")
+            return False
 
 
 def append_messages(user_id: str, records: List[dict]) -> int:
@@ -121,28 +130,29 @@ def append_messages(user_id: str, records: List[dict]) -> int:
     if not records:
         return 0
     
-    existing_ids = _load_existing_ids(user_id)
     path = _user_file_path(user_id)
     _ensure_archive_dir()
-    
+
     appended = 0
     new_ids: Set[str] = set()
-    try:
-        with open(path, "a") as f:
-            for record in records:
-                msg_id = record.get("message_id")
-                if not msg_id:
-                    continue
-                if msg_id in existing_ids:
-                    continue
-                f.write(json.dumps(record, ensure_ascii=False) + "\n")
-                str_msg_id = str(msg_id)
-                existing_ids.add(str_msg_id)
-                new_ids.add(str_msg_id)
-                appended += 1
-        _add_to_cache(user_id, new_ids)
-    except IOError as e:
-        logger.error(f"Failed to append messages for user {user_id}: {e}")
+    with _archive_lock:
+        existing_ids = _load_existing_ids(user_id)
+        try:
+            with open(path, "a") as f:
+                for record in records:
+                    msg_id = record.get("message_id")
+                    if not msg_id:
+                        continue
+                    if msg_id in existing_ids:
+                        continue
+                    f.write(json.dumps(record, ensure_ascii=False) + "\n")
+                    str_msg_id = str(msg_id)
+                    existing_ids.add(str_msg_id)
+                    new_ids.add(str_msg_id)
+                    appended += 1
+            _add_to_cache(user_id, new_ids)
+        except IOError as e:
+            logger.error(f"Failed to append messages for user {user_id}: {e}")
 
     return appended
 
@@ -257,6 +267,11 @@ def rewrite_archive(user_id: str, records: List[dict]) -> None:
     path = _user_file_path(user_id)
     _ensure_archive_dir()
 
+    with _archive_lock:
+        _write_atomically(path, user_id, records)
+
+
+def _write_atomically(path: str, user_id: str, records: List[dict]) -> None:
     try:
         # Write to temp file in same directory (ensures same filesystem for atomic rename)
         dir_name = os.path.dirname(path)
@@ -265,6 +280,14 @@ def rewrite_archive(user_id: str, records: List[dict]) -> None:
             with os.fdopen(fd, "w") as f:
                 for record in records:
                     f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            # mkstemp creates 0600, and the rename would hand that to the
+            # archive, locking out every other reader (rag, the trainer, the
+            # host). Keep the file's existing mode; a new file gets 0644.
+            try:
+                mode = os.stat(path).st_mode & 0o777
+            except FileNotFoundError:
+                mode = 0o644
+            os.chmod(tmp_path, mode)
             # Atomic rename on POSIX
             os.replace(tmp_path, path)
         except Exception:
@@ -278,6 +301,55 @@ def rewrite_archive(user_id: str, records: List[dict]) -> None:
         logger.info(f"Rewrote archive for user {user_id}: {len(records)} records")
     except IOError as e:
         logger.error(f"Failed to rewrite archive for user {user_id}: {e}")
+
+
+def update_records(user_id: str, apply: Callable[[List[dict]], bool]) -> bool:
+    """
+    Read-modify-write a user's archive under the archive lock.
+
+    `apply` changes the freshly loaded records in place and returns whether it
+    changed anything; the file is rewritten only if it did. Load inside the
+    lock, never earlier: a copy held across slow work (a caption batch takes
+    minutes) is stale by the time it is written back.
+    """
+    with _archive_lock:
+        records = load_all_records(user_id)
+        if not records or not apply(records):
+            return False
+        rewrite_archive(user_id, records)
+        return True
+
+
+def refresh_fields(user_id: str, parsed: Iterable[dict], fields: Iterable[str]) -> int:
+    """
+    Bring `fields` on already-archived records in line with freshly parsed ones.
+
+    A field the parser now emits is set; one it no longer emits is removed.
+    Fields outside `fields` — attachments and their captions above all — are
+    never touched. Returns the number of records changed.
+    """
+    fresh = {str(r["message_id"]): r for r in parsed if r.get("message_id")}
+    fields = tuple(fields)
+    changed = 0
+
+    def apply(records: List[dict]) -> bool:
+        nonlocal changed
+        for rec in records:
+            new = fresh.get(str(rec.get("message_id")))
+            if new is None:
+                continue
+            before = {f: rec.get(f) for f in fields}
+            for f in fields:
+                if f in new:
+                    rec[f] = new[f]
+                else:
+                    rec.pop(f, None)
+            if before != {f: rec.get(f) for f in fields}:
+                changed += 1
+        return changed > 0
+
+    update_records(user_id, apply)
+    return changed
 
 
 def clear_all() -> int:

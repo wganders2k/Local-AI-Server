@@ -112,6 +112,18 @@ services:
       # Model downloads survive preemption; without this every restart re-fetches
       # the base weights, which dwarfs the training it would have done.
       - /home/peacow/.cache/huggingface:/cache/huggingface
+      # build_dataset.py reads the per-user archive (Tier 2, never written from
+      # here) and writes the per-persona training sets (Tier 3) beside it. Both
+      # hold real messages, which is why Tier 3 lives on the archive disk and
+      # not under configs/ in the repo.
+      - /mnt/storage_cold/array/DiscordArchive/archive:/archive/archive:ro
+      - /mnt/storage_cold/array/DiscordArchive/training:/archive/training
+      # The bot's persona template, so a training set's system prompt is the
+      # one /mimic will send — not a copy that drifts from it.
+      - /home/peacow/local-ai-server/discord-bot/prompts:/app/persona_prompts:ro
+      # export_adapter.py writes GGUF adapters here; llama-swappable reads them
+      # through its own /srv/models mount.
+      - ${MODELS_DIR:-/srv/models}/lora:/srv/models/lora
     deploy:
       resources:
         reservations:
@@ -245,6 +257,12 @@ services:
       # code baked into the image — binding the host directory over them would
       # shadow the image's copies with the working tree.
       - /mnt/storage/array/DiscordArchive/bot_context:/app/bot_context
+      # The mimic training data's names.json (member aliases) and each
+      # persona's stats.json, so /mimic labels speakers, renders mentions and
+      # renders its system prompt exactly as the adapters were trained — see
+      # member_names.py. Read-only: the bot only ever reads what
+      # lora-training/build_dataset.py and the hand-filled names file wrote.
+      - /mnt/storage_cold/array/DiscordArchive/training:/archive/training:ro
 
   # ──────────────────────────────────────────────────────────
   # Open WebUI (:3000)

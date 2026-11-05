@@ -11,9 +11,10 @@
 * `LORE_TOP_K` defaults disagree: 10 in `discord-bot/config.py`, 5 in `docker-compose.yml`.
 
 ### Training
-* Nothing consumes the JSONL archive for training — Tier 3 (the filtered training dataset) doesn't exist.
-* `merge.py` doesn't exist: no path from a trained adapter to a GGUF that `models.ini` can point at.
-* Whether to train on per-member message history at all hasn't actually been decided — it's inherited from the original design sketch, not chosen.
+* First real persona run: `make train-dataset` for one member, then the smoke config on the re-pinned stack (transformers 5 / TRL 1), then `configs/mimic_gemma4_12b.yaml`.
+* Replace the estimated `required_mb: 14000` in `arbiter/jobs.yaml` with the measured peak.
+* Confirm that the running llama-server build loads a Gemma 4 GGUF LoRA via the `lora =` preset key. If not, pin a newer `server-cuda` tag, which overlaps the Hardening item below.
+* Tuning experiments against the baseline adapter (lora-training/README.md §Judging a run), then the other five personas.
 
 ### Hardening
 * `ghcr.io/ggml-org/llama.cpp:server-cuda` is unpinned. A bad upstream build lands on the next `make pull`.
@@ -21,6 +22,9 @@
 * `docker-compose.yml` bind-mounts configs by absolute `/home/peacow/local-ai-server` paths, so the repo only runs from that location.
 
 ### Done
+* ~~Nothing consumes the JSONL archive for training~~: `lora-training/build_dataset.py` builds Tier 3 per persona.
+* ~~`merge.py` doesn't exist~~: replaced by `export_adapter.py`, which writes a GGUF LoRA over a shared base rather than a merged model.
+* ~~Whether to train on per-member history at all~~: decided 2026-11-04, with the members' agreement.
 * ~~Consolidate all model config to one source of truth~~ — model identity now lives in
   exactly two places: `models.ini` (swappable slot) and the `llama-permanent` command:
   in `docker-compose.yml` (permanent slot). `proxy/config.py`'s `SWAPPABLE_MODELS` set is

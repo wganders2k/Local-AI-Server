@@ -41,7 +41,7 @@ import sys
 from pathlib import Path
 
 try:
-    from huggingface_hub import hf_hub_download, HfApi
+    from huggingface_hub import hf_hub_download
     from huggingface_hub.utils import EntryNotFoundError, RepositoryNotFoundError
 except ImportError:
     print("ERROR: huggingface_hub is not installed.")
@@ -153,7 +153,7 @@ def download_model(entry: dict, models_dir: Path, dry_run: bool, hf_token: str |
 
 
     try:
-        print(f"  ↓ Downloading...")
+        print("  ↓ Downloading...")
         downloaded = hf_hub_download(
             repo_id=entry["repo_id"],
             filename=entry["filename"],
@@ -171,11 +171,11 @@ def download_model(entry: dict, models_dir: Path, dry_run: bool, hf_token: str |
 
     except RepositoryNotFoundError:
         print(f"  ✗ ERROR: Repository '{entry['repo_id']}' not found.")
-        print(f"         Check HF_REPO_OVERRIDES in scripts/download_models.py")
+        print("         Check HF_REPO_OVERRIDES in scripts/download_models.py")
         return False
     except EntryNotFoundError:
         print(f"  ✗ ERROR: File '{entry['filename']}' not found in '{entry['repo_id']}'.")
-        print(f"         Check the model= path in models.ini")
+        print("         Check the model= path in models.ini")
         return False
     except Exception as e:
         print(f"  ✗ ERROR: {e}")
@@ -214,13 +214,13 @@ def main() -> None:
     hf_token = os.environ.get("HF_TOKEN")
 
     print(f"\n{'=' * 60}")
-    print(f"  Local AI Server — Model Downloader")
+    print("  Local AI Server — Model Downloader")
     print(f"{'=' * 60}")
     print(f"  Models dir : {models_dir}")
     print(f"  models.ini : {models_ini_path}")
     print(f"  HF token   : {'set' if hf_token else 'not set (public repos only)'}")
     if args.dry_run:
-        print(f"  Mode       : DRY RUN — no files will be downloaded")
+        print("  Mode       : DRY RUN — no files will be downloaded")
     if args.slot != "all":
         print(f"  Slot filter: {args.slot} only")
 

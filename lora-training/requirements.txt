@@ -1,22 +1,26 @@
 # Pinned rather than floated. This stack renames constructor arguments between
 # minor releases — `torch_dtype` became `dtype`, `max_seq_length` became
-# `max_length` — and train_worker.py calls both by name. An unpinned upgrade
-# breaks the run at model-load time, which is the most expensive place to find
-# out.
+# `max_length`, `warmup_ratio` folded into `warmup_steps` — and train_worker.py
+# calls them by name. An unpinned upgrade breaks the run at model-load time,
+# which is the most expensive place to find out.
+#
+# transformers 5.x is the floor for Gemma 4 (`gemma4_unified`); 4.57 cannot load
+# it. Re-pinning means re-running configs/smoke.yaml before anything long.
 torch==2.9.0
-transformers==4.57.1
-trl==0.24.0
-peft==0.17.1
-datasets==4.0.0
-accelerate==1.10.1
+transformers==5.20.2
+trl==1.16.0
+peft==0.21.2
+datasets==5.1.0
+accelerate==1.15.0
 
-# QLoRA only. The smoke config leaves 4-bit off, so this is not needed to
-# exercise the handover — install it when moving to the 35B.
-bitsandbytes==0.48.1
+# QLoRA. The smoke config leaves 4-bit off; the mimic configs need it to fit.
+bitsandbytes==0.50.2
+
+# Not used directly. huggingface_hub's HTTP client (httpx2) decodes brotli with
+# a keyword the base image's conda Brotli 1.1 lacks, so every model download
+# died mid-stream with `process() takes no keyword arguments`.
+brotli==1.2.0
 
 # Supervisor + worker shared. httpx is what vendor/vram_client.py speaks.
 httpx>=0.27
 PyYAML>=6.0
-
-# Tests only.
-pytest>=8.0

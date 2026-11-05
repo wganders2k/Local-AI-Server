@@ -27,8 +27,18 @@ endif
 	dce-evaluate history-refresh \
 	rag-ingest rag-status \
 	train-submit train-cancel train-status train-logs \
+	train-fetch train-dataset train-export train-sample \
 	gpu-status \
+	test-venvs test lint \
 	nuke
+
+# Services with a pytest suite. Keep in step with the test matrix in
+# .github/workflows/ci.yml. rag is absent because it has no tests.
+TEST_SERVICES := arbiter proxy discord-bot history-service lora-training
+
+# Also pinned in .github/workflows/ci.yml — bump both together, or local lint
+# and CI disagree about what is clean.
+RUFF_VERSION := 0.17.3
 
 # Default target — show help
 help:
@@ -117,9 +127,20 @@ help:
 	@echo "  train-cancel      Stop and remove the run"
 	@echo "  train-status      Container state, and what the arbiter thinks"
 	@echo "  train-logs        Tail the training log"
+	@echo "  train-fetch       Pre-download a base model (MODEL=<hf id>) — no GPU lease"
+	@echo "  train-dataset     Build a persona's training set from the archive"
+	@echo "                        Usage: make train-dataset USER_ID=<id> PERSONA=mimic_user1 NAME=<name>"
+	@echo "  train-export      Finished adapter -> /srv/models/lora/<PERSONA>-lora.gguf"
+	@echo "  train-sample      Held-out outputs side by side; ARGS=--blind for a recorded A/B"
 	@echo ""
 	@echo "  ── GPU ────────────────────────────────────────────────"
 	@echo "  gpu-status        Who holds the card, why, and how much is free"
+	@echo ""
+	@echo "  ── Tests ──────────────────────────────────────────────"
+	@echo "  test-venvs        Create/refresh each service's .venv-test/ and .venv-lint/"
+	@echo "                        from requirements-test.txt (what CI installs)"
+	@echo "  test              Run every service's pytest suite (same as CI)"
+	@echo "  lint              ruff check across the repo (same as CI)"
 	@echo ""
 	@echo "  ── Destructive ────────────────────────────────────────"
 	@echo "  nuke                ⚠️  Stop everything AND remove all volumes"
@@ -413,12 +434,85 @@ train-status:
 train-logs:
 	docker logs -f lora-trainer
 
+# The steps around a run. Each is a one-off container from the trainer image
+# with no GPU lease — none of them touch the card, so none of them ask for it.
+# `run`, not `up`: they share the image and mounts, never the lora-trainer name,
+# so they can run while a submitted run waits or trains.
+TRAINER_RUN = docker compose --profile managed run --rm --no-deps --build lora-trainer
+
+## Download a base model into the HF cache before submitting a run on it, so a
+## multi-GB fetch never happens while the worker holds the GPU lease.
+## Usage: make train-fetch MODEL=culturerevolt/gemma-4-12b-heretic-abliterated
+train-fetch:
+	@[ -n "$(MODEL)" ] || { echo "Usage: make train-fetch MODEL=<hf repo id>"; exit 1; }
+	$(TRAINER_RUN) python -c "from huggingface_hub import snapshot_download as s; print(s('$(MODEL)'))"
+
+## Channels kept out of persona training on top of EXCLUDED_CHANNELS. Those
+## are excluded by history-service too and never reach the archive; these stay
+## in the archive (lore can use them) but are not trained on. By id, so a
+## rename cannot quietly let one back in.
+##   878129359876149289  #grant-chronicle
+TRAIN_EXCLUDED_CHANNELS ?= 878129359876149289
+
+## Build one persona's training set from the archive (Tier 3).
+## Usage: make train-dataset USER_ID=<discord id> PERSONA=mimic_user1 NAME=<display name> [ARGS="--context-n 24"]
+##        USER_ID=<old id>,<new id> for a member who has posted from more than one account
+## Writes /mnt/storage_cold/array/DiscordArchive/training/<PERSONA>/ — real
+## messages, so it stays on the archive disk and out of the repo.
+train-dataset:
+	@[ -n "$(USER_ID)" ] && [ -n "$(PERSONA)" ] && [ -n "$(NAME)" ] || { \
+		echo "Usage: make train-dataset USER_ID=<discord id> PERSONA=mimic_user1 NAME=<display name>"; exit 1; }
+	$(TRAINER_RUN) python build_dataset.py --user-id "$(USER_ID)" --persona "$(PERSONA)" \
+		--display-name "$(NAME)" --exclude-channels "$(EXCLUDED_CHANNELS),$(TRAIN_EXCLUDED_CHANNELS)" $(ARGS)
+
+## Convert a finished run's adapter to /srv/models/lora/<PERSONA>-lora.gguf.
+## Usage: make train-export CONFIG=configs/mimic_gemma4_12b.yaml PERSONA=mimic_user1
+train-export:
+	@[ -n "$(PERSONA)" ] || { echo "Usage: make train-export CONFIG=configs/<run>.yaml PERSONA=mimic_user1"; exit 1; }
+	$(TRAINER_RUN) python export_adapter.py --config "$(CONFIG)" --name "$(PERSONA)"
+
+## Read a persona's outputs on held-out prompts. Add --blind for a recorded A/B.
+## Usage: make train-sample PERSONA=mimic_user1 MODELS="mimic-base mimic_user1" [ARGS=--blind]
+train-sample:
+	@[ -n "$(PERSONA)" ] && [ -n "$(MODELS)" ] || { \
+		echo "Usage: make train-sample PERSONA=mimic_user1 MODELS=\"mimic-base mimic_user1\" [ARGS=--blind]"; exit 1; }
+	$(TRAINER_RUN) python sample_persona.py --persona "$(PERSONA)" --models $(MODELS) $(ARGS)
+
 # ── GPU ────────────────────────────────────────────────────
 
 ## Who holds the card, why, and how much is free
 gpu-status:
 	@curl -s http://localhost:11438/gpu/status | python3 -m json.tool \
 		2>/dev/null || echo "(arbiter not reachable)"
+
+# ── Tests ──────────────────────────────────────────────────
+
+## Create (if missing) and refresh the test and lint venvs. Re-run after
+## editing any requirements-test.txt.
+test-venvs:
+	@for svc in $(TEST_SERVICES); do \
+		echo "── $$svc"; \
+		[ -d $$svc/.venv-test ] || python3 -m venv $$svc/.venv-test || exit 1; \
+		$$svc/.venv-test/bin/pip install -q -r $$svc/requirements-test.txt || exit 1; \
+	done
+	@[ -d .venv-lint ] || python3 -m venv .venv-lint
+	@.venv-lint/bin/pip install -q ruff==$(RUFF_VERSION)
+
+## Run every suite, even after one fails, so a single break doesn't hide others.
+## `env -i` because this Makefile exports .env: the services read config at
+## import time, and the host's AUTOCOMPLETE_ENABLED=false failed a proxy test
+## that passes in CI, where no .env exists.
+test:
+	@failed=""; \
+	for svc in $(TEST_SERVICES); do \
+		echo "── $$svc"; \
+		(cd $$svc && env -i PATH="$$PATH" HOME="$$HOME" .venv-test/bin/python -m pytest -q) || failed="$$failed $$svc"; \
+	done; \
+	if [ -n "$$failed" ]; then echo "✗ failed:$$failed"; exit 1; fi; \
+	echo "✓ all suites passed"
+
+lint:
+	.venv-lint/bin/ruff check .
 
 # ── Destructive ────────────────────────────────────────────
 

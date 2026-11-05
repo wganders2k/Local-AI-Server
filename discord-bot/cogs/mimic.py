@@ -8,6 +8,7 @@ from discord.ext import commands
 
 from config import MAX_QUEUE_DEPTH, MIMIC_PERSONAS, get_mimic_system_prompt
 from discord_io import stream_and_send
+from member_names import load_aliases, member_name, normalise_message, persona_display_name
 from proxy_client import ProxyError
 
 logger = logging.getLogger("mimic-bot.cogs.mimic")
@@ -27,8 +28,10 @@ class MimicCog(commands.Cog):
         """Provide autocomplete suggestions for the persona option."""
         choices = []
         for persona in sorted(MIMIC_PERSONAS):
-            if current.lower() in persona.lower():
-                choices.append(app_commands.Choice(name=persona, value=persona))
+            # Shown by the name its dataset was built with; the key stays the value.
+            label = persona_display_name(persona) or MIMIC_PERSONAS[persona]
+            if current.lower() in label.lower() or current.lower() in persona.lower():
+                choices.append(app_commands.Choice(name=label, value=persona))
             if len(choices) >= 25:  # Discord max choices
                 break
         return choices
@@ -93,9 +96,14 @@ class MimicCog(commands.Cog):
             channel_id = interaction.channel.id if interaction.channel else 0
             conv_history = services.history.get_history(channel_id, persona)
 
-            # Label the user message with the sender's display name so the model
-            # can track who is speaking when multiple users share a channel.
-            labeled = f"[{interaction.user.display_name}]: {message}"
+            # Labelled and normalised exactly as the adapter's training data
+            # was (see member_names): alias or handle, never the server
+            # nickname, and mentions as "@name" rather than raw markup.
+            aliases = load_aliases()
+            labeled = (
+                f"[{member_name(interaction.user.id, interaction.user.name, aliases)}]: "
+                f"{normalise_message(message, lambda uid: self._name_for_id(uid, aliases), self._channel_name_for_id)}"
+            )
 
             msgs: list[dict] = [{"role": "system", "content": system_prompt}]
             msgs.extend(conv_history)
@@ -117,6 +125,16 @@ class MimicCog(commands.Cog):
                 "An unexpected error occurred. Please try again.",
                 ephemeral=True,
             )
+
+
+    def _name_for_id(self, user_id: str, aliases: dict[str, str]) -> str:
+        user = self.bot.get_user(int(user_id))
+        # build_dataset renders a mention it cannot resolve as "@someone".
+        return member_name(user_id, user.name if user else "someone", aliases)
+
+    def _channel_name_for_id(self, channel_id: str) -> str:
+        channel = self.bot.get_channel(int(channel_id))
+        return getattr(channel, "name", None) or "channel"
 
 
 async def setup(bot: commands.Bot) -> None:

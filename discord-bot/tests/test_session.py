@@ -3,7 +3,6 @@
 import json
 from datetime import datetime, timedelta, timezone
 
-import pytest
 
 from lore.session import LoreSession, LoreSessionStore, chunk_key
 

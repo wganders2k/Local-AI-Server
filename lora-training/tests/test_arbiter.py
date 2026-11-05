@@ -15,7 +15,6 @@ Run:  .venv-test/bin/python -m pytest tests -q
 import json
 
 import httpx
-import pytest
 
 from arbiter import ArbiterClient
 

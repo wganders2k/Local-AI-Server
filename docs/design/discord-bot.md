@@ -430,14 +430,14 @@ The typing indicator is held for the whole of `/mimic` and `/chat`; `/lore` uses
 
 ## 15. LoRA Upgrade Path
 
-When a merged persona GGUF exists, the bot needs **no code changes**:
+When a persona adapter exists, the bot needs **no code changes**:
 
-1. Train an adapter on the uncensored base from per-member history
-2. Merge and export `mimic_<member>_v2.gguf`
-3. Point the `[mimic_<member>]` section in `models.ini` at it
-4. `make restart-llama-swappable`
+1. `make train-dataset`, `make train-submit`: train an adapter on the shared Gemma 4 12B abliterated base from that member's history
+2. `make train-export`: convert it to `/srv/models/lora/mimic_<member>-lora.gguf`. This is a GGUF LoRA, not a merged model
+3. Uncomment the `[mimic_<member>]` section in `models.ini`, which already points the shared base at that adapter
+4. Add the alias to `MIMIC_PERSONAS` and run `make restart-llama-swappable`
 
-The bot references aliases, not weights. Note that the training half of this is not built, and training on per-member history has not been agreed as a decision — see [`lora-training/README.md`](lora-training/README.md).
+The bot references aliases, not weights. Per-member training was decided on 2026-11-04 with the members' agreement. The pipeline is described in [`lora-training/README.md`](lora-training/README.md) §Phase 2.
 
 ---
 

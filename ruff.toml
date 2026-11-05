@@ -1,0 +1,15 @@
+# Lint config for CI (`make lint`). The rule set is ruff's default — syntax
+# errors, undefined names, unused imports/variables — chosen because it catches
+# real bugs without fighting the existing style. Widen it deliberately, not by
+# accretion. No formatter yet: `ruff format` would rewrite most files.
+target-version = "py311"  # oldest interpreter among the service images
+extend-exclude = [".venv-test", "dce_exports", "docs"]
+
+[lint]
+select = ["E4", "E7", "E9", "F"]
+
+[lint.per-file-ignores]
+# These entrypoints configure logging before importing their own modules, so
+# anything those modules log at import time comes out formatted.
+"arbiter/main.py" = ["E402"]
+"proxy/main.py" = ["E402"]

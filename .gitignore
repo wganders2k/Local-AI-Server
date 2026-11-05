@@ -64,6 +64,10 @@ arbiter/.venv-test/
 # Bot test venv — discord.py/httpx/pytest, so the lore package can be tested
 # without building the image.
 discord-bot/.venv-test/
+# history-service test venv — runtime deps plus pytest.
+history-service/.venv-test/
+# Repo-wide lint venv — just ruff, pinned in the Makefile (RUFF_VERSION).
+.venv-lint/
 
 # Bot runtime state.
 #
