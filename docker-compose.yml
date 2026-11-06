@@ -102,6 +102,8 @@ services:
       # unknown-caller path and runs at the *top* priority instead of the bottom.
       - ARBITER_JOB_NAME=lora-trainer
       - TRAIN_CONFIG=${TRAIN_CONFIG:-configs/smoke.yaml}
+      # Per-run checkpoint dir from `make train-queue`; empty = config's output_dir.
+      - TRAIN_OUTPUT_DIR=${TRAIN_OUTPUT_DIR:-}
     volumes:
       - /home/peacow/lora-outputs:/home/peacow/lora-outputs
       # Datasets and hyperparameters are the things that actually get tinkered
@@ -109,6 +111,8 @@ services:
       # of a multi-GB CUDA image.
       # Absolute for the same reason as the discord-bot binds below.
       - /home/peacow/local-ai-server/lora-training/configs:/app/configs:ro
+      # Read by export_latest.py to warn when a persona has no preset to serve it.
+      - /home/peacow/local-ai-server/models.ini:/app/models.ini:ro
       # Model downloads survive preemption; without this every restart re-fetches
       # the base weights, which dwarfs the training it would have done.
       - /home/peacow/.cache/huggingface:/cache/huggingface

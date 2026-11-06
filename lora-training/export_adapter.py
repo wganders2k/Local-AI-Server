@@ -15,6 +15,7 @@ beside live inference.
 """
 
 import argparse
+import json
 import logging
 import os
 import subprocess
@@ -60,18 +61,35 @@ def main() -> int:
     args = ap.parse_args()
 
     cfg = load_config(args.config)
-    adapter = os.path.join(cfg["output_dir"], "final")
+    return export(os.path.join(cfg["output_dir"], "final"), args.name, cfg["model"], args.outtype)
+
+
+def base_model_of(adapter: str) -> str:
+    """The base a finished adapter was trained on, as PEFT recorded it."""
+    with open(os.path.join(adapter, "adapter_config.json")) as fh:
+        return json.load(fh)["base_model_name_or_path"]
+
+
+def export(adapter: str, name: str, model: str | None = None, outtype: str = "f16") -> int:
+    """
+    Convert one finished adapter dir to <LORA_DIR>/<name>-lora.gguf. `model`
+    defaults to the base recorded in the adapter itself, so a run can be
+    exported without knowing which config produced it (export_latest.py).
+    """
     if not checkpoints.is_complete(adapter):
         logger.error(f"{adapter} has no COMPLETE marker — the run has not finished")
         return 1
 
     os.makedirs(LORA_DIR, exist_ok=True)
-    outfile = os.path.join(LORA_DIR, f"{args.name}-lora.gguf")
+    outfile = os.path.join(LORA_DIR, f"{name}-lora.gguf")
+    # Written beside the live file and renamed over it, so a llama-server
+    # loading this persona mid-export never reads half a GGUF.
+    tmpfile = os.path.join(LORA_DIR, f".{name}-lora.tmp.gguf")
     cmd = [
         sys.executable, os.path.join(LLAMA_CPP_DIR, "convert_lora_to_gguf.py"),
-        "--base", base_config_dir(cfg["model"]),
-        "--outtype", args.outtype,
-        "--outfile", outfile,
+        "--base", base_config_dir(model or base_model_of(adapter)),
+        "--outtype", outtype,
+        "--outfile", tmpfile,
         adapter,
     ]
     logger.info(f"Converting {adapter} -> {outfile}")
@@ -79,7 +97,10 @@ def main() -> int:
     result = subprocess.run(cmd, cwd=LLAMA_CPP_DIR)
     if result.returncode != 0:
         logger.error(f"Conversion failed (exit {result.returncode})")
+        if os.path.exists(tmpfile):
+            os.remove(tmpfile)
         return result.returncode
+    os.replace(tmpfile, outfile)
 
     size_mb = os.path.getsize(outfile) / 1e6
     logger.info(f"Wrote {outfile} ({size_mb:.0f} MB). Point a models.ini section's `lora` at it.")

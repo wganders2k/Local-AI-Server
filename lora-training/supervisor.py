@@ -49,6 +49,9 @@ logging.basicConfig(
 logger = logging.getLogger("supervisor")
 
 CONFIG = os.environ.get("TRAIN_CONFIG", "configs/smoke.yaml")
+# Set by `make train-queue` so each run trains into a directory of its own. Unset
+# (a plain train-submit), the config's output_dir is used.
+OUTPUT_DIR = os.environ.get("TRAIN_OUTPUT_DIR", "")
 RETRY_SECONDS = float(os.environ.get("ARBITER_RETRY_SECONDS", "30"))
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -121,7 +124,9 @@ class Supervisor:
         seconds an interactive request is waiting on.
         """
         cmd = [sys.executable, os.path.join(HERE, "train_worker.py"), "--config", CONFIG]
-        logger.info(f"Starting worker: {CONFIG}")
+        if OUTPUT_DIR:
+            cmd += ["--output-dir", OUTPUT_DIR]
+        logger.info(f"Starting worker: {CONFIG}" + (f" -> {OUTPUT_DIR}" if OUTPUT_DIR else ""))
         self.child = subprocess.Popen(cmd, cwd=HERE)
 
         wanted = threading.Event()
