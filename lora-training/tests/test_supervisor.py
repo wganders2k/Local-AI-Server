@@ -209,3 +209,29 @@ def test_waiting_for_the_gpu_gives_up_on_shutdown(monkeypatch):
     monkeypatch.setattr(sup.time, "sleep", lambda _: None)
 
     assert s.wait_for_gpu() is False
+
+
+def _spawned_cmd(monkeypatch, output_dir):
+    """The worker command run_worker builds, with TRAIN_OUTPUT_DIR as given."""
+    monkeypatch.setattr(sup, "OUTPUT_DIR", output_dir)
+    s = _sup(FakeClient(), [FakeChild(0)])
+    cmds = []
+
+    def fake_popen(cmd, cwd=None):
+        cmds.append(cmd)
+        return s._queue.pop(0)
+
+    monkeypatch.setattr(sup.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(sup.time, "sleep", lambda _: None)
+    s.run()
+    return cmds[0]
+
+
+def test_a_queued_run_trains_into_its_own_dir(monkeypatch):
+    """train-queue sets TRAIN_OUTPUT_DIR so a rerun never resumes a finished dir."""
+    cmd = _spawned_cmd(monkeypatch, "/home/peacow/lora-outputs/mimic_user3-20261105-1700")
+    assert cmd[-2:] == ["--output-dir", "/home/peacow/lora-outputs/mimic_user3-20261105-1700"]
+
+
+def test_a_plain_submit_keeps_the_configs_output_dir(monkeypatch):
+    assert "--output-dir" not in _spawned_cmd(monkeypatch, "")

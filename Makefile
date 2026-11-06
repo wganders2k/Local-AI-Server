@@ -389,7 +389,8 @@ status-autocomplete:
 CONFIG ?= configs/smoke.yaml
 
 ## Submit a training run. The only thing that ever starts one.
-## Usage: make train-submit [CONFIG=configs/mimic.yaml]
+## Usage: make train-submit [CONFIG=configs/mimic.yaml] [OUTPUT_DIR=/home/peacow/lora-outputs/<run>]
+## OUTPUT_DIR overrides the config's output_dir (train-queue sets one per run).
 ##
 ## Runs at the lowest GPU priority: it waits for the card rather than failing,
 ## is killed whenever anything outranks it, and resumes from its last complete
@@ -407,7 +408,7 @@ train-submit:
 	fi
 	@echo "Submitting $(CONFIG)..."
 	@docker rm -f lora-trainer >/dev/null 2>&1 || true
-	TRAIN_CONFIG=$(CONFIG) docker compose --profile managed up -d --build lora-trainer
+	TRAIN_CONFIG=$(CONFIG) TRAIN_OUTPUT_DIR=$(OUTPUT_DIR) docker compose --profile managed up -d --build lora-trainer
 	@echo ""
 	@echo "✓ Submitted. It holds no VRAM until the arbiter grants it the card."
 	@echo "  Follow with: make train-logs"
@@ -470,6 +471,70 @@ train-dataset:
 train-export:
 	@[ -n "$(PERSONA)" ] || { echo "Usage: make train-export CONFIG=configs/<run>.yaml PERSONA=mimic_user1"; exit 1; }
 	$(TRAINER_RUN) python export_adapter.py --config "$(CONFIG)" --name "$(PERSONA)"
+
+# ── Persona retraining ──
+# The loop for every persona at once, with nobody needing to remember who
+# mimic_user6 is: datasets -> queue -> check -> export. Who each persona is
+# lives in the roster, /mnt/storage_cold/array/DiscordArchive/training/personas.json
+# (real names, so beside names.json and out of the repo).
+
+## Rebuild training sets from the archive: every persona, or one.
+## Usage: make train-datasets [PERSONA=mimic_user3] [REFRESH=1] [ARGS="--context-n 24"]
+## REFRESH=1 first pulls new Discord history into the archive (can take hours).
+## Don't run it while train-queue is training: the queue reads these files.
+train-datasets:
+	@if [ -n "$(REFRESH)" ]; then \
+		echo "Refreshing the archive from Discord (history-service /evaluate)..."; \
+		resp=$$(curl -sS --fail --max-time 10800 -X POST http://127.0.0.1:11437/evaluate) || exit 1; \
+		echo "$$resp"; \
+		echo "$$resp" | python3 -c "import json,sys; sys.exit(json.load(sys.stdin).get('status') != 'complete')" \
+			|| { echo "Error: archive refresh did not complete"; exit 1; }; \
+	fi
+	$(TRAINER_RUN) python build_all_datasets.py --personas "$(PERSONA)" \
+		--exclude-channels "$(EXCLUDED_CHANNELS),$(TRAIN_EXCLUDED_CHANNELS)" $(if $(ARGS),-- $(ARGS),)
+
+## Retrain personas one after another, in the background. Survives logout.
+## Usage: make train-queue [PERSONAS="mimic_user3 mimic_user5"] [JOB=<id>]
+## Default is the whole roster, largest dataset first. Each run trains into
+## lora-outputs/<persona>-<JOB>; re-running with the same JOB resumes it.
+## Nothing is exported — see train-export-latest.
+train-queue:
+	@if systemctl --user is-active -q train-queue; then \
+		echo "Error: a queue is already running. 'make train-queue-status' / 'make train-queue-stop'."; exit 1; \
+	fi
+	@if [ -n "$$(docker ps -q -f name=^lora-trainer$$)" ]; then \
+		echo "Error: a run is already in progress. 'make train-cancel' first."; exit 1; \
+	fi
+	@systemctl --user reset-failed train-queue 2>/dev/null || true
+	@job=$${JOB:-$$(date -u +%Y%m%d-%H%M)}; \
+	systemd-run --user --unit=train-queue --description="LoRA persona training queue $$job" \
+		$(CURDIR)/lora-training/train_queue.sh "$$job" $(PERSONAS) >/dev/null || exit 1; \
+	echo "✓ Queue $$job started (systemd user unit train-queue)."; \
+	echo "  Progress: make train-queue-status"; \
+	echo "  Log:      ~/.local/share/train-queue/queue-$$job.log"
+
+## What the queue is doing: unit state, its milestones, the current run
+train-queue-status:
+	@echo "=== queue ==="
+	@systemctl --user show train-queue -p ActiveState,SubState,Description --value 2>/dev/null | paste -sd' ' | grep . || echo "  (no queue)"
+	@log=$$(ls -t ~/.local/share/train-queue/queue-*.log 2>/dev/null | head -1); \
+	if [ -n "$$log" ]; then echo "--- $$log"; grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2} ' "$$log"; fi
+	@echo ""
+	@$(MAKE) --no-print-directory train-status
+
+## Stop the queue and the run in progress. Checkpoints stay; re-run with the
+## same JOB=<id> to resume.
+train-queue-stop:
+	@systemctl --user stop train-queue 2>/dev/null && echo "✓ Queue stopped." || echo "No queue running."
+	@$(MAKE) --no-print-directory train-cancel
+
+## Put each persona's newest finished run live on /mimic (or just one).
+## Usage: make train-export-latest [PERSONA=mimic_user3] [RUN=/home/peacow/lora-outputs/<dir>] [FORCE=1] [DRY_RUN=1]
+## Skips personas already serving their newest run. RUN= picks a specific run
+## for PERSONA — that is also how to roll back.
+train-export-latest:
+	$(TRAINER_RUN) python export_latest.py --personas "$(PERSONA)" \
+		$(if $(RUN),--run "$(RUN)",) $(if $(FORCE),--force,) $(if $(DRY_RUN),--dry-run,)
 
 ## Read a persona's outputs on held-out prompts. Add --blind for a recorded A/B.
 ## Usage: make train-sample PERSONA=mimic_user1 MODELS="mimic-base mimic_user1" [ARGS=--blind]

@@ -30,6 +30,9 @@ dataset:
   # one evaluation to a minute or two rather than eating a whole idle window.
   eval_limit: 300
 
+# Used by a plain `make train-submit`. `make train-queue` ignores it and gives
+# each run its own lora-outputs/<persona>-<job> instead.
+#
 # One directory per run, never reused: the worker resumes from the newest
 # complete checkpoint it finds here, so a finished run's directory would make a
 # new submission "resume" at its last step. v1 (2026-11-04, handles, unfiltered

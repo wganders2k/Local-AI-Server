@@ -125,6 +125,10 @@ arbiter.py          the GPU calls — acquire, release, wait_until_wanted
 checkpoints.py      COMPLETE-marker discovery and pruning
 build_dataset.py    archive -> one persona's train/eval JSONL (CPU, no lease)
 export_adapter.py   finished adapter -> GGUF LoRA for llama-server (CPU, no lease)
+personas.py         the roster: persona -> Discord account(s) + display name
+build_all_datasets.py  build_dataset.py for every persona in the roster
+train_queue.sh      host-side: one run after another (make train-queue)
+export_latest.py    newest finished run per persona -> live GGUF (CPU, no lease)
 sample_persona.py   held-out outputs side by side, or a recorded blind A/B
 configs/smoke.yaml  Qwen3-0.6B — validates the handover in minutes
 configs/mimic_gemma4_12b.yaml   the persona run, one copy per member
@@ -259,3 +263,38 @@ these pass straight through `train_worker.py`.
 From the original design: 1–2 epochs, and always train from the fresh base
 checkpoint — never on top of a previously merged model, which compounds drift
 across versions.
+
+### Retraining personas
+
+Three steps, none of which needs anyone to remember who each persona is. That
+lives in the roster, `/mnt/storage_cold/array/DiscordArchive/training/personas.json`
+(`/archive/training/personas.json` in the container), beside `names.json` and
+out of the repo for the same reason: it holds real names.
+
+```bash
+make train-datasets [PERSONA=mimic_user3] [REFRESH=1]   # 1. archive -> train/eval JSONL
+make train-queue [PERSONAS="mimic_user3 mimic_user5"]  # 2. retrain, in the background
+make train-queue-status                                 #    progress; train-queue-stop to stop
+make train-export-latest [PERSONA=mimic_user3]          # 3. put the newest runs live on /mimic
+```
+
+- **Datasets.** `REFRESH=1` first pulls new Discord history into the archive
+  (history-service `/evaluate`, which can take hours). Don't rebuild while a queue
+  is training: the queue reads these files.
+- **Queue.** Runs as the systemd user unit `train-queue`, so it survives logout
+  and any terminal or Claude session that started it. Largest dataset first. Each
+  run trains into `lora-outputs/<persona>-<job>`, a fresh directory, because the
+  worker resumes from whatever is in its output dir. `JOB=<id>` re-runs a job: done
+  personas are skipped, a half-finished one resumes. Log:
+  `~/.local/share/train-queue/queue-<job>.log`. The queue **does not export**.
+- **Export.** Picks each persona's newest run with a complete `final/`, writes
+  `/srv/models/lora/<persona>-lora.gguf` (atomically) and a `<persona>-lora.json`
+  saying which run it came from, and skips personas already serving it. Check the
+  run first (`make train-sample … ARGS=--blind`). `DRY_RUN=1` shows the picks;
+  `PERSONA=… RUN=<dir>` exports a specific run, which is also the rollback.
+
+A new persona needs a roster entry, a `configs/<persona>.yaml` (copy one) and a
+`models.ini` section whose `lora` points at `<persona>-lora.gguf`. Export warns
+if that section is missing. Add the section only once the GGUF exists:
+llama-swappable waits forever on a missing adapter, so `/mimic` hangs until it
+times out.
