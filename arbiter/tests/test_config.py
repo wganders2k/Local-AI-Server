@@ -142,6 +142,11 @@ def test_the_deployed_config_parses():
     assert by_name["llm"].priority > by_name["profile-segment"].priority > by_name["llm-batch"].priority
     assert by_name["llm-batch"].priority > by_name["video-processing"].priority
 
+    # The profiler is kind: none and so is what it outranks or follows (a model
+    # still resident after a chat): reclaiming frees nothing, so only the
+    # headroom check stops it loading on top of a resident model.
+    assert by_name["profile-segment"].required_mb > 0
+
     # Nothing may share the LLM's rank: an equal priority does not preempt, so a
     # tie would silently make the LLM unable to take the card back.
     assert [j.priority for j in jobs].count(by_name["llm"].priority) == 1

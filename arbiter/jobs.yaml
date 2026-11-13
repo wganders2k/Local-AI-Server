@@ -48,9 +48,16 @@ jobs:
   # priority 0, which ties with video-processing and therefore cannot preempt
   # it. Before that it ran at 101 and silently outranked the LLM, which is what
   # prompted the change.
+  #
+  # required_mb because kind: none means nothing it outranks is really stopped:
+  # reclaiming llm-batch, or taking the card while a model is still resident
+  # after a chat, frees no memory. The headroom check is what keeps it from
+  # loading on top of ~20 GB and running out. 4096 is video-processing's figure:
+  # it profiles the same pipeline.
   - name: profile-segment
     kind: none
     priority: 50
+    required_mb: 4096
 
   # Not a container, so it stops its own worker when told. It asks for the card
   # like everything else and holds a blocking /gpu/reclaim-notice while it has
