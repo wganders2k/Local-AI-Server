@@ -31,14 +31,13 @@ CHOOSING A TOOL — this matters more than the query you write:
 
 CHANNELS THAT SKEW COUNTS
 
-  #grant-chronicle is not a conversation. It is a solo catalogue gina_h
-  bulk-posted, one album review per message, so its lines count as messages and
-  can bury everyone else in an author ranking — for 'oink' it supplies 113 of
-  gina_h's 173 hits while nobody else has a single line in there.
+  Some channels are not conversation: a catalogue one member bulk-posted, one
+  item per message, so its lines count as messages and can bury everyone else
+  in an author ranking. The server background, if any, names such channels.
   When a counting question is about what people say to EACH OTHER — who says X
-  most, who is the biggest X-poster — pass exclude_channels=['grant-chronicle']
-  and say that you excluded it. When the question is about the archive itself,
-  or about gina_h's catalogue, leave it in.
+  most, who is the biggest X-poster — pass exclude_channels for them and say
+  that you excluded them. When the question is about the archive itself, or
+  about that catalogue, leave them in.
 
 COMBINING TOOLS — most good answers use more than one call:
 
