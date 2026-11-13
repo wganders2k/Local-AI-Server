@@ -231,29 +231,6 @@ def load_all_records(user_id: str) -> List[dict]:
     return records
 
 
-def get_pending_captions(limit: int = 100) -> List[tuple]:
-    """
-    Scan all user archives for attachments with caption_status == "pending".
-    
-    Args:
-        limit: Maximum number of pending captions to return.
-        
-    Returns:
-        List of tuples: (user_id, record, attachment_index, attachment)
-    """
-    pending = []
-    for user_id in get_all_user_ids():
-        records = load_all_records(user_id)
-        for record in records:
-            attachments = record.get("attachments", [])
-            for idx, att in enumerate(attachments):
-                if att.get("caption_status") == "pending":
-                    pending.append((user_id, record, idx, att))
-                    if len(pending) >= limit:
-                        return pending
-    return pending
-
-
 def rewrite_archive(user_id: str, records: List[dict]) -> None:
     """
     Rewrite a user's entire archive file atomically using write-then-rename.
@@ -350,6 +327,99 @@ def refresh_fields(user_id: str, parsed: Iterable[dict], fields: Iterable[str]) 
 
     update_records(user_id, apply)
     return changed
+
+
+def refresh_attachments(user_id: str, parsed: Iterable[dict], fields: Iterable[str]) -> int:
+    """
+    Bring the parser-owned `fields` of archived attachments in line with a
+    fresh parse, leaving captions and media alone.
+
+    Attachments pair up by `attachment_id` where the archive has one, and by
+    position otherwise — records archived before the id was parsed carry none,
+    and DCE lists a message's attachments in a stable order. A message whose
+    attachment count changed is left as it is rather than guessed at.
+
+    caption_status is the one non-parser field this moves, and only between
+    the two values the parser itself decides — "skipped" and "pending" — so an
+    image the old parser could not recognise becomes captionable, while
+    "done", "error" and anything else the captioner wrote stays put.
+    Returns the number of records changed.
+    """
+    fresh = {str(r["message_id"]): r.get("attachments") or [] for r in parsed if r.get("message_id")}
+    fields = tuple(fields)
+    changed = 0
+
+    def pair(old: List[dict], new: List[dict]) -> List[tuple]:
+        by_id = {a.get("attachment_id"): a for a in new if a.get("attachment_id")}
+        if old and all(a.get("attachment_id") in by_id for a in old):
+            return [(a, by_id[a["attachment_id"]]) for a in old]
+        if len(old) == len(new):
+            return list(zip(old, new))
+        return []
+
+    def apply(records: List[dict]) -> bool:
+        nonlocal changed
+        for rec in records:
+            new_atts = fresh.get(str(rec.get("message_id")))
+            if not new_atts or not rec.get("attachments"):
+                continue
+            touched = False
+            for old, new in pair(rec["attachments"], new_atts):
+                for f in fields:
+                    if f in new and old.get(f) != new[f]:
+                        old[f] = new[f]
+                        touched = True
+                status = old.get("caption_status")
+                if status in ("skipped", "pending", None) and status != new.get("caption_status"):
+                    old["caption_status"] = new.get("caption_status")
+                    touched = True
+            changed += touched
+        return changed > 0
+
+    update_records(user_id, apply)
+    return changed
+
+
+def iter_attachments(predicate: Callable[[dict], bool], limit: int) -> List[tuple]:
+    """
+    Up to `limit` attachments across the archive matching `predicate`, as
+    (user_id, message_id, attachment_id, attachment) tuples — a snapshot for
+    picking work, never for writing back. Writers go through update_records.
+    """
+    found: List[tuple] = []
+    for user_id in get_all_user_ids():
+        for record in load_all_records(user_id):
+            for att in record.get("attachments") or []:
+                if att.get("attachment_id") and predicate(att):
+                    found.append((user_id, str(record.get("message_id")), att["attachment_id"], dict(att, channel_id=record.get("channel_id"))))
+                    if len(found) >= limit:
+                        return found
+    return found
+
+
+def update_attachments(user_id: str, changes: Dict[tuple, dict]) -> int:
+    """
+    Merge changes into archived attachments, keyed (message_id, attachment_id),
+    in one read-modify-write of the user's file under the archive lock.
+    Batched because a rewrite is the whole file: per-attachment writes would
+    rewrite a large user's archive once per image across a 43k-image backfill.
+    Returns how many attachments were found and changed.
+    """
+    done = 0
+
+    def apply(records: List[dict]) -> bool:
+        nonlocal done
+        for rec in records:
+            mid = str(rec.get("message_id"))
+            for att in rec.get("attachments") or []:
+                c = changes.get((mid, att.get("attachment_id")))
+                if c:
+                    att.update(c)
+                    done += 1
+        return done > 0
+
+    update_records(user_id, apply)
+    return done
 
 
 def clear_all() -> int:

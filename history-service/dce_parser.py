@@ -189,45 +189,61 @@ def parse_mentions(raw_mentions: Optional[list], content: str) -> List[dict]:
     return out
 
 
+# What the parser owns on an attachment. POST /reparse refreshes these on
+# archived attachments (jsonl_store.refresh_attachments); everything else on
+# one — the caption, the downloaded media — belongs to the captioner and the
+# media store and is never touched by a reparse.
+ATTACHMENT_PARSER_FIELDS = ("attachment_id", "url", "content_type", "filename", "file_size_bytes")
+
+# Captioned by extension, because DCE writes no content type. Video and audio
+# are out of scope for now: video alone is ~2.7k files and 15 GiB of the
+# archive, and a still-image captioner has nothing to say about it.
+_IMAGE_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+}
+
+
 def _parse_attachments(raw_attachments: list) -> List[dict]:
     """
-    Parse DCE attachment objects into internal attachment schema.
+    Parse DCE attachment objects into the internal attachment schema.
 
-    DCE attachment fields (lowercase): url, content_type, filename, size
-
-    Internal schema:
-        url, content_type, filename, file_size_bytes,
-        caption_status, caption_excluded_from_training
-
-    Args:
-        raw_attachments: List of raw DCE attachment dicts.
-
-    Returns:
-        List of internal attachment records.
+    DCE writes `id`, `url`, `fileName` and `fileSizeBytes` — no content type.
+    An earlier version of this read `content_type`/`filename`/`size`, which DCE
+    never writes, so all ~46k archived attachments came out as nameless,
+    sizeless and "skipped", and nothing was ever captioned. The old names are
+    still accepted as a fallback.
     """
     attachments = []
     for att in raw_attachments:
         url = att.get("url", "") or att.get("URL", "")
-        content_type = att.get("content_type", "") or att.get("ContentType", "")
-        filename = att.get("filename", "")
-        size = att.get("size", 0) or 0
+        filename = att.get("fileName") or att.get("filename") or ""
+        size = att.get("fileSizeBytes") or att.get("size") or 0
+        content_type = (
+            att.get("content_type")
+            or att.get("ContentType")
+            or _IMAGE_TYPES.get(os.path.splitext(filename)[1].lower(), "")
+        )
 
-        internal = {
+        attachments.append({
+            "attachment_id": str(att.get("id") or ""),
             "url": url,
             "content_type": content_type,
             "filename": filename,
             "file_size_bytes": int(size),
             "caption_status": "pending" if _is_image(content_type) else "skipped",
             "caption_excluded_from_training": True,
-        }
-        attachments.append(internal)
+        })
 
     return attachments
 
 
 def _is_image(content_type: str) -> bool:
-    """Check if a content type is an image."""
-    return content_type.startswith("image/") if content_type else False
+    """Whether the captioner takes this attachment."""
+    return content_type in _IMAGE_TYPES.values()
 
 
 def parse_dce_export_file(filepath: str) -> List[dict]:

@@ -105,10 +105,10 @@ class TestParseDCEMessage:
             content="Check this out",
             attachments=[
                 {
+                    "id": "555",
                     "url": "http://example.com/image.png",
-                    "content_type": "image/png",
-                    "filename": "test.png",
-                    "size": 2048,
+                    "fileName": "test.png",
+                    "fileSizeBytes": 2048,
                 }
             ],
         )
@@ -118,6 +118,8 @@ class TestParseDCEMessage:
         assert len(record["attachments"]) == 1
         att = record["attachments"][0]
         assert att["url"] == "http://example.com/image.png"
+        assert att["attachment_id"] == "555"
+        assert att["filename"] == "test.png"
         assert att["content_type"] == "image/png"
         assert att["file_size_bytes"] == 2048
         assert att["caption_status"] == "pending"
@@ -230,19 +232,31 @@ class TestExtractChannelInfo:
 # ──────────────────────────────────────────────────────────────
 
 class TestParseAttachments:
-    def test_parse_image_attachment(self):
-        """Test parsing an image attachment with lowercase fields."""
-        raw = [{"url": "http://img.png", "content_type": "image/png", "filename": "img.png", "size": 1024}]
-        result = _parse_attachments(raw)
-        assert len(result) == 1
-        assert result[0]["caption_status"] == "pending"
+    def test_dce_fields_are_read(self):
+        """DCE writes id/fileName/fileSizeBytes and no content type."""
+        raw = [{"id": "9", "url": "http://cdn/x/IMG.JPG?ex=1", "fileName": "IMG.JPG", "fileSizeBytes": 1024}]
+        [att] = _parse_attachments(raw)
+        assert att["attachment_id"] == "9"
+        assert att["filename"] == "IMG.JPG"
+        assert att["file_size_bytes"] == 1024
+        assert att["content_type"] == "image/jpeg"
+        assert att["caption_status"] == "pending"
 
-    def test_parse_non_image_attachment(self):
-        """Test parsing a non-image attachment."""
-        raw = [{"url": "http://file.pdf", "content_type": "application/pdf", "filename": "doc.pdf", "size": 4096}]
-        result = _parse_attachments(raw)
-        assert len(result) == 1
-        assert result[0]["caption_status"] == "skipped"
+    @pytest.mark.parametrize("name", ["a.png", "a.jpeg", "a.webp", "a.gif"])
+    def test_image_extensions_are_captionable(self, name):
+        [att] = _parse_attachments([{"id": "1", "fileName": name}])
+        assert att["caption_status"] == "pending"
+
+    @pytest.mark.parametrize("name", ["clip.mp4", "doc.pdf", "song.mp3", "noext"])
+    def test_other_files_are_skipped(self, name):
+        [att] = _parse_attachments([{"id": "1", "fileName": name}])
+        assert att["caption_status"] == "skipped"
+
+    def test_legacy_field_names_still_parse(self):
+        raw = [{"url": "http://img.png", "content_type": "image/png", "filename": "img.png", "size": 1024}]
+        [att] = _parse_attachments(raw)
+        assert att["caption_status"] == "pending"
+        assert att["file_size_bytes"] == 1024
 
     def test_parse_empty_attachments(self):
         """Test parsing an empty attachment list."""

@@ -3,7 +3,8 @@ History Service — Main entry point.
 
 FastAPI application exposing internal HTTP endpoints on :11437.
 Registers APScheduler jobs for:
-  (1) Image captioning batch (every 5 min, caption window)
+  (1) Archive media fetch (every 2 min, MEDIA_FETCH_ENABLED)
+  (2) Image captioning batch (every minute, IMAGE_CAPTION_ENABLED)
 """
 
 import asyncio
@@ -25,13 +26,13 @@ from config import (
     EXCLUDED_CHANNELS,
     HOST,
     IMAGE_CAPTION_ENABLED,
-    IMAGE_CAPTION_WINDOW_END,
-    IMAGE_CAPTION_WINDOW_START,
+    MEDIA_FETCH_ENABLED,
     PORT,
 )
 from channel_state import reset_state
 from dce_orchestrator import evaluate_and_export
 from image_captioner import process_pending_batch
+from media_store import fetch_batch
 from jsonl_store import get_message_count, get_all_user_ids, clear_all
 
 logging.basicConfig(
@@ -50,36 +51,27 @@ scheduler = AsyncIOScheduler()
 # ──────────────────────────────────────────────────────────────
 
 
-def _is_within_window(window_start: int, window_end: int) -> bool:
-    """Check if current UTC hour is within the given window."""
-    now = datetime.now(timezone.utc)
-    hour = now.hour
-
-    if window_start <= window_end:
-        return window_start <= hour < window_end
-    else:
-        return hour >= window_start or hour < window_end
+async def media_fetch_job() -> None:
+    """Scheduled job: keep a local copy of image attachments (media_store)."""
+    try:
+        await asyncio.to_thread(fetch_batch)
+    except Exception as e:
+        logger.error(f"Media fetch job failed: {e}", exc_info=True)
 
 
 async def caption_batch_job() -> None:
     """
-    Scheduled job: process pending image captions.
+    Scheduled job: caption stored images (image_captioner).
 
-    Runs every 300 seconds but only
-    executes within the caption window.
+    No time window: the proxy ranks these requests as batch work and holds
+    them while anyone is using the GPU, so the job can run around the clock.
+    In a worker thread because a batch blocks for minutes on the proxy, and
+    on the event loop that would stall every HTTP endpoint with it.
     """
-    if not IMAGE_CAPTION_ENABLED:
-        return
-
-    if not _is_within_window(IMAGE_CAPTION_WINDOW_START, IMAGE_CAPTION_WINDOW_END):
-        return
-
     try:
-        count = process_pending_batch()
-        if count > 0:
-            logger.info(f"Caption batch: {count} images processed")
+        await asyncio.to_thread(process_pending_batch)
     except Exception as e:
-        logger.error(f"Caption batch job failed: {e}")
+        logger.error(f"Caption batch job failed: {e}", exc_info=True)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -94,19 +86,19 @@ async def lifespan(app: FastAPI):
     validate_required()
     logger.info("History service starting up")
 
+    if MEDIA_FETCH_ENABLED:
+        scheduler.add_job(
+            media_fetch_job, "interval", seconds=120,
+            id="media_fetch", name="Archive media fetch", max_instances=1,
+        )
+        logger.info("Media fetch job registered: every 120s")
+
     if IMAGE_CAPTION_ENABLED:
         scheduler.add_job(
-            caption_batch_job,
-            "interval",
-            seconds=300,
-            id="caption_batch",
-            name="Image captioning batch",
-            max_instances=1,
+            caption_batch_job, "interval", seconds=60,
+            id="caption_batch", name="Image captioning batch", max_instances=1,
         )
-        logger.info(
-            f"Caption batch job registered: every 300s, "
-            f"window {IMAGE_CAPTION_WINDOW_START}:00–{IMAGE_CAPTION_WINDOW_END}:00 UTC"
-        )
+        logger.info("Caption batch job registered: every 60s (proxy-ranked batch work)")
 
     scheduler.start()
     logger.info("Scheduler started")
@@ -201,8 +193,10 @@ async def reparse() -> dict:
 
     Messages already archived get the parser-owned fields (type, reference,
     is_pinned, mentions) refreshed from the parse, so a parser change reaches
-    old records too — re-running this after one is the backfill. Nothing else
-    on an archived record is touched. Where a message appears in several
+    old records too — re-running this after one is the backfill. Attachments
+    get their parser-owned fields (id, url, name, size, type) refreshed the
+    same way; their captions and downloaded media are never touched. Nothing
+    else on an archived record is. Where a message appears in several
     exports, the latest export wins.
 
     This endpoint does NOT call the Discord API or invoke DCE subprocesses.
@@ -212,7 +206,8 @@ async def reparse() -> dict:
 
     try:
         from dce_parser import parse_dce_export_directory
-        from dce_parser import PARSER_OWNED_FIELDS
+        from dce_parser import ATTACHMENT_PARSER_FIELDS, PARSER_OWNED_FIELDS
+        from jsonl_store import refresh_attachments as _refresh_attachments
         from jsonl_store import append_messages as _append_messages
         from jsonl_store import refresh_fields as _refresh_fields
 
@@ -265,14 +260,17 @@ async def reparse() -> dict:
 
         total_appended = 0
         total_refreshed = 0
+        total_att_refreshed = 0
         users_touched: set = set()
         for uid, by_id in latest.items():
             records = sorted(by_id.values(), key=lambda r: (r.get("timestamp", ""), r["message_id"]))
             appended = await asyncio.to_thread(_append_messages, uid, records)
             refreshed = await asyncio.to_thread(_refresh_fields, uid, records, PARSER_OWNED_FIELDS)
+            att_refreshed = await asyncio.to_thread(_refresh_attachments, uid, records, ATTACHMENT_PARSER_FIELDS)
             total_appended += appended
             total_refreshed += refreshed
-            if appended or refreshed:
+            total_att_refreshed += att_refreshed
+            if appended or refreshed or att_refreshed:
                 users_touched.add(uid)
 
         return {
@@ -281,6 +279,7 @@ async def reparse() -> dict:
             "total_records_parsed": total_parsed,
             "total_records_appended": total_appended,
             "total_records_refreshed": total_refreshed,
+            "total_attachment_records_refreshed": total_att_refreshed,
             "total_records_excluded": excluded,
             "users_updated": len(users_touched),
         }
@@ -291,6 +290,27 @@ async def reparse() -> dict:
             "status": "error",
             "message": str(e),
         }
+
+
+@app.get("/media/status")
+async def media_status() -> dict:
+    """
+    Progress of the media fetch and caption backfill: attachment counts by
+    media_status and by caption_status, across the whole archive.
+    """
+    def count() -> dict:
+        from collections import Counter
+        from jsonl_store import load_all_records
+        media, caption = Counter(), Counter()
+        for uid in get_all_user_ids():
+            for rec in load_all_records(uid):
+                for att in rec.get("attachments") or []:
+                    caption[att.get("caption_status", "none")] += 1
+                    if att.get("caption_status") != "skipped":
+                        media[att.get("media_status", "none")] += 1
+        return {"media_status": dict(media), "caption_status": dict(caption)}
+
+    return await asyncio.to_thread(count)
 
 
 @app.get("/archive/{user_id}/count")

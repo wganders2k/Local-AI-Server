@@ -20,7 +20,9 @@ ARBITER_JOB_NAME = os.environ.get("ARBITER_JOB_NAME", "llm")
 # BATCH_YIELD_SECONDS. So a person on /mimic waits for at most the one batch call
 # already running, and the slot is not swapped back and forth between the two
 # models on every message of a busy chat.
-BATCH_MODELS: set[str] = {m.strip() for m in os.environ.get("BATCH_MODELS", "judge").split(",") if m.strip()}
+# `caption` is history-service's archive backfill: ~43k images at a few seconds
+# each, i.e. a day or more of GPU time that nobody is waiting on.
+BATCH_MODELS: set[str] = {m.strip() for m in os.environ.get("BATCH_MODELS", "judge,caption").split(",") if m.strip()}
 ARBITER_BATCH_JOB_NAME = os.environ.get("ARBITER_BATCH_JOB_NAME", "llm-batch")
 BATCH_YIELD_SECONDS = float(os.environ.get("BATCH_YIELD_SECONDS", "30"))
 

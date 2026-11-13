@@ -44,15 +44,42 @@ EXCLUDED_CHANNELS: List[str] = [
 
 
 # ──────────────────────────────────────────────────────────────
-# Image captioning
+# Archive media (media_store.py) — network and disk, no GPU
+# ──────────────────────────────────────────────────────────────
+
+ARCHIVE_MEDIA_DIR: str = "/archive/media"
+MEDIA_FETCH_ENABLED: bool = os.environ.get("MEDIA_FETCH_ENABLED", "false").lower() == "true"
+# 200 per run every 2 min clears the 43.2k-image backlog in about a day and a
+# half even if every download were slow, and keeps one run's refresh-urls
+# traffic at 4 calls.
+MEDIA_FETCH_BATCH_SIZE: int = int(os.environ.get("MEDIA_FETCH_BATCH_SIZE", "200"))
+MEDIA_FETCH_WORKERS: int = int(os.environ.get("MEDIA_FETCH_WORKERS", "4"))
+# Discord's own upload cap for a non-boosted server is 25 MB (as of 2026); the
+# largest archived image is under that, so this only guards against surprises.
+MEDIA_FETCH_MAX_FILE_SIZE_MB: int = int(os.environ.get("MEDIA_FETCH_MAX_FILE_SIZE_MB", "50"))
+# Transient failures are retried on later runs; past this an image is left.
+MEDIA_FETCH_MAX_ATTEMPTS: int = int(os.environ.get("MEDIA_FETCH_MAX_ATTEMPTS", "3"))
+
+
+# ──────────────────────────────────────────────────────────────
+# Image captioning (image_captioner.py) — GPU, through the proxy
 # ──────────────────────────────────────────────────────────────
 
 IMAGE_CAPTION_ENABLED: bool = os.environ.get("IMAGE_CAPTION_ENABLED", "false").lower() == "true"
-IMAGE_CAPTION_MODEL: str = os.environ.get("IMAGE_CAPTION_MODEL", "image-caption")
-IMAGE_CAPTION_BATCH_SIZE: int = int(os.environ.get("IMAGE_CAPTION_BATCH_SIZE", "10"))
-IMAGE_CAPTION_WINDOW_START: int = int(os.environ.get("IMAGE_CAPTION_WINDOW_START", "3"))
-IMAGE_CAPTION_WINDOW_END: int = int(os.environ.get("IMAGE_CAPTION_WINDOW_END", "6"))
-IMAGE_CAPTION_MAX_FILE_SIZE_MB: int = int(os.environ.get("IMAGE_CAPTION_MAX_FILE_SIZE_MB", "10"))
+# Must be an alias in models.ini AND listed in the proxy's BATCH_MODELS, so the
+# backfill ranks as llm-batch and always yields to a person.
+IMAGE_CAPTION_MODEL: str = os.environ.get("IMAGE_CAPTION_MODEL", "caption")
+# Results are written once per batch, per user file. The proxy may hold each
+# batch request until interactive traffic has been quiet for 30s, so a batch
+# can take minutes; 20 keeps one batch's unwritten work small.
+IMAGE_CAPTION_BATCH_SIZE: int = int(os.environ.get("IMAGE_CAPTION_BATCH_SIZE", "20"))
+IMAGE_CAPTION_MAX_ATTEMPTS: int = int(os.environ.get("IMAGE_CAPTION_MAX_ATTEMPTS", "3"))
+# Longest side sent to the model. Gemma 4's vision encoder resizes anyway, so
+# a 4K screenshot sent whole is only a bigger request body for no gain.
+IMAGE_CAPTION_MAX_SIDE: int = int(os.environ.get("IMAGE_CAPTION_MAX_SIDE", "1536"))
+# Generous because the proxy holds batch requests behind interactive traffic
+# and may need a model swap first (see the local-ai-proxy notes: 600s).
+IMAGE_CAPTION_TIMEOUT_S: float = float(os.environ.get("IMAGE_CAPTION_TIMEOUT_S", "600"))
 
 
 # ──────────────────────────────────────────────────────────────

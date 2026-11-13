@@ -1,289 +1,141 @@
 """
-Image captioning pipeline.
+Image captioning: archive backfill for Discord image attachments.
 
-Batch processor: scans pending attachments, downloads images,
-calls proxy with image-caption model, writes captions to JSONL.
+Picks images that media_store has a local copy of and that have no caption
+yet, sends each to the proxy's `caption` preset (models.ini), and writes the
+result onto the attachment. rag/ingest.py folds captions into a message's
+text, which is what makes image content searchable.
 
-Runs as a scheduled job during the caption window.
+GPU contention is not this module's problem. `caption` is one of the proxy's
+BATCH_MODELS, so every request is ranked as arbiter job llm-batch (below any
+person, above the video job) and held until interactive traffic has been quiet
+for a while. That replaces the 3–6 AM window and the queue-depth check this
+module used to carry: the proxy knows when the card is wanted, this does not.
 
-NON-FUNCTIONAL as of 2026-11-04 — it has never captioned anything:
+Each caption records the model and a hash of the prompt that produced it, so a
+re-caption after either changes can find exactly the stale ones.
 
-- Disabled: IMAGE_CAPTION_ENABLED=false in the deployed container.
-- Nothing to do even if enabled: dce_parser marks an attachment "pending"
-  only when it has a `content_type`, a field DCE never writes (DCE gives
-  id, url, fileName, fileSizeBytes). All 45,048 archived attachments are
-  "skipped".
-- The stored URLs are signed Discord CDN links that expire (`ex=`), so old
-  images would mostly fail to download.
-- process_pending_batch loads a user's records, spends minutes captioning,
-  then rewrites the file from that snapshot, discarding anything written in
-  between. A fix should apply its changes through jsonl_store.update_records.
+History: until 2026-11-12 this never captioned anything — the parser marked
+every attachment "skipped", the stored links had expired, the preset was
+commented out, and the write-back clobbered concurrent writes. See git log.
 """
 
+import base64
+import hashlib
+import io
 import logging
 import os
-import tempfile
-from typing import Dict, List, Optional
+from pathlib import Path
+from typing import Dict, Optional
 
 import httpx
+from PIL import Image
 
 from config import (
+    ARCHIVE_MEDIA_DIR,
     IMAGE_CAPTION_BATCH_SIZE,
-    IMAGE_CAPTION_MAX_FILE_SIZE_MB,
+    IMAGE_CAPTION_MAX_ATTEMPTS,
+    IMAGE_CAPTION_MAX_SIDE,
     IMAGE_CAPTION_MODEL,
+    IMAGE_CAPTION_TIMEOUT_S,
     PROXY_URL,
 )
-from jsonl_store import get_pending_captions, load_all_records, rewrite_archive
+from jsonl_store import iter_attachments, update_attachments
 
 logger = logging.getLogger(__name__)
 
-# Caption prompt — tuned for the uncensored mimic base model
-CAPTION_PROMPT = (
-    "Describe this image in 1-2 sentences. Be direct and factual. "
-    "Include key visual elements, text, and context. "
-    "Do not add disclaimers or safety warnings."
-)
+PROMPT_PATH = Path(__file__).parent / "prompts" / "caption.md"
+CAPTION_PROMPT = PROMPT_PATH.read_text().strip()
+PROMPT_VERSION = hashlib.sha256(CAPTION_PROMPT.encode()).hexdigest()[:12]
+
+# Ceiling on the answer. The prompt asks for 1–3 sentences plus any quoted
+# text; a long chat screenshot's transcription is the only thing that nears it.
+MAX_TOKENS = 200
 
 
-def _get_proxy_queue_depth() -> int:
+def needs_caption(att: dict) -> bool:
+    return (
+        att.get("caption_status") == "pending"
+        and att.get("media_status") == "stored"
+        and att.get("caption_attempts", 0) < IMAGE_CAPTION_MAX_ATTEMPTS
+    )
+
+
+def encode_image(path: str, max_side: int = IMAGE_CAPTION_MAX_SIDE) -> str:
     """
-    Check proxy queue depth via HTTP GET /status.
-    
-    Returns:
-        Queue depth (0 means idle). Returns -1 on error.
+    A data: URL the model can read. Everything is re-encoded as JPEG: the
+    projector's loader (stb_image in llama.cpp) reads no WebP, an animated GIF
+    is captioned by its first frame, and alpha has nothing to say to a caption.
     """
+    with Image.open(path) as im:
+        im.seek(0)
+        im = im.convert("RGB")
+        im.thumbnail((max_side, max_side))
+        buf = io.BytesIO()
+        im.save(buf, format="JPEG", quality=90)
+    return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
+
+
+def caption_image(client: httpx.Client, data_url: str) -> Optional[str]:
+    payload = {
+        "model": IMAGE_CAPTION_MODEL,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": data_url}},
+                {"type": "text", "text": CAPTION_PROMPT},
+            ],
+        }],
+        "max_tokens": MAX_TOKENS,
+    }
     try:
-        with httpx.Client(timeout=10.0) as client:
-            resp = client.get(f"{PROXY_URL}/status")
-            if resp.status_code == 200:
-                data = resp.json()
-                return data.get("queue_depth", 0)
-    except Exception as e:
-        logger.error(f"Failed to check proxy queue depth: {e}")
-    
-    return -1
+        resp = client.post(f"{PROXY_URL}/v1/chat/completions", json=payload)
+    except httpx.HTTPError as e:
+        logger.warning(f"Caption request failed: {e}")
+        return None
+    if resp.status_code != 200:
+        logger.warning(f"Caption request failed: HTTP {resp.status_code} — {resp.text[:200]}")
+        return None
+    choices = resp.json().get("choices") or []
+    text = (choices[0].get("message", {}).get("content") or "").strip() if choices else ""
+    return text or None
 
 
-def _download_image(url: str, max_size_mb: int) -> Optional[str]:
-    """
-    Download an image from URL to a temporary file.
-    
-    Args:
-        url: Image URL.
-        max_size_mb: Maximum file size in MB.
-        
-    Returns:
-        Path to temporary file, or None on failure.
-    """
-    try:
-        with httpx.Client(timeout=30.0, follow_redirects=True) as client:
-            resp = client.get(url)
-            if resp.status_code != 200:
-                logger.warning(f"Failed to download image: HTTP {resp.status_code}")
-                return None
-            
-            size_bytes = len(resp.content)
-            if size_bytes > max_size_mb * 1024 * 1024:
-                logger.warning(
-                    f"Image too large: {size_bytes / (1024*1024):.1f} MB > {max_size_mb} MB"
-                )
-                return None
-            
-            # Write to temp file
-            fd, path = tempfile.mkstemp(suffix=".jpg")
+def process_pending_batch(limit: int = IMAGE_CAPTION_BATCH_SIZE) -> int:
+    """Caption up to `limit` stored images. Returns how many were attempted."""
+    work = iter_attachments(needs_caption, limit)
+    if not work:
+        return 0
+
+    archive_root = os.path.dirname(ARCHIVE_MEDIA_DIR.rstrip("/"))
+    by_user: Dict[str, Dict[tuple, dict]] = {}
+    done = 0
+
+    with httpx.Client(timeout=IMAGE_CAPTION_TIMEOUT_S) as client:
+        for user_id, message_id, attachment_id, att in work:
+            attempts = att.get("caption_attempts", 0) + 1
+            changes: dict = {"caption_attempts": attempts}
             try:
-                os.write(fd, resp.content)
-            finally:
-                os.close(fd)
-            
-            return path
-    
-    except Exception as e:
-        logger.error(f"Failed to download image from {url}: {e}")
-        return None
-
-
-def _caption_image(image_path: str) -> Optional[str]:
-    """
-    Send an image to the proxy for captioning.
-    
-    Args:
-        image_path: Path to the local image file.
-        
-    Returns:
-        Caption text, or None on failure.
-    """
-    try:
-        with open(image_path, "rb") as f:
-            image_data = f.read()
-        
-        # Base64 encode the image for the OpenAI-compatible API
-        import base64
-        image_b64 = base64.b64encode(image_data).decode("utf-8")
-        
-        # Detect content type from file extension
-        ext = os.path.splitext(image_path)[1].lower()
-        content_type_map = {
-            ".jpg": "image/jpeg",
-            ".jpeg": "image/jpeg",
-            ".png": "image/png",
-            ".gif": "image/gif",
-            ".webp": "image/webp",
-            ".bmp": "image/bmp",
-        }
-        content_type = content_type_map.get(ext, "image/jpeg")
-        
-        with httpx.Client(timeout=120.0) as client:
-            payload = {
-                "model": IMAGE_CAPTION_MODEL,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": CAPTION_PROMPT,
-                            },
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:{content_type};base64,{image_b64}"
-                                },
-                            },
-                        ],
-                    }
-                ],
-                "max_tokens": 256,
-                "temperature": 0.3,
-            }
-            
-            resp = client.post(
-                f"{PROXY_URL}/v1/chat/completions",
-                json=payload,
-            )
-            
-            if resp.status_code != 200:
-                logger.error(
-                    f"Caption request failed: HTTP {resp.status_code} — {resp.text[:200]}"
-                )
-                return None
-            
-            data = resp.json()
-            choices = data.get("choices", [])
-            if not choices:
-                logger.error("Caption request returned no choices")
-                return None
-            
-            content = choices[0].get("message", {}).get("content", "")
-            return content.strip() if content else None
-    
-    except Exception as e:
-        logger.error(f"Caption request failed: {e}")
-        return None
-
-
-def process_pending_batch() -> int:
-    """
-    Process a batch of pending image captions.
-    
-    Scans all user archives for attachments with caption_status == "pending",
-    downloads images, generates captions via the proxy, and updates the JSONL.
-    
-    Returns:
-        Number of images processed in this batch.
-    """
-    # Check proxy queue depth — defer if busy
-    queue_depth = _get_proxy_queue_depth()
-    if queue_depth < 0:
-        logger.warning("Cannot reach proxy — deferring caption batch")
-        return 0
-    if queue_depth > 0:
-        logger.info(
-            f"Proxy has {queue_depth} queued request(s) — deferring caption batch"
-        )
-        return 0
-    
-    # Get pending captions
-    pending = get_pending_captions(limit=IMAGE_CAPTION_BATCH_SIZE)
-    
-    if not pending:
-        logger.info("No pending captions to process")
-        return 0
-    
-    logger.info(f"Processing {len(pending)} pending captions")
-    
-    processed = 0
-    # Track which users need archive rewrites
-    user_updates: Dict[str, List[dict]] = {}
-    
-    for user_id, record, att_idx, attachment in pending:
-        url = attachment.get("url", "")
-        filename = attachment.get("filename", "")
-        
-        logger.info(f"Captioning: {filename} (user {user_id})")
-        
-        # Download image
-        image_path = _download_image(url, IMAGE_CAPTION_MAX_FILE_SIZE_MB)
-        if not image_path:
-            # Mark as skipped
-            attachment["caption_status"] = "skipped"
-            logger.info(f"Skipped {filename}: download failed or too large")
-            _record_update(user_updates, user_id, record, att_idx, attachment)
-            processed += 1
-            continue
-        
-        try:
-            # Generate caption
-            caption = _caption_image(image_path)
-            
-            if caption:
-                attachment["caption"] = caption
-                attachment["caption_status"] = "done"
-                logger.info(f"Captioned {filename}: {caption[:80]}...")
+                data_url = encode_image(os.path.join(archive_root, att["media_path"]))
+            except Exception as e:  # unreadable or not really an image
+                logger.info(f"Unreadable image {att.get('media_path')}: {e}")
+                changes["caption_status"] = "unreadable"
             else:
-                attachment["caption_status"] = "error"
-                logger.warning(f"Caption generation failed for {filename}")
-            
-            _record_update(user_updates, user_id, record, att_idx, attachment)
-            processed += 1
-        
-        finally:
-            # Clean up temp file
-            try:
-                os.unlink(image_path)
-            except OSError:
-                pass
-    
-    # Rewrite archives with updated records
-    for user_id, updated_records in user_updates.items():
-        rewrite_archive(user_id, updated_records)
-    
-    logger.info(f"Caption batch complete: {processed} images processed")
-    return processed
+                caption = caption_image(client, data_url)
+                if caption:
+                    changes.update(
+                        caption=caption,
+                        caption_status="done",
+                        caption_model=IMAGE_CAPTION_MODEL,
+                        caption_prompt_version=PROMPT_VERSION,
+                    )
+                    done += 1
+                elif attempts >= IMAGE_CAPTION_MAX_ATTEMPTS:
+                    changes["caption_status"] = "error"
+            by_user.setdefault(user_id, {})[(message_id, attachment_id)] = changes
 
+    for user_id, changes in by_user.items():
+        update_attachments(user_id, changes)
 
-def _record_update(
-    user_updates: Dict[str, List[dict]],
-    user_id: str,
-    record: dict,
-    att_idx: int,
-    updated_attachment: dict,
-) -> None:
-    """
-    Record an attachment update for later archive rewrite.
-    
-    If this is the first update for this user, load all records
-    so we can rewrite the complete archive.
-    """
-    if user_id not in user_updates:
-        user_updates[user_id] = load_all_records(user_id)
-    
-    records = user_updates[user_id]
-    
-    # Find the matching record and update the attachment
-    for r in records:
-        if r.get("message_id") == record.get("message_id"):
-            attachments = r.get("attachments", [])
-            if att_idx < len(attachments):
-                attachments[att_idx] = updated_attachment
-            break
+    logger.info(f"Caption batch: {done}/{len(work)} captioned")
+    return len(work)

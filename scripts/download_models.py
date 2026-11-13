@@ -57,7 +57,7 @@ def load_swappable_models(models_ini_path: Path) -> list[dict]:
     """
     Derive the swappable-slot download list from models.ini's active sections.
     Commented-out (`;`-prefixed) sections are invisible to configparser and are
-    correctly skipped. De-duplicates by resolved GGUF path — several aliases
+    correctly skipped. Includes vision projectors (`mmproj =`). De-duplicates by resolved GGUF path — several aliases
     share a file (e.g. brain/chat-chinese, lore/chat-liberal).
     """
     parser = configparser.ConfigParser(interpolation=None)
@@ -65,25 +65,25 @@ def load_swappable_models(models_ini_path: Path) -> list[dict]:
 
     seen_paths: dict[str, dict] = {}
     for section in parser.sections():
-        model_path = parser[section].get("model")
-        if not model_path:
-            continue
-        if model_path in seen_paths:
-            continue
+        # `mmproj` is a vision preset's projector. It lives in the same repo as
+        # its model, so it resolves to a repo id the same way.
+        for key in ("model", "mmproj"):
+            path = parser[section].get(key)
+            if not path or path in seen_paths:
+                continue
 
-        # /srv/models/<publisher>/<repo>/<filename>.gguf
-        rel = Path(model_path).relative_to("/srv/models")
-        local_dir = str(rel.parent)
-        filename = rel.name
-        repo_id = HF_REPO_OVERRIDES.get(local_dir, local_dir)
+            # /srv/models/<publisher>/<repo>/<filename>.gguf
+            rel = Path(path).relative_to("/srv/models")
+            local_dir = str(rel.parent)
+            repo_id = HF_REPO_OVERRIDES.get(local_dir, local_dir)
 
-        seen_paths[model_path] = {
-            "repo_id":   repo_id,
-            "filename":  filename,
-            "local_dir": local_dir,
-            "slot":      "swappable",
-            "notes":     f"[{section}] and any alias sharing this GGUF",
-        }
+            seen_paths[path] = {
+                "repo_id":   repo_id,
+                "filename":  rel.name,
+                "local_dir": local_dir,
+                "slot":      "swappable",
+                "notes":     f"[{section}] {key} and any alias sharing this file",
+            }
 
     return list(seen_paths.values())
 

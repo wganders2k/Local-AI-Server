@@ -203,8 +203,9 @@ Currently enabled aliases in `models.ini`:
 | `chat-liberal` | gemma-4-26B-A4B-it UD-Q4_K_XL | Open WebUI |
 | `chat-chinese` | Qwen3.6-35B-A3B UD-IQ4_NL | Open WebUI |
 | `bomb-you` | Qwen3.5-35B-A3B-Uncensored IQ4_XS | Open WebUI |
+| `caption` | Qwen3.6-27B heretic Q4_K_M + vision projector | archive image captioning (proxy batch work) |
 
-**Commented out and therefore unavailable:** `mimic_user1` (a template awaiting its trained adapter) and `image-caption`. `/mimic` still offers `mimic_user1`–`mimic_user6` via autocomplete, but a request reaches llama-server and finds no such preset. `mimic-base` is the bare persona base, used as the control in `make train-sample`.
+**Commented out and therefore unavailable:** `mimic_user1` (a template awaiting its trained adapter). `/mimic` still offers `mimic_user1`–`mimic_user6` via autocomplete, but a request reaches llama-server and finds no such preset. `mimic-base` is the bare persona base, used as the control in `make train-sample`.
 
 The proxy does not gate on a model list of its own: it forwards *any* model name to the swappable slot and lets llama-server decide. `models.ini` is the single source of truth for what's actually available.
 
@@ -238,7 +239,8 @@ Missing, the bot still starts and `/lore` still answers — it just logs a warni
 make dce-evaluate  →  history-service reads channel_state.json
                    →  runs DiscordChatExporter per stale channel (via docker-socket-proxy)
                    →  merges raw JSON into per-user JSONL at /archive/archive/<user_id>.jsonl
-                   →  optional image captioning (IMAGE_CAPTION_ENABLED, 3–6 AM window)
+                   →  optional local copies of images (MEDIA_FETCH_ENABLED) and captions
+                      (IMAGE_CAPTION_ENABLED, proxy batch work)
 
 make rag-ingest    →  rag-service chunks the JSONL by conversation, embeds with
                       ibm-granite/granite-embedding-311m-multilingual-r2, upserts to

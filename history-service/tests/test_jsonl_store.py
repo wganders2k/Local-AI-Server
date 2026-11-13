@@ -12,7 +12,6 @@ from jsonl_store import (
     get_message_count,
     get_all_user_ids,
     load_all_records,
-    get_pending_captions,
     rewrite_archive,
     refresh_fields,
     update_records,
@@ -173,51 +172,6 @@ class TestLoadAllRecords:
         assert records == []
 
 
-class TestGetPendingCaptions:
-    def test_get_pending_captions(self, temp_archive_dir):
-        """Test getting pending captions from attachments."""
-        record = {
-            "message_id": "1",
-            "user_id": "user1",
-            "attachments": [
-                {
-                    "url": "http://example.com/image.png",
-                    "content_type": "image/png",
-                    "filename": "test.png",
-                    "file_size_bytes": 1024,
-                    "caption_status": "pending",
-                    "caption_excluded_from_training": True,
-                }
-            ],
-        }
-        append_messages("user1", [record])
-
-        pending = get_pending_captions(limit=10)
-        assert len(pending) == 1
-        user_id, rec, att_idx, attachment = pending[0]
-        assert user_id == "user1"
-        assert att_idx == 0
-        assert attachment["filename"] == "test.png"
-
-    def test_skip_done_captions(self, temp_archive_dir):
-        """Test that completed captions are not returned as pending."""
-        record = {
-            "message_id": "1",
-            "user_id": "user1",
-            "attachments": [
-                {
-                    "url": "http://example.com/image.png",
-                    "caption_status": "done",
-                    "caption": "Already captioned",
-                }
-            ],
-        }
-        append_messages("user1", [record])
-
-        pending = get_pending_captions(limit=10)
-        assert len(pending) == 0
-
-
 class TestRewriteArchive:
     def test_rewrite_archive(self, temp_archive_dir):
         """Test rewriting an archive file."""
@@ -312,3 +266,75 @@ class TestRewriteKeepsPermissions:
         rewrite_archive("u2", [{"message_id": "1"}])
 
         assert os.stat(_user_file_path("u2")).st_mode & 0o777 == 0o644
+
+
+# ──────────────────────────────────────────────────────────────
+# Attachments: reparse refresh and batched updates
+# ──────────────────────────────────────────────────────────────
+
+from dce_parser import ATTACHMENT_PARSER_FIELDS  # noqa: E402
+from jsonl_store import iter_attachments, refresh_attachments, update_attachments  # noqa: E402
+
+
+def _legacy_att(**kw):
+    """What the old parser archived: no id, no name, no size, always skipped."""
+    att = {"url": "https://cdn/old", "content_type": "", "filename": "", "file_size_bytes": 0,
+           "caption_status": "skipped", "caption_excluded_from_training": True}
+    att.update(kw)
+    return att
+
+
+def _fresh_att(aid="7", name="cat.png", status="pending", **kw):
+    att = {"attachment_id": aid, "url": "https://cdn/new", "content_type": "image/png" if status == "pending" else "",
+           "filename": name, "file_size_bytes": 10, "caption_status": status, "caption_excluded_from_training": True}
+    att.update(kw)
+    return att
+
+
+class TestRefreshAttachments:
+    def test_legacy_attachment_becomes_captionable(self, temp_archive_dir):
+        append_messages("u", [{"message_id": "1", "attachments": [_legacy_att()]}])
+        n = refresh_attachments("u", [{"message_id": "1", "attachments": [_fresh_att()]}], ATTACHMENT_PARSER_FIELDS)
+        assert n == 1
+        [att] = load_all_records("u")[0]["attachments"]
+        assert att["attachment_id"] == "7" and att["filename"] == "cat.png"
+        assert att["caption_status"] == "pending"
+
+    def test_caption_and_media_are_never_touched(self, temp_archive_dir):
+        done = _fresh_att(caption_status="done", caption="a cat", media_path="media/1/7.png", media_status="stored")
+        append_messages("u", [{"message_id": "1", "attachments": [done]}])
+        refresh_attachments("u", [{"message_id": "1", "attachments": [_fresh_att(url="https://cdn/newer")]}],
+                            ATTACHMENT_PARSER_FIELDS)
+        [att] = load_all_records("u")[0]["attachments"]
+        assert att["url"] == "https://cdn/newer"
+        assert att["caption_status"] == "done" and att["caption"] == "a cat"
+        assert att["media_path"] == "media/1/7.png"
+
+    def test_pairs_by_id_when_order_differs(self, temp_archive_dir):
+        a = _fresh_att("1", "a.png", caption="A", caption_status="done")
+        b = _fresh_att("2", "b.png", caption="B", caption_status="done")
+        append_messages("u", [{"message_id": "1", "attachments": [a, b]}])
+        refresh_attachments("u", [{"message_id": "1", "attachments": [
+            _fresh_att("2", "b2.png"), _fresh_att("1", "a2.png")]}], ATTACHMENT_PARSER_FIELDS)
+        atts = load_all_records("u")[0]["attachments"]
+        assert [(x["caption"], x["filename"]) for x in atts] == [("A", "a2.png"), ("B", "b2.png")]
+
+    def test_count_mismatch_without_ids_is_left_alone(self, temp_archive_dir):
+        append_messages("u", [{"message_id": "1", "attachments": [_legacy_att()]}])
+        n = refresh_attachments("u", [{"message_id": "1", "attachments": [_fresh_att("1"), _fresh_att("2")]}],
+                                ATTACHMENT_PARSER_FIELDS)
+        assert n == 0
+        assert load_all_records("u")[0]["attachments"][0]["caption_status"] == "skipped"
+
+
+class TestUpdateAttachments:
+    def test_batched_update_and_iteration(self, temp_archive_dir):
+        append_messages("u", [
+            {"message_id": "1", "channel_id": "c", "attachments": [_fresh_att("7"), _fresh_att("8", "x.mp4", "skipped")]},
+        ])
+        found = iter_attachments(lambda a: a["caption_status"] == "pending", 10)
+        assert [(u, m, a, att["channel_id"]) for u, m, a, att in found] == [("u", "1", "7", "c")]
+        assert update_attachments("u", {("1", "7"): {"caption": "hi", "caption_status": "done"}}) == 1
+        assert iter_attachments(lambda a: a["caption_status"] == "pending", 10) == []
+        # iter_attachments hands out copies: channel_id is not written back
+        assert "channel_id" not in load_all_records("u")[0]["attachments"][0]

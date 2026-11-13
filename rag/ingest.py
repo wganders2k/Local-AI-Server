@@ -97,12 +97,17 @@ def _parse_timestamp(ts_str: str) -> Optional[datetime]:
 
 
 def _extract_caption(record: dict) -> Optional[str]:
-    """Extract caption text from the first attachment with caption_status == 'done'."""
-    attachments = record.get("attachments", [])
-    for att in attachments:
-        if att.get("caption_status") == "done" and att.get("caption"):
-            return att["caption"]
-    return None
+    """
+    Every captioned image on the message, joined. A message posting several
+    images is common (a screenshot series), and keeping only the first made
+    the rest unsearchable.
+    """
+    captions = [
+        att["caption"] for att in record.get("attachments", [])
+        if att.get("caption_status") == "done" and att.get("caption")
+    ]
+    # Rendered as "[image: a] [image: b]" by the chunk formatter.
+    return "] [image: ".join(captions) or None
 
 
 def _record_to_message(record: dict) -> Optional[Message]:

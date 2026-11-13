@@ -7,7 +7,8 @@ Background service that orchestrates Discord message collection via DiscordChatE
 1. **Channel evaluation** — on `POST /evaluate`, fetches the guild's channels from the Discord API, compares each channel's `last_message_at` against the `last_export_at` recorded in `channel_state.json`, and decides which need exporting.
 2. **DCE orchestration** — invokes `discord-chat-exporter` as a one-shot container per channel. Raw exports land on cold storage.
 3. **Archive merging** — parses raw DCE output and merges it into per-user JSONL files, deduplicated by `message_id`. **No filtering is applied** — every message is retained.
-4. **Image captioning** — an optional scheduled job that describes image attachments using the GPU (see below).
+4. **Archive media** — an optional scheduled job that keeps a local copy of every image attachment under `/archive/media` (see Image Captioning).
+5. **Image captioning** — an optional scheduled job that describes those images using the GPU, as proxy batch work (see below).
 
 ## What it does not do
 
@@ -84,6 +85,7 @@ Bound to `127.0.0.1:11437`. No authentication.
 | `POST` | `/evaluate` | Channel evaluation + targeted DCE exports (the main entry point) |
 | `POST` | `/reparse` | Rebuild Tier 2 from every existing Tier 1 export: append new messages, refresh parser-owned fields on archived ones. No Discord API calls, no DCE. Use it after any parser change |
 | `POST` | `/clear` | ⚠️ Deletes all per-user archives, all raw exports, and resets channel state |
+| `GET` | `/media/status` | Attachment counts by `media_status` and `caption_status` (backfill progress) |
 | `GET` | `/archive/{user_id}/count` | Message count for one user |
 
 ---
@@ -96,15 +98,17 @@ Bound to `127.0.0.1:11437`. No authentication.
 | `DISCORD_GUILD_ID` | ✅ | — | Target guild |
 | `PROXY_URL` | ❌ | `http://proxy:11436` | Used by the captioner |
 | `EXCLUDED_CHANNELS` | ❌ | *(empty)* | Comma-separated channel IDs or names never exported |
-| `IMAGE_CAPTION_ENABLED` | ❌ | `false` | Enables the captioning job |
-| `IMAGE_CAPTION_MODEL` | ❌ | `image-caption` | Must match an alias in `models.ini` |
-| `IMAGE_CAPTION_BATCH_SIZE` | ❌ | `10` | Images per run |
-| `IMAGE_CAPTION_WINDOW_START` | ❌ | `3` | Hour (UTC) the window opens |
-| `IMAGE_CAPTION_WINDOW_END` | ❌ | `6` | Hour (UTC) it closes |
-| `IMAGE_CAPTION_MAX_FILE_SIZE_MB` | ❌ | `10` | Skip larger images |
+| `MEDIA_FETCH_ENABLED` | ❌ | `false` | Enables the media fetch job (network + disk, no GPU) |
+| `MEDIA_FETCH_BATCH_SIZE` | ❌ | `200` | Images per run (every 120s) |
+| `MEDIA_FETCH_WORKERS` | ❌ | `4` | Parallel downloads |
+| `MEDIA_FETCH_MAX_FILE_SIZE_MB` | ❌ | `50` | Larger images are marked `too_large` |
+| `MEDIA_FETCH_MAX_ATTEMPTS` | ❌ | `3` | Transient failures retried this many runs |
+| `IMAGE_CAPTION_ENABLED` | ❌ | `false` | Enables the captioning job (every 60s) |
+| `IMAGE_CAPTION_MODEL` | ❌ | `caption` | Must be an alias in `models.ini` **and** in the proxy's `BATCH_MODELS` |
+| `IMAGE_CAPTION_BATCH_SIZE` | ❌ | `20` | Images per run; results written once per user file per run |
+| `IMAGE_CAPTION_MAX_ATTEMPTS` | ❌ | `3` | Proxy failures retried this many runs, then `error` |
+| `IMAGE_CAPTION_MAX_SIDE` | ❌ | `1536` | Longest side sent to the model |
 | `HOST` / `PORT` | ❌ | `0.0.0.0` / `11437` | Bind address |
-
-Window hours are **UTC**, not local time.
 
 If you are working from an older `.env`, note that `RETRAIN_THRESHOLD`, `TRAINING_WINDOW_START`, `TRAINING_WINDOW_END`, `TRAINING_TRIGGER_ENABLED`, `INCREMENTAL_PULL_INTERVAL`, `FULL_PULL_CRON`, `MIN_WORD_COUNT`, and `ACTIVE_CHANNEL_LOOKBACK_HOURS` are **not read by this service**. They belonged to the training trigger described above and have been removed from `.env.example`.
 
@@ -151,8 +155,10 @@ the parser drops.
 
 After a parser change, `POST /reparse` brings existing records up to date: it
 appends what is new and refreshes `type`, `reference`, `is_pinned` and
-`mentions` on what is already archived, leaving everything else — captions
-included — untouched.
+`mentions` on what is already archived. Attachments get their parser-owned
+fields (`attachment_id`, `url`, `content_type`, `filename`, `file_size_bytes`)
+refreshed the same way, and an image the parser now recognises moves from
+`skipped` to `pending`. Captions and media fields are never touched.
 
 ### Channel state (`/archive/state/channel_state.json`)
 
@@ -176,25 +182,24 @@ included — untouched.
 
 Discord messages are full of memes and screenshots. Without captions that content is invisible to lore retrieval, which can only index text.
 
-**Model.** Uses the `image-caption` alias — the same GGUF as the mimic personas (`Qwen3.5-35B-A3B-Uncensored` IQ4_XS), chosen because Discord content includes crude memes that a standard vision model would refuse to describe. Sharing the GGUF means switching between a mimic persona and the captioner is a context switch, not a reload.
+Two jobs, both off by default, both running inside this service:
 
-**This is a GPU consumer**, ~18 GB in the swappable slot, competing under the same lock and the same arbiter lease as live inference. That is why it is windowed.
+**1. Media fetch (`media_store.py`, `MEDIA_FETCH_ENABLED`).** The archive holds signed Discord CDN links that expire about a day after export. This job keeps a copy of every image attachment at `/archive/media/<channel_id>/<attachment_id><ext>`. Before downloading, it re-signs links in batches of 50 through Discord's `POST /attachments/refresh-urls` using the bot token. An attachment that gets no fresh link was deleted on Discord and is marked `gone`; that image cannot be recovered. Network and disk only. Measured 2026-11-12: 41.8k images, ~24 GiB, ~200 images per 30 s run.
 
-**Scheduling.** An APScheduler job every 300s that returns immediately unless `IMAGE_CAPTION_ENABLED` is true *and* the current UTC hour is inside the window.
+**2. Captioning (`image_captioner.py`, `IMAGE_CAPTION_ENABLED`).** Sends each stored, uncaptioned image to the proxy's `caption` preset (models.ini: the Qwen3.6-27B heretic finetune plus its vision projector, thinking off). Every image is re-encoded as JPEG with a longest side of 1536, because llama.cpp's loader reads no WebP and a GIF is captioned by its first frame. The prompt is `prompts/caption.md`; the bot's live captions use an identical copy. Measured: 2–4 s per image warm.
 
-**Per-image flow:**
+**GPU scheduling is the proxy's job, not this service's.** `caption` is in the proxy's `BATCH_MODELS`, so every request runs as arbiter job `llm-batch` (priority 25: below any person, above the video job) and is held until interactive traffic has been quiet for `BATCH_YIELD_SECONDS`. That replaced the old 3–6 AM window and queue-depth check. Note that 25 also **outranks the LoRA trainer** (-10), so a running backfill keeps training off the card. Don't enable captioning while a training queue needs to finish.
 
-```
-1. Scan archives for attachments with caption_status == "pending"
-2. Skip non-images and anything over IMAGE_CAPTION_MAX_FILE_SIZE_MB
-3. Download to a temp file
-4. Check proxy queue depth — defer to the next tick if busy
-5. POST to the proxy: model=image-caption, image base64-inlined as a data: URI
-6. Write the caption back into the record; set caption_status
-7. Delete the temp file
-```
+**Attachment fields:**
 
-**`caption_status`:** `pending` → `done`, or `skipped` (unsupported format, oversized, download failed) / `error` (model failure — retried next run).
+| field | written by | values |
+|---|---|---|
+| `attachment_id`, `url`, `content_type`, `filename`, `file_size_bytes` | parser (refreshed by `/reparse`) | `content_type` is inferred from the extension for png/jpg/jpeg/webp/gif, because DCE writes none |
+| `media_status`, `media_path`, `media_attempts` | media fetch | `stored` (path relative to `/archive`), `gone`, `too_large`, `error` (retried) |
+| `caption_status` | parser, then captioner | `skipped` (not an image), `pending`, `done`, `error` (gave up after max attempts), `unreadable` |
+| `caption`, `caption_model`, `caption_prompt_version`, `caption_attempts` | captioner | the version is a hash of the prompt, so a re-caption can find stale entries |
+
+`GET /media/status` counts attachments by `media_status` and `caption_status` across the archive, which shows backfill progress.
 
 **Training exclusion.** Every caption carries `caption_excluded_from_training: true`. The distinction it encodes: a caption is *read-only context*. RAG ingestion appends it to the message's effective text so image content becomes searchable; a training exporter must never treat it as training data, because a synthetic description is not the user's voice.
 
@@ -202,19 +207,24 @@ Discord messages are full of memes and screenshots. Without captions that conten
 {
   "attachments": [
     {
-      "url": "https://cdn.discordapp.com/attachments/.../meme.png",
+      "attachment_id": "653318014426546186",
+      "url": "https://cdn.discordapp.com/attachments/.../meme.png?ex=...",
       "content_type": "image/png",
       "filename": "meme.png",
       "file_size_bytes": 204800,
-      "caption": "A man in a suit pointing at a whiteboard that reads 'dying slower'.",
+      "media_status": "stored",
+      "media_path": "media/488918223203336204/653318014426546186.png",
+      "caption": "A meme of Master Oogway in a forest. Top text: \"THIS WILL BE GRAPHICS\", bottom: \"IN 2013\".",
       "caption_status": "done",
+      "caption_model": "caption",
+      "caption_prompt_version": "3f1c9a0b2d4e",
       "caption_excluded_from_training": true
     }
   ]
 }
 ```
 
-**Status: non-functional** — see the note at the top of `image_captioner.py`. The parser never marks an attachment `pending` (it keys on a `content_type` DCE does not write), so even enabled it would find nothing; every archived attachment is `skipped`. It is also disabled by default, and the `image-caption` preset is currently commented out in [`models.ini`](../models.ini) — so setting the flag alone is not enough. Uncomment the preset first.
+History: until 2026-11-12 captioning had never worked. The parser keyed on a `content_type` DCE never writes, so every attachment was `skipped`; the links had expired; the preset was commented out; and the write-back clobbered concurrent writes.
 
 ---
 
@@ -243,7 +253,9 @@ history-service/
 ├── dce_parser.py        # DCE JSON → internal archive schema
 ├── jsonl_store.py       # Per-user JSONL read/write, message_id dedup, counts
 ├── channel_state.py     # last_export_at / last_message_at tracking
-├── image_captioner.py   # Batch captioner
+├── media_store.py       # Local copies of image attachments (re-signs expired links)
+├── image_captioner.py   # Batch captioner (proxy batch work)
+├── prompts/caption.md   # Caption prompt (identical copy in discord-bot/prompts/)
 ├── config.py            # Environment loading and defaults
 └── tests/
     ├── test_channel_state.py
@@ -259,7 +271,7 @@ python -m pytest tests -q
 
 ## Why Not Merge Into the RAG Service?
 
-The RAG service is a **live inference dependency** — the bot calls it synchronously during every `/lore` round, so it must stay fast and available. This service is a **background process** that shells out to Docker, performs heavy I/O, and occasionally takes the GPU for captioning.
+The RAG service is a **live inference dependency** — the bot calls it synchronously during every `/lore` round, so it must stay fast and available. This service is a **background process** that shells out to Docker, performs heavy I/O, and takes the GPU for captioning as low-priority proxy batch work.
 
 Keeping them separate means the RAG service can restart without interrupting collection, and an export failure cannot affect lore retrieval.
 

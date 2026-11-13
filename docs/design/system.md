@@ -171,7 +171,7 @@ All swappable models are defined in [`models.ini`](models.ini). The proxy refere
 | `chat-chinese` | Qwen3.6-35B-A3B UD-IQ4_NL | Open WebUI |
 | `bomb-you` | Qwen3.5-35B-A3B-Uncensored IQ4_XS | Open WebUI, uncensored |
 
-**Commented out:** `mimic_user1`–`mimic_user6` and `image-caption`. They are still referenced by the bot's `/mimic` autocomplete, so those paths reach llama-server and find nothing. Re-enable the sections before using `/mimic` or image captioning.
+**Commented out:** `mimic_user1`–`mimic_user6`. They are still referenced by the bot's `/mimic` autocomplete, so those paths reach llama-server and find nothing. Re-enable the sections before using `/mimic` or image captioning.
 
 ### 5.1 Configuration is single-source, by slot
 
@@ -393,15 +393,14 @@ The RAG service is a **live inference dependency** — the bot calls it synchron
 
 Discord messages are full of memes and screenshots. Without captions that content is invisible to lore retrieval, which can only index text.
 
-[`history-service/image_captioner.py`](history-service/image_captioner.py) scans Tier 2 for attachments with `caption_status == "pending"`, downloads each below `IMAGE_CAPTION_MAX_FILE_SIZE_MB`, and sends it base64-inlined to the proxy as an OpenAI-format image message under the `image-caption` alias. Results are written back into the JSONL record.
+Two history-service jobs (details in [`history-service/README.md`](../../history-service/README.md#image-captioning)):
 
-`caption_status` transitions: `pending` → `done`, or `skipped` (download failed, unsupported format, oversized) / `error` (model failure, retried next run).
+- `media_store.py` keeps a local copy of every image attachment under `/archive/media`. Before downloading, it re-signs expired CDN links through Discord's `attachments/refresh-urls`.
+- `image_captioner.py` sends each stored image to the proxy's `caption` preset (Qwen3.6-27B heretic plus vision projector).
 
-Every caption carries `caption_excluded_from_training: true`. The distinction it encodes: a caption is **read-only context**. RAG ingestion appends it to the message's effective text so image content is searchable; a future training exporter must never treat it as training data, because a synthetic description is not the user's voice and would degrade persona quality.
+`caption` is in the proxy's `BATCH_MODELS`, so the backfill runs as arbiter job `llm-batch`: below any person, above video, and also above the LoRA trainer.
 
-**Status:** disabled by default (`IMAGE_CAPTION_ENABLED=false`), and the `image-caption` preset is commented out in `models.ini` — so enabling the flag alone is not sufficient. The captioner runs on an APScheduler job inside a configurable window (default 3–6 AM) and checks proxy queue depth before each batch.
-
-Note that captioning is a *GPU* consumer using the swappable slot at ~18 GB. It competes under the same lock and the same arbiter lease as everything else.
+Every caption carries `caption_excluded_from_training: true`. The distinction it encodes: a caption is **read-only context**. RAG ingestion appends it to the message's effective text so image content is searchable; a future training exporter must never treat it as training data, because a synthetic description is not the user's voice.
 
 ---
 
