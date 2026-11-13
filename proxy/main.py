@@ -27,14 +27,28 @@ from config import (
     IDLE_EVICT_POLL_SECONDS,
     IDLE_EVICT_SECONDS,
     IDLE_EVICT_UNLOAD_TIMEOUT,
+    DOCKER_URL,
+    IMAGEGEN_CONTAINER,
+    IMAGEGEN_COEXIST_MODELS,
+    IMAGEGEN_DEFAULT_SIZE,
+    IMAGEGEN_ENABLED,
+    IMAGEGEN_MAX_PROMPT_CHARS,
+    IMAGEGEN_REQUEST_TIMEOUT,
+    IMAGEGEN_SIZES,
+    IMAGEGEN_START_TIMEOUT,
+    IMAGEGEN_URL,
     LLAMA_SWAPPABLE,
 )
 from arbiter import ArbiterClient
+from imagegen import ImageServer, RequestError, clean_request
 from state import state
 
 arbiter = ArbiterClient(ARBITER_URL, ARBITER_JOB_NAME)
 # Batch models' requests ask under their own, lower-ranked name (config.BATCH_MODELS).
 batch_arbiter = ArbiterClient(ARBITER_URL, ARBITER_BATCH_JOB_NAME)
+image_server = ImageServer(
+    IMAGEGEN_URL, DOCKER_URL, IMAGEGEN_CONTAINER, IMAGEGEN_START_TIMEOUT, IMAGEGEN_REQUEST_TIMEOUT
+)
 
 # HTTP client — shared across all requests, reuses connections
 _http_client: httpx.AsyncClient | None = None
@@ -67,6 +81,10 @@ async def lifespan(app: FastAPI):
     global _http_client
     _http_client = httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0))
     logger.info(f"HTTP client initialised — arbiter at {ARBITER_URL}, asking as {ARBITER_JOB_NAME!r}")
+    if IMAGEGEN_ENABLED:
+        # `compose up` may have started it; the proxy cannot know what it holds.
+        image_server.running = True
+        await image_server.stop(_http_client)
     tasks = []
     if IDLE_EVICT_ENABLED:
         tasks.append(asyncio.create_task(_idle_evictor()))
@@ -179,9 +197,12 @@ async def _idle_evictor() -> None:
                 continue
 
             resident = await _resident_models()
-            if resident:
-                logger.info(f"LLMs idle {idle:.0f}s — unloading {resident}")
-                if not await _unload_resident_models(resident):
+            if resident or image_server.running:
+                logger.info(f"LLMs idle {idle:.0f}s — unloading {resident}"
+                            + (" and the image server" if image_server.running else ""))
+                if resident and not await _unload_resident_models(resident):
+                    continue
+                if image_server.running and not await image_server.stop(_http_client):
                     continue
                 # Only now is there really room. Telling the arbiter before the
                 # unload lands would invite it to start a job under a resident
@@ -444,6 +465,73 @@ async def history_summary() -> list[dict]:
     return []
 
 
+@app.post("/v1/images/generations")
+async def images_generations(request: Request) -> Response:
+    """
+    Text-to-image. Interactive work under the `llm` lease and the swappable
+    lock, like a chat message — see imagegen.py for why it is not a tenant.
+    """
+    if not IMAGEGEN_ENABLED:
+        return _json_error(503, "imagegen_disabled", "Image generation is not enabled on this server.")
+    try:
+        body = clean_request(await request.json(), IMAGEGEN_SIZES, IMAGEGEN_MAX_PROMPT_CHARS, IMAGEGEN_DEFAULT_SIZE)
+    except (RequestError, ValueError) as exc:
+        return _json_error(400, "invalid_request", str(exc))
+
+    state.interactive_started()
+    state.increment_queue()
+    state.record_request()
+    state.llm_request_started()
+    finish = _finisher(batch=False)
+    try:
+        granted, detail = await arbiter.acquire()
+        if not granted:
+            state.decrement_queue()
+            return _json_error(503, "vram_unavailable", "The GPU could not be freed for this request. Retry shortly.")
+        try:
+            await state.lock.acquire()
+        finally:
+            state.decrement_queue()
+        try:
+            resident = await _resident_models()
+            if any(m not in IMAGEGEN_COEXIST_MODELS for m in resident):
+                logger.info(f"Image request: unloading {resident} to make room")
+                if not await _unload_resident_models(resident):
+                    return _json_error(503, "vram_unavailable", "Could not unload the chat model. Retry shortly.")
+            t0 = time.monotonic()
+            resp = await image_server.generate(_http_client, body)
+            logger.info(f"[imagegen] HTTP {resp.status_code} in {time.monotonic() - t0:.1f}s ({body['size']})")
+            PROXY_REQUESTS.labels(model="imagegen", status=str(resp.status_code)).inc()
+            PROXY_REQUEST_DURATION.labels(model="imagegen").observe(time.monotonic() - t0)
+            return Response(content=resp.content, status_code=resp.status_code, media_type="application/json")
+        except Exception as exc:
+            logger.error(f"[imagegen] failed: {exc}")
+            PROXY_REQUESTS.labels(model="imagegen", status="error").inc()
+            return _json_error(502, "imagegen_failed", "Image generation failed.")
+        finally:
+            state.lock.release()
+    finally:
+        finish()
+
+
+@app.api_route("/v1/images/{rest:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
+async def images_other(rest: str) -> Response:
+    """
+    Edits and variations take a source image, which is exactly what this
+    server does not accept (imagegen.py) — refused, never forwarded.
+    """
+    return _json_error(403, "text_prompts_only", "Only text-to-image (/v1/images/generations) is available.")
+
+
+def _json_error(status: int, code: str, message: str) -> Response:
+    return Response(
+        content=json.dumps({"error": code, "message": message}),
+        status_code=status,
+        headers={"Retry-After": "30"} if status == 503 else None,
+        media_type="application/json",
+    )
+
+
 def _finisher(batch: bool):
     """
     Drops a request's in-flight count exactly once, and tells the arbiter
@@ -523,6 +611,11 @@ async def proxy(path: str, request: Request) -> Response:
             state.decrement_queue()
 
             try:
+                if image_server.running and model not in IMAGEGEN_COEXIST_MODELS:
+                    # Too big to share the card with it: stop it before the
+                    # router loads anything, or the load OOMs.
+                    if not await image_server.stop(_http_client):
+                        raise RuntimeError("the image server could not be stopped to make room")
                 if model:
                     if state.current_model != model:
                         logger.info(

@@ -1,0 +1,119 @@
+# Image generation — spike results and design
+
+Status: **built 2026-11-12, deploys automatically when the LoRA cut queue
+finishes.** The user said go, with one condition: text prompts only, no seed
+images (their concern is server members being depicted negatively).
+Implementation: `proxy/imagegen.py`, `discord-bot/cogs/imagine.py`, the
+`imagegen` service in docker-compose.yml. The deferred rollout is
+`~/.local/share/vision-rollout/rollout.sh` (systemd user unit
+`vision-rollout`).
+
+## What was measured
+
+Hardware: RTX 3090 24 GB. The spike ran beside the 2.2 GB always-resident
+autocomplete server (`llama-permanent`), which was removed later the same day;
+totals below are without it.
+
+Stack: `ghcr.io/leejet/stable-diffusion.cpp:master-cuda`
+(`sha256:07285a1c…`, built 2026-11-10) running `sd-server`, which serves an
+OpenAI-style `POST /v1/images/generations`.
+
+Model: Z-Image-Turbo (6B DiT, Apache-2.0, 8 steps, cfg 1.0), three files under
+`/srv/models`:
+
+| file | size |
+|---|---|
+| `leejet/Z-Image-Turbo-GGUF/z_image_turbo-Q8_0.gguf` | 6.6 GB |
+| `unsloth/Qwen3-4B-Instruct-2507-GGUF/Qwen3-4B-Instruct-2507-Q8_0.gguf` (text encoder) | 4.3 GB |
+| `Comfy-Org/z_image_turbo/ae.safetensors` (FLUX VAE) | 0.3 GB |
+
+| | result |
+|---|---|
+| server start to listening | 8 s (weights load lazily) |
+| first 1024² image (includes weight load) | 15.5 s |
+| warm 1024² image | 10.9 s, 10.8 s |
+| warm 768² image | 5.0 s |
+| VRAM while loaded | ~11.2 GB |
+| `[mimic-multi]` cold reload after the image server stops | 5.3 s to first answer |
+
+Quality: good. Prompt adherence is strong and it renders legible text: a
+"LORE NIGHT" sign came out exactly right. Samples from the run were not kept.
+
+### Two problems found
+
+1. **The prebuilt image crashes with flash attention on.** sd.cpp's auto
+   setting picks the CUDA MMA flash-attention kernel. That kernel was not built
+   for sm_86 ("cp.async instructions not enabled"), so the image segfaults on
+   the first sample. It works with `--flash-attn off --conv-direct off`, which
+   is how every number above was measured. Building the image ourselves from
+   `docker/Dockerfile.cuda` with `CUDA_ARCHITECTURES=86` should bring flash
+   attention back and make generation faster; not measured.
+2. **sd-server ignores SIGTERM.** `docker stop` takes the full 10 s grace
+   period every time. Use `stop_signal: SIGKILL` or `docker kill`, which is
+   safe because it holds no state worth flushing.
+
+## How it fits
+
+**sd-server is a second backend behind the proxy, under the proxy's existing
+`llm` lease. It is not a new arbiter tenant.**
+
+- The proxy already serialises the GPU between models and owns unloading
+  llama-server's models. Image generation is one more thing that holds the
+  card while a person waits, so it belongs under the same lock and the same
+  priority.
+- A separate arbiter job would need its own reclaim protocol. It would also
+  compete with the proxy for a card the proxy already holds whenever anyone is
+  chatting: the proxy would release, the image job would acquire, a chat
+  message would arrive, and the card would change hands again.
+
+Request flow for `POST /v1/images/generations` at the proxy:
+
+1. Take the swappable lock and acquire the `llm` lease, the same as chat.
+2. **Fit check:** the image server needs ~11.2 GB.
+   - `[mimic-multi]` (~9.3 GB) can stay resident beside it: 11.2 + 9.3 ≈
+     20.5 GB of 24.
+   - `brain-dense-heretic` (21.25 GB) cannot. Unload it first with
+     `_unload_resident_models`.
+3. Forward the request to `imagegen:8080`.
+4. Afterwards, idle-evict the image server like any model: kill its weights
+   after `IDLE_EVICT_SECONDS`, or recreate the container. sd-server has no
+   unload endpoint, so the plan is to stop the container and let the next
+   request start it (8 s plus a 5 s load).
+
+**Who stops the container (decided).** The proxy starts and stops it
+through `docker-socket-proxy`, the same restricted Docker API history-service
+uses. The proxy still never touches the real socket or the card itself.
+
+What chat pays:
+- **From `[mimic-multi]`:** nothing, because the two models coexist.
+- **From the lore agent:** one unload, plus a ~6–11 s reload on the next lore
+  turn, which is the same as any preset change today.
+
+## `/imagine` design (if go)
+
+- **Command:** `/imagine prompt:<text> [size: square|portrait|landscape]`.
+  Answered with a "generating…" message that is edited when the image is done.
+  The image is attached as a PNG, with the prompt in the embed.
+- **Queue:** depth 1 per user plus the bot's existing `MAX_QUEUE_DEPTH`. One
+  image at a time on the card.
+- **Rate limit:** the shared `RateLimiter`, plus a per-user image cap
+  (e.g. 10/hour), because images are the costliest request the bot serves.
+- **Sizes:** 1024² by default (~11 s warm). 768² is ~5 s if latency matters
+  more than detail.
+- **Content:** the model is not safety-tuned and the server is crude. Whether
+  NSFW is allowed, and in which channels, is the user's decision. Discord's
+  own age-restricted channel flag is the obvious gate.
+- **Later:** persona-driven images (a mimic persona "posts a meme") reuse the
+  same proxy route. Wait until the plain command has been used for a while.
+
+## Files a build would touch
+
+- `docker-compose.yml`: an `imagegen` service (`profiles: ["managed"]` style).
+  Started and stopped by the proxy, never by `compose up`, with
+  `stop_signal: SIGKILL`.
+- `proxy/main.py`, `proxy/config.py`: the `/v1/images/*` route and the fit
+  check.
+- `discord-bot/cogs/imagine.py`, `proxy_client.py` (an `images()` call), and
+  `config.py`.
+- `scripts/download_models.py`: list the three files. They are not in
+  `models.ini`, so add an explicit list (`IMAGEGEN_MODELS`).

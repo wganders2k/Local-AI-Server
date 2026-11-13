@@ -86,13 +86,13 @@ Two models serve this area, and the split is deliberate:
 │   │  serialises via lock │              │  reads NVML; starts       │  │
 │   │  idle-evicts         │              │  nothing                  │  │
 │   └──────────────────────┘              └───────────────────────────┘  │
-│                       │                        ▲            ▲          │
-│                       ▼                        │            │          │
-│                   ┌──────────────────────┐     │            │          │
-│                   │ llama-swappable      │     │            │          │
-│                   │ :11434  router mode  │     │            │          │
-│                   │ --models-max 1       │     │            │          │
-│                   └──────────────────────┘     │            │          │
+│        │              │                        ▲            ▲          │
+│        ▼              ▼                        │            │          │
+│  ┌─────────────┐  ┌──────────────────────┐     │            │          │
+│  │ imagegen    │  │ llama-swappable      │     │            │          │
+│  │ (on demand, │  │ :11434  router mode  │     │            │          │
+│  │  by proxy)  │  │ --models-max 1       │     │            │          │
+│  └─────────────┘  └──────────────────────┘     │            │          │
 │                                                 │            │          │
 │                               ┌─────────────────┘     ┌──────┴───────┐ │
 │                               │ video-processing      │ lora-trainer │ │
@@ -175,7 +175,8 @@ All swappable models are defined in [`models.ini`](models.ini). The proxy refere
 
 ### 5.1 Configuration is single-source, by slot
 
-Model identity lives in `models.ini` (alias → GGUF path + inference params).
+Model identity lives in `models.ini` (alias → GGUF path + inference params), plus the
+`imagegen` service's `command:` in `docker-compose.yml` for the image model.
 `scripts/download_models.py` derives its swappable download list
 from `models.ini` directly, so adding or removing a local model is a `models.ini` edit and
 nothing else. The proxy does not parse any model list of its own — it forwards any
@@ -237,6 +238,7 @@ See [`docker-compose.yml`](docker-compose.yml) for full definitions.
 | Service | Image / build | Port | Profile | Notes |
 |---|---|---|---|---|
 | `llama-swappable` | `ghcr.io/ggml-org/llama.cpp:server-cuda` | `:11434` | — | Router mode, `--models-max 1`, `--jinja` |
+| `imagegen` | `ghcr.io/leejet/stable-diffusion.cpp` (pinned) | — | `managed` | Started/stopped by the proxy via docker-socket-proxy |
 | `proxy` | `./proxy` | `:11436` | — | No GPU access at all |
 | `arbiter` | `./arbiter` | `127.0.0.1:11438` | — | NVML only (`utility`), no CUDA |
 | `history-service` | `./history-service` | `127.0.0.1:11437` | — | Background; APScheduler |
@@ -406,6 +408,8 @@ Every caption carries `caption_excluded_from_training: true`. The distinction it
 
 - **`/lore` threads:** the agent model (`brain-dense-heretic`, which now carries a projector). The caption is appended to the question.
 - **`/mimic-chat`:** `[mimic-multi]` with no adapter applied, read by the controller only. Persona prompts keep `[attachment]`, as trained. This is off (`VISION_MIMIC_ENABLED`) until llama.cpp is new enough for the 12B base's `gemma4uv` projector.
+
+Image generation was spiked on 2026-11-12; see [`docs/plans/image-gen.md`](../plans/image-gen.md).
 
 ---
 

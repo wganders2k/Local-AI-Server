@@ -12,6 +12,7 @@ history, disclaimer stripping, and the agentic RAG loop behind `/lore`.
 | `/mimic-chat` | `persona1`–`persona7` (autocomplete), `length` (2–20, optional) | Creates a thread where the personas chat with each other and with anyone who joins in. It opens by asking the starter to say something, and the personas answer once someone has. A controller picks who speaks next and pauses at natural breaks; `length` makes the first burst run that many turns without pausing |
 | `/chat` | `model` (autocomplete) | Creates a thread bound to one model; the bot answers every message posted in it |
 | `/lore` | `question`, `rounds` (1–25, default 10) | Agentic RAG over the Discord archive, then an optional follow-up thread |
+| `/imagine` | `prompt`, `style`, `mood`, `framing` (optional details), `shape` (square / portrait / landscape), `rewrite` (default on) | An image from a text description (Z-Image-Turbo, ~11 s). The detail options follow the prompt as labelled sentences ("Art style: …"), which the rewriter keeps exactly. With `rewrite`, the mimic base (no adapter, already loaded beside the image server) first expands the prompt into a detailed description (`prompts/imagine_rewrite.md`, ~1.5 s), shown under the original; any failure draws the original. **Text only**: no attachment parameter, and the proxy refuses image inputs. Capped at `IMAGINE_PER_USER_PER_HOUR`. Registered only when `IMAGINE_ENABLED` |
 
 ### Disabled Commands
 
@@ -184,6 +185,8 @@ warning and answers without the alias index.
 | `RAG_SERVICE_URL` | ❌ | `http://rag-service:8001` | RAG service base URL |
 | `RAG_ENABLED` | ❌ | `true` | Set false to run without `/lore` retrieval |
 | `VISION_MIMIC_ENABLED` | ❌ | `false` | Live image captions for the mimic chat controller. Needs a vision projector on `[mimic-multi]` first |
+| `IMAGINE_ENABLED` | ❌ | `false` | Registers `/imagine`. Needs the proxy's `IMAGEGEN_ENABLED` |
+| `IMAGINE_PER_USER_PER_HOUR` | ❌ | `10` | Images per user per hour, on top of the shared rate limit |
 | `THREAD_REGISTRY_PATH` | ❌ | `bot_context/threads.json` | Which threads the bot answers in, and how |
 | `LORE_SESSION_PATH` | ❌ | `bot_context/lore/sessions.json` | Lore thread transcripts |
 | `LORE_CONTEXT_PATH` | ❌ | `bot_context/lore/context.md` | Host-local server background for the `/lore` prompt |

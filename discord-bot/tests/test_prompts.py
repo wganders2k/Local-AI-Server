@@ -22,6 +22,7 @@ TEMPLATES = [
     "lore_compaction_user",
     "mimic_chat_controller",
     "mimic_chat_controller_turn",
+    "imagine_rewrite",
 ]
 
 

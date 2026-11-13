@@ -25,7 +25,7 @@ from logging import StreamHandler
 import discord
 from discord.ext import commands
 
-from config import DISCORD_TOKEN, validate_config
+from config import DISCORD_TOKEN, IMAGINE_ENABLED, validate_config
 from services import Services
 
 # ──────────────────────────────────────────────────────────────
@@ -43,7 +43,9 @@ logger = logging.getLogger("mimic-bot")
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("discord.http").setLevel(logging.WARNING)
 
-EXTENSIONS = ("cogs.mimic", "cogs.mimic_chat", "cogs.chat", "cogs.lore")
+EXTENSIONS = ("cogs.mimic", "cogs.mimic_chat", "cogs.chat", "cogs.lore") + (
+    ("cogs.imagine",) if IMAGINE_ENABLED else ()
+)
 
 
 class MimicBot(commands.Bot):

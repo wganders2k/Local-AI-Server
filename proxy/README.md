@@ -31,6 +31,17 @@ Two details worth knowing:
 - The router requires the model name to unload. An empty body is rejected with `400 "model is not found"` and nothing happens — hence reading the resident list first.
 - This lives here rather than in the arbiter because nothing else may unload llama-server's models. Moving it would give two services authority over one container's state.
 
+## Image generation
+
+`POST /v1/images/generations` serves text-to-image from the `imagegen` compose service (stable-diffusion.cpp `sd-server`, Z-Image-Turbo). It is a **second backend behind the proxy's own lock and `llm` lease, not an arbiter tenant**. An image is interactive work a person waits on, the same as a chat message. See `imagegen.py` and [`docs/plans/image-gen.md`](../docs/plans/image-gen.md).
+
+- **Text prompts only** (user decision, 2026-11-12: no seed images that could be used to depict server members). The proxy builds a fresh body from `prompt` and a `size` from an allowlist, with `n=1`; nothing else the caller sends is forwarded. `/v1/images/edits`, `/variations` and anything else under `/v1/images/` get a 403.
+- **No VRAM held while idle.** The container is started on the first request (~8 s, then ~5 s to load weights) and stopped through `docker-socket-proxy` (`DOCKER_URL`):
+  - by the idle evictor, together with the chat model;
+  - before any chat model outside `IMAGEGEN_COEXIST_MODELS` loads;
+  - when the proxy starts.
+- **Coexistence.** It holds ~11.2 GB, so the 12B mimic base (~9.3 GB) can stay resident beside it. Anything bigger is unloaded before an image is generated. A failed stop refuses the chat request rather than risk an OOM.
+
 ## Endpoints
 
 | Method | Path | Description |
@@ -39,6 +50,8 @@ Two details worth knowing:
 | `GET` | `/status` | `current_model`, `queue_depth`, `llm_inflight`, `model_loaded_seconds_ago` |
 | `GET` | `/metrics` | Prometheus |
 | `GET` | `/history`, `/history/summary` | **Stubs returning `[]`.** Kept for Homepage compatibility; the data moved to Prometheus |
+| `POST` | `/v1/images/generations` | Text-to-image (see Image generation). 503 while `IMAGEGEN_ENABLED` is off |
+| `*` | `/v1/images/{rest}` | 403: image inputs are not accepted |
 | `*` | `/{path:path}` | Everything else, forwarded to the appropriate llama-server |
 
 ## Metrics
@@ -59,6 +72,11 @@ GPU metrics are the arbiter's — it is the only component that reads the card.
 | `IDLE_EVICT_POLL_SECONDS` | `30` | How often the evictor checks |
 | `IDLE_EVICT_UNLOAD_TIMEOUT` | `60` | How long to wait for an unload to take effect |
 | `BATCH_MODELS` | `judge,caption` | Models ranked as batch work (`llm-batch`) |
+| `IMAGEGEN_ENABLED` | `false` | Serve `/v1/images/generations` |
+| `IMAGEGEN_URL` | `http://imagegen:8080` | The image server |
+| `IMAGEGEN_CONTAINER` | `imagegen` | Container started/stopped; must match `container_name` in compose |
+| `DOCKER_URL` | `http://docker-socket-proxy:2375` | Restricted Docker API used for that |
+| `IMAGEGEN_START_TIMEOUT` / `IMAGEGEN_REQUEST_TIMEOUT` | `90` / `300` | Seconds |
 
 Changing how the LLM ranks against the trainer is an edit to [`arbiter/jobs.yaml`](../arbiter/jobs.yaml), not to anything here.
 
@@ -72,9 +90,11 @@ proxy/
 ├── config.py          # URLs, arbiter identity, eviction tuning
 ├── state.py           # OrchestratorState — lock, queue depth, in-flight, current model
 ├── arbiter.py         # ArbiterClient — acquire / release
+├── imagegen.py        # image server lifecycle + the text-only request filter
 └── tests/
     ├── test_gpu_gate.py      # the lease is acquired before forwarding, released only when idle
-    └── test_idle_evictor.py  # unload is verified, not assumed
+    ├── test_idle_evictor.py  # unload is verified, not assumed
+    └── test_imagegen.py      # text only, same gate as chat, never shares the card with a big model
 ```
 
 `arbiter.py` is a deliberate copy of the two calls in `lora-training/arbiter.py` rather than a shared library. The previous design vendored a client into three repos and every protocol change became a three-repo change.

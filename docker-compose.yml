@@ -105,6 +105,64 @@ services:
                 - gpu
 
   # ──────────────────────────────────────────────────────────
+  # Image generation — stable-diffusion.cpp sd-server, Z-Image-Turbo
+  # Started and stopped only by the proxy (proxy/imagegen.py), through
+  # docker-socket-proxy, under the proxy's own `llm` lease: it is a second
+  # backend behind the proxy's lock, not an arbiter tenant. The `managed`
+  # profile keeps `docker compose up` from starting it behind the proxy's
+  # back; create it once with `docker compose --profile managed create imagegen`.
+  # Text-to-image only: the proxy forwards a prompt and a size, nothing else.
+  # Measured 2026-11-12: 10.9 s per warm 1024² image, ~11.2 GB while loaded
+  # (docs/plans/image-gen.md).
+  # ──────────────────────────────────────────────────────────
+  imagegen:
+    # Pinned: built 2026-11-10. The prebuilt image's CUDA flash-attention
+    # kernel is not compiled for sm_86 and segfaults on a 3090 ("cp.async
+    # instructions not enabled"), hence --flash-attn off --conv-direct off.
+    # Building from sd.cpp's docker/Dockerfile.cuda with CUDA_ARCHITECTURES=86
+    # should bring it back, faster; not measured.
+    image: ghcr.io/leejet/stable-diffusion.cpp@sha256:07285a1cc755377ba096f528a42ac852a036012b699723fa9e0cb388473be8d1
+    container_name: imagegen
+    profiles: ["managed"]
+    # The proxy decides when it runs. A restart policy would bring it back
+    # holding VRAM the proxy believes is free.
+    restart: "no"
+    # sd-server ignores SIGTERM: `docker stop` always ran out its 10 s grace.
+    # Nothing in it is worth flushing.
+    stop_signal: SIGKILL
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=0
+    entrypoint: ["/sd-server"]
+    command:
+      - --listen-ip
+      - "0.0.0.0"
+      - --listen-port
+      - "8080"
+      - --diffusion-model
+      - /models/leejet/Z-Image-Turbo-GGUF/z_image_turbo-Q8_0.gguf
+      - --llm
+      - /models/unsloth/Qwen3-4B-Instruct-2507-GGUF/Qwen3-4B-Instruct-2507-Q8_0.gguf
+      - --vae
+      - /models/Comfy-Org/z_image_turbo/ae.safetensors
+      - --cfg-scale
+      - "1.0"
+      - --steps
+      - "8"
+      - --flash-attn
+      - "off"
+      - --conv-direct
+      - "off"
+    volumes:
+      - ${MODELS_DIR:-/srv/models}:/models:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities:
+                - gpu
+
+  # ──────────────────────────────────────────────────────────
   # GPU arbiter
   # The only component that decides who holds the card, and the only one that
   # can see it. Starts and stops job containers through docker-socket-proxy
@@ -178,6 +236,11 @@ services:
       # models, which is why this stays here rather than moving to the arbiter.
       - IDLE_EVICT_ENABLED=${IDLE_EVICT_ENABLED:-true}
       - IDLE_EVICT_SECONDS=${IDLE_EVICT_SECONDS:-600}
+      # Image generation (proxy/imagegen.py). Off until the imagegen service
+      # has been created and tested; the proxy starts and stops that container
+      # through docker-socket-proxy.
+      - IMAGEGEN_ENABLED=${IMAGEGEN_ENABLED:-false}
+      - DOCKER_URL=http://docker-socket-proxy:2375
     healthcheck:
       test:
         - CMD
@@ -218,6 +281,9 @@ services:
       # Live image captions for the mimic chat controller. Leave off until
       # [mimic-multi] has a vision projector (needs a newer llama.cpp; see models.ini).
       - VISION_MIMIC_ENABLED=${VISION_MIMIC_ENABLED:-false}
+      # /imagine. Needs the proxy's IMAGEGEN_ENABLED and the imagegen service.
+      - IMAGINE_ENABLED=${IMAGINE_ENABLED:-false}
+      - IMAGINE_PER_USER_PER_HOUR=${IMAGINE_PER_USER_PER_HOUR:-10}
     volumes:
       # Absolute, not ./relative. Compose resolves relative binds against the
       # directory it is invoked from, so recreating this stack through dockge

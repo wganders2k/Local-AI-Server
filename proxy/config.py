@@ -37,3 +37,26 @@ IDLE_EVICT_SECONDS = float(os.environ.get("IDLE_EVICT_SECONDS", "600"))
 # actually take effect.
 IDLE_EVICT_POLL_SECONDS = float(os.environ.get("IDLE_EVICT_POLL_SECONDS", "30"))
 IDLE_EVICT_UNLOAD_TIMEOUT = float(os.environ.get("IDLE_EVICT_UNLOAD_TIMEOUT", "60"))
+
+
+# Image generation (imagegen.py) — off until the imagegen service is deployed.
+IMAGEGEN_ENABLED = os.environ.get("IMAGEGEN_ENABLED", "false").lower() not in ("false", "0", "no")
+IMAGEGEN_URL = os.environ.get("IMAGEGEN_URL", "http://imagegen:8080")
+# The container the proxy starts and stops; must match container_name in
+# docker-compose.yml. Reached through docker-socket-proxy, never the real socket.
+IMAGEGEN_CONTAINER = os.environ.get("IMAGEGEN_CONTAINER", "imagegen")
+DOCKER_URL = os.environ.get("DOCKER_URL", "http://docker-socket-proxy:2375")
+# Start to listening measured at 8 s; the rest is headroom for a cold disk.
+IMAGEGEN_START_TIMEOUT = float(os.environ.get("IMAGEGEN_START_TIMEOUT", "90"))
+# A warm 1024² image took 10.9 s, the first one 15.5 s with its weight load.
+IMAGEGEN_REQUEST_TIMEOUT = float(os.environ.get("IMAGEGEN_REQUEST_TIMEOUT", "300"))
+# Z-Image-Turbo works in multiples of 64; these are ~1 megapixel each, so all
+# cost about the same 11 s. Anything else is refused rather than guessed at.
+IMAGEGEN_SIZES: set[str] = {"1024x1024", "832x1216", "1216x832", "768x768"}
+IMAGEGEN_DEFAULT_SIZE = "1024x1024"
+IMAGEGEN_MAX_PROMPT_CHARS = 2000
+# Chat models small enough to stay loaded beside the image server: ~11.2 GB +
+# the 12B mimic base's ~9.3 GB ≈ 20.5 GB of 24. Anything
+# else (the 27B lore agent alone holds 21.25 GB) is unloaded first, and the
+# image server is stopped before any other model loads.
+IMAGEGEN_COEXIST_MODELS: set[str] = {"mimic-multi", "mimic-base", "mimic-candidate"}

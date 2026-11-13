@@ -5,6 +5,7 @@ Wraps httpx to send chat completion requests to the proxy's
 OpenAI-compatible API endpoint (/v1/chat/completions).
 """
 
+import base64
 import json
 from contextlib import contextmanager
 from typing import AsyncGenerator, Iterator
@@ -269,6 +270,26 @@ class ProxyClient:
             response = await client.get("/status")
         _check_status(response.status_code, response.text, "Proxy /status")
         return response.json().get("queue_depth", 0)
+
+    async def generate_image(self, prompt: str, size: str) -> bytes:
+        """
+        One image from a text prompt, as the image file's bytes (PNG).
+
+        Text only: the proxy builds its own request from the prompt and size
+        and refuses image inputs (proxy/imagegen.py).
+
+        Raises:
+            ProxyError: When the proxy is unreachable, refuses, or the image
+                server fails.
+        """
+        client = await self._get_client()
+        with _transport_errors("Image generation timed out. The GPU may be busy."):
+            response = await client.post("/v1/images/generations", json={"prompt": prompt, "size": size})
+        _check_status(response.status_code, response.text, "Image generation")
+        try:
+            return base64.b64decode(response.json()["data"][0]["b64_json"])
+        except (KeyError, IndexError, ValueError, TypeError) as exc:
+            raise ProxyError(f"Image generation returned no image ({exc})") from exc
 
     async def models_payload(self) -> list[dict]:
         """

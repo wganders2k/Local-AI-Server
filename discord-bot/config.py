@@ -275,3 +275,39 @@ VISION_MAX_TOKENS: int = 200
 # image we run (see models.ini), and an image request to a preset without one
 # fails. Lore captions need no switch — the agent model has its projector.
 VISION_MIMIC_ENABLED: bool = os.environ.get("VISION_MIMIC_ENABLED", "false").lower() == "true"
+
+
+# ──────────────────────────────────────────────────────────────
+# /imagine (cogs/imagine.py)
+# ──────────────────────────────────────────────────────────────
+
+# Registers /imagine. Off until the proxy's image server is deployed
+# (IMAGEGEN_ENABLED there); otherwise the command would only ever fail.
+IMAGINE_ENABLED: bool = os.environ.get("IMAGINE_ENABLED", "false").lower() == "true"
+# Images are the costliest request the bot serves (~11 s of the whole card,
+# and they evict the lore agent), so they get their own hourly cap on top of
+# the shared per-minute rate limit.
+IMAGINE_PER_USER_PER_HOUR: int = int(os.environ.get("IMAGINE_PER_USER_PER_HOUR", "10"))
+# Shapes offered, as the proxy's allowed sizes (proxy/config.py IMAGEGEN_SIZES).
+# All ~1 megapixel, so all cost about the same.
+IMAGINE_SHAPES: dict[str, str] = {
+    "Square": "1024x1024",
+    "Portrait": "832x1216",
+    "Landscape": "1216x832",
+}
+# Discord's slash-command string cap is 6000; the proxy refuses past 2000.
+IMAGINE_MAX_PROMPT_CHARS: int = 1000
+# Each of /imagine's detail options (style, mood, framing). The prompt plus all
+# three, labelled, stays under the proxy's 2000.
+IMAGINE_MAX_DETAIL_CHARS: int = 200
+# /imagine's `rewrite` option (on by default): the mimic base, no adapter,
+# expands the prompt into the long concrete description Z-Image follows best
+# (prompts/imagine_rewrite.md). It is the one LLM the proxy keeps loaded beside
+# the image server (IMAGEGEN_COEXIST_MODELS), so a rewrite costs ~1.5 s and no
+# swap. Chosen over the 27B heretic in a side-by-side on 2026-11-13: images as
+# good, and the 27B would be unloaded and reloaded around every image.
+IMAGINE_REWRITE_MODEL: str = MIMIC_MODEL
+IMAGINE_REWRITE_TEMPERATURE: float = 0.7
+IMAGINE_REWRITE_MAX_TOKENS: int = 300
+# Past this the rewrite is not the one paragraph asked for; the original goes instead.
+IMAGINE_REWRITE_MAX_CHARS: int = 1500

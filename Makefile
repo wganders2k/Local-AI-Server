@@ -82,6 +82,7 @@ help:
 	@echo "  models-download     Download all GGUF model files from HuggingFace"
 	@echo "                        Skips files already present. Run before first 'make up'."
 	@echo "                        Usage: make models-download"
+	@echo "                               make models-download SLOT=imagegen"
 	@echo "                               make models-download SLOT=swappable"
 	@echo "                               make models-download DRY_RUN=1"
 	@echo "                        Set HF_TOKEN env var for private/gated repos."
@@ -279,7 +280,7 @@ rag-status:
 ## A Python venv is automatically created in scripts/.venv/ on first run.
 ##
 ## Options:
-##   SLOT=swappable|all             Download only models for a specific slot (default: all)
+##   SLOT=swappable|imagegen|all  Download only models for a specific slot (default: all)
 ##   DRY_RUN=1                      Print what would be downloaded without downloading
 ##   MODELS_DIR=/path/to/models     Override model storage directory (default: /srv/models)
 ##

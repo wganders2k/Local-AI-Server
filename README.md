@@ -30,15 +30,15 @@ One card, several tenants. The proxy owns *which model answers a request*; the a
 │   │  FastAPI             │◀── granted ──│  the only component that  │  │
 │   │  routes + serialises │              │  can see the card         │  │
 │   └──────────────────────┘              └───────────────────────────┘  │
-│                       │                        │            │          │
-│                       ▼                        │            │          │
-│                   ┌──────────────────────┐     │            │          │
-│                   │ llama-swappable      │◀────┘            ▼          │
-│                   │ :11434               │           ┌──────────────┐  │
-│                   │ router — one model   │           │ lora-trainer │  │
-│                   │ resident at a time   │           │ preemptible  │  │
-│                   │ (models.ini presets) │           │ (profile)    │  │
-│                   └──────────────────────┘           └──────────────┘  │
+│        │              │                        │            │          │
+│        ▼              ▼                        │            │          │
+│  ┌─────────────┐  ┌──────────────────────┐     │            │          │
+│  │ imagegen    │  │ llama-swappable      │◀────┘            ▼          │
+│  │ sd-server   │  │ :11434               │           ┌──────────────┐  │
+│  │ started and │  │ router — one model   │           │ lora-trainer │  │
+│  │ stopped by  │  │ resident at a time   │           │ preemptible  │  │
+│  │ the proxy   │  │ (models.ini presets) │           │ (profile)    │  │
+│  └─────────────┘  └──────────────────────┘           └──────────────┘  │
 │                                                                        │
 │   CPU-only: rag-service ─▶ chromadb   history-service ─▶ DCE           │
 │   Observability: proxy /metrics ─▶ host monitoring stack (Grafana)     │
@@ -132,7 +132,7 @@ make status
 make check-gpu
 ```
 
-`make up` deliberately skips two profiled services: `lora-trainer` (`managed`) and `discord-chat-exporter` (`manual`). The trainer in particular would take 16 GB behind the arbiter's back if a plain `up` started it.
+`make up` deliberately skips three profiled services: `lora-trainer` and `imagegen` (`managed`), and `discord-chat-exporter` (`manual`). The trainer in particular would take 16 GB behind the arbiter's back if a plain `up` started it; the proxy starts and stops `imagegen` itself.
 
 **No IDE autocomplete.** An always-resident autocomplete model (`llama-permanent`, :11435) was removed on 2026-11-12. It went unused and held 2.2 GB of VRAM around the clock. It can't come back as a `models.ini` preset either: the router holds one model at a time, so every completion would evict the chat model.
 
@@ -165,6 +165,7 @@ make check-gpu
 | Service | Port | Profile | Description |
 |---|---|---|---|
 | `llama-swappable` | `:11434` | — | Router mode, `--models-max 1`; loads a preset on demand |
+| `imagegen` | — | `managed` | sd-server (Z-Image-Turbo); started and stopped by the proxy |
 | `proxy` | `:11436` | — | FastAPI orchestration proxy |
 | `arbiter` | `127.0.0.1:11438` | — | GPU admission control; NVML-only, no CUDA |
 | `history-service` | `127.0.0.1:11437` | — | DCE orchestration, archive merge, image captioning |
@@ -190,6 +191,7 @@ history  GET  /health  /status                  POST /evaluate  /reparse  /clear
 ## Model Management
 
 - **`models.ini`** — every swappable-slot preset. Each `[section]` is a named alias with its GGUF path and inference parameters.
+- **`docker-compose.yml`** — the image model, via the `imagegen` service's command.
 
 Currently enabled aliases in `models.ini`:
 

@@ -12,6 +12,9 @@ script needs no matching edit. A section's HuggingFace repo id is assumed to be
 its on-disk <publisher>/<repo> path, with any exception listed in
 HF_REPO_OVERRIDES below.
 
+The image server's files are named in docker-compose.yml (the `imagegen`
+command:), not models.ini, so they are listed explicitly in IMAGEGEN_MODELS.
+
 Usage:
   python scripts/download_models.py [--models-dir /path/to/models] [--dry-run]
 
@@ -23,7 +26,8 @@ Environment variables:
   MODELS_DIR     — Override default model storage directory (default: /srv/models)
 
 To add or change a model:
-  1. Add/edit a [section] in models.ini.
+  1. Add/edit a [section] in models.ini (image server: IMAGEGEN_MODELS below
+     and the imagegen command: in docker-compose.yml).
   2. Run: make models-download
   3. Run: make restart-llama-swappable
 """
@@ -45,6 +49,34 @@ except ImportError:
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MODELS_INI_PATH = REPO_ROOT / "models.ini"
+
+# Image generation (compose service `imagegen`, sd-server) — its files are
+# named in docker-compose.yml's imagegen command:, not models.ini.
+IMAGEGEN_MODELS = [
+    {
+        "repo_id":   "leejet/Z-Image-Turbo-GGUF",
+        "filename":  "z_image_turbo-Q8_0.gguf",
+        "local_dir": "leejet/Z-Image-Turbo-GGUF",
+        "slot":      "imagegen",
+        "notes":     "Z-Image-Turbo diffusion model — ~6.3 GB VRAM",
+    },
+    {
+        "repo_id":   "unsloth/Qwen3-4B-Instruct-2507-GGUF",
+        "filename":  "Qwen3-4B-Instruct-2507-Q8_0.gguf",
+        "local_dir": "unsloth/Qwen3-4B-Instruct-2507-GGUF",
+        "slot":      "imagegen",
+        "notes":     "Z-Image text encoder — ~4.1 GB VRAM",
+    },
+    {
+        "repo_id":   "Comfy-Org/z_image_turbo",
+        "filename":  "split_files/vae/ae.safetensors",
+        "local_dir": "Comfy-Org/z_image_turbo",
+        "slot":      "imagegen",
+        "notes":     "FLUX VAE used by Z-Image",
+        # hf_hub_download keeps the repo's subdirectories under local_dir
+        "target":    "ae.safetensors",
+    },
+]
 
 # Cases where a GGUF's on-disk <publisher>/<repo> path (as used in models.ini
 # and MODELS_DIR) doesn't match its actual HuggingFace repo id.
@@ -104,7 +136,7 @@ def download_model(entry: dict, models_dir: Path, dry_run: bool, hf_token: str |
     """
     target_dir = models_dir / entry["local_dir"]
     target_dir.mkdir(parents=True, exist_ok=True)
-    target_path = target_dir / entry["filename"]
+    target_path = target_dir / entry.get("target", entry["filename"])
 
     print(f"\n{'─' * 60}")
     print(f"  Model : {entry['notes']}")
@@ -173,7 +205,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--slot",
-        choices=["swappable", "all"],
+        choices=["swappable", "imagegen", "all"],
         default="all",
         help="Download only models for a specific slot (default: all)",
     )
@@ -194,7 +226,7 @@ def main() -> None:
     if args.slot != "all":
         print(f"  Slot filter: {args.slot} only")
 
-    all_models = load_swappable_models(models_ini_path)
+    all_models = load_swappable_models(models_ini_path) + IMAGEGEN_MODELS
 
     # Filter by slot if requested
     models_to_download = [
