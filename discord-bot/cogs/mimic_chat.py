@@ -166,7 +166,7 @@ class MimicChatCog(commands.Cog):
                 if state.premise:
                     lines.insert(0, seed_line(state.premise, state.starter_id, state.starter_label, state.started_at))
                 if not lines:
-                    return  # nothing anyone said survived the filters (a command, a bare ">>>")
+                    return  # nothing anyone said survived the filters (a command, a bare ">>>>")
                 # `length` paces the first burst only: the one before any persona has spoken.
                 length = state.length if all(line.persona is None for line in lines) else None
                 # A persona since dropped from the roster or [mimic-multi] sits this chat out.

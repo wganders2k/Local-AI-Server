@@ -3,25 +3,25 @@
 * Set up SearXNG + redis or similar search provider to improve chatbot utility
 
 ### Discord Bot
-* Re-enable `/mimic`: the `mimic_user*` presets are commented out in `models.ini`, so every persona the autocomplete offers resolves to a model llama-server doesn't have.
-* Persona autocomplete reads a hardcoded dict and can advertise models that don't exist. `/chat` already does this properly by reading the proxy's `/v1/models` — copy that.
 * `/admin-clear-history` stays disabled until there's a role check.
 
 ### Dead code / half-wired things
 * `LORE_TOP_K` defaults disagree: 10 in `discord-bot/config.py`, 5 in `docker-compose.yml`.
 
 ### Training
-* First real persona run: `make train-dataset` for one member, then the smoke config on the re-pinned stack (transformers 5 / TRL 1), then `configs/mimic_gemma4_12b.yaml`.
 * Replace the estimated `required_mb: 14000` in `arbiter/jobs.yaml` with the measured peak.
-* Confirm that the running llama-server build loads a Gemma 4 GGUF LoRA via the `lora =` preset key. If not, pin a newer `server-cuda` tag, which overlaps the Hardening item below.
-* Tuning experiments against the baseline adapter (lora-training/README.md §Judging a run), then the other five personas.
+* Tuning experiments against the live adapters (lora-training/README.md §Judging a run; the cut pipeline and topic eval are the current round).
 
 ### Hardening
-* `ghcr.io/ggml-org/llama.cpp:server-cuda` is unpinned. A bad upstream build lands on the next `make pull`.
 * The arbiter is root-equivalent via `docker-socket-proxy` (`CONTAINERS`+`POST` admits `/containers/create`). Since `kind: container` currently has no user, dropping the Docker dependency entirely would remove the exposure outright.
 * `docker-compose.yml` bind-mounts configs by absolute `/home/peacow/local-ai-server` paths, so the repo only runs from that location.
 
 ### Done
+* ~~Re-enable `/mimic`~~ — all seven personas are trained and served from `[mimic-multi]`, one base with every adapter applied per request.
+* ~~Persona autocomplete reads a hardcoded dict~~ — `personas.PersonaCatalog` offers only personas on the roster that also have an adapter id from the proxy's `/v1/models`.
+* ~~First real persona run~~ — done for every persona; `make train-datasets` / `train-queue` / `train-export-latest` retrain the roster.
+* ~~Confirm llama-server loads a Gemma 4 GGUF LoRA via `lora =`~~ — it does; the adapters are live.
+* ~~`ghcr.io/ggml-org/llama.cpp:server-cuda` is unpinned~~ — `llama-swappable` is pinned by digest to `server-cuda12-b11977`.
 * ~~Nothing consumes the JSONL archive for training~~: `lora-training/build_dataset.py` builds Tier 3 per persona.
 * ~~`merge.py` doesn't exist~~: replaced by `export_adapter.py`, which writes a GGUF LoRA over a shared base rather than a merged model.
 * ~~Whether to train on per-member history at all~~: decided 2026-11-04, with the members' agreement.
