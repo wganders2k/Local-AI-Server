@@ -125,13 +125,17 @@ arbiter.py          the GPU calls — acquire, release, wait_until_wanted
 checkpoints.py      COMPLETE-marker discovery and pruning
 build_dataset.py    archive -> one persona's train/eval JSONL (CPU, no lease)
 export_adapter.py   finished adapter -> GGUF LoRA for llama-server (CPU, no lease)
-personas.py         the roster: persona -> Discord account(s) + display name
 build_all_datasets.py  build_dataset.py for every persona in the roster
 train_queue.sh      host-side: one run after another (make train-queue)
 export_latest.py    newest finished run per persona -> live GGUF (CPU, no lease)
 sample_persona.py   held-out outputs side by side, or a recorded blind A/B
 configs/smoke.yaml  Qwen3-0.6B — validates the handover in minutes
-configs/mimic_gemma4_12b.yaml   the persona run, one copy per member
+configs/mimic_gemma4_12b.yaml   the persona recipe (not a run on its own)
+configs/mimic_userN.yaml        one per persona: `extends:` the recipe, adds
+                                its dataset, output_dir and any overrides
+../shared/          the contract with the bot: prompt format (mimic_format.py),
+                    persona system prompt (mimic_persona.md), and the roster
+                    reader (persona_roster.py)
 tests/              checkpoint safety under an unclean stop; refusal handling;
                     every dataset filter
 ```
@@ -185,30 +189,34 @@ an abliterated **Gemma 4 12B** first. The 35B-A3B comes later, once the pipeline
 is proven on a model that fits with room to spare.
 
 ```
-make train-fetch   MODEL=culturerevolt/gemma-4-12b-heretic-abliterated   # once
-make train-dataset USER_ID=<discord id> PERSONA=mimic_user1 NAME=<display name>
-make train-submit  CONFIG=configs/mimic_gemma4_12b.yaml
-make train-export  CONFIG=configs/mimic_gemma4_12b.yaml PERSONA=mimic_user1
-make train-sample  PERSONA=mimic_user1 MODELS="mimic-base mimic_user1"
+make train-fetch    MODEL=culturerevolt/gemma-4-12b-heretic-abliterated   # once
+make train-datasets PERSONA=mimic_user1
+make train-submit   CONFIG=configs/mimic_user1.yaml      # or make train-queue
+make train-export-latest PERSONA=mimic_user1 CANDIDATE=1
+make train-sample   PERSONA=mimic_user1 MODELS="mimic_user1 candidate" ARGS=--blind
+make train-export-latest PERSONA=mimic_user1             # put it live
 ```
 
 None of these but `train-submit` asks for the GPU: they are one-off containers
-from the same image, safe beside live inference and beside a waiting run.
+from the same image, safe beside live inference and beside a waiting run. Who
+mimic_user1 is (accounts, display name) comes from the roster — see
+"Retraining personas" below.
 
 ### The data (Tier 3)
 
 `build_dataset.py` reassembles the per-author archive into channel timelines and
-emits one example per reply: the preceding turns (≤12, broken by a 30-minute
-silence) as a `[name]: text` user turn, the member's reply as the completion.
-TRL's prompt/completion format puts the loss on the reply only. The system
-prompt is rendered from `discord-bot/prompts/mimic_persona.md` — mounted, not
-copied — so the adapter trains on the prompt `/mimic` sends.
+emits one example per reply: the preceding turns (≤24 merged turns, broken by a
+2-hour silence; same-author messages within 10 minutes are one turn) as a
+`[name]: text` user turn, the member's reply as the completion. TRL's
+prompt/completion format puts the loss on the reply only. The rules live in
+`shared/mimic_format.py`, and the system prompt is `shared/mimic_persona.md`
+rendered by `mimic_format.render_persona_prompt` — the same code the bot serves
+with, so the adapter trains on the prompt `/mimic` sends.
 
-Dropped as targets: attachment-only, link-only, under 8 characters, bare pings
-(under 8 characters once mentions are removed — identified ones from the
-archive's `mentions`, plus any whole message of the form `@…` that recurs, which
-catches role pings);
-all still kept as context. Also conversation openers with no context. Dropped
+Dropped as targets: attachment-only, link-only, shorter than `--min-chars` (24)
+once links are removed — which also catches bare pings — junk (spam, character
+art, copypasta), and replies holding a pasted long number; all still kept as
+context. Also conversation openers with no context. Dropped
 everywhere: bot messages, `/` and `!` commands (on this server, overwhelmingly
 music-bot `!p`/`!play`), every message `type` but `Default` and `Reply` (pin
 events, thread creation, poll results — the archive keeps them, tagged),
@@ -244,20 +252,25 @@ projections outside the text decoder.
 ### Serving: adapters, not merges
 
 `export_adapter.py` runs llama.cpp's `convert_lora_to_gguf.py` (tag pinned in the
-Dockerfile) and writes `/srv/models/lora/<persona>-lora.gguf` — tens of MB. Each
-persona is a `models.ini` section pointing the shared base at its adapter, so six
-personas cost one base on disk, not six re-quantised models.
+Dockerfile) and writes `/srv/models/lora/<persona>-lora.gguf` — tens of MB. Every persona's
+adapter is listed in `[mimic-multi]` in `models.ini`, loaded together over one
+base and picked per request, so seven personas cost one base on disk and in VRAM,
+and a change of speaker never reloads the model.
 
 ### Judging a run
 
 Eval loss falls for a model that learns to hedge, so it is not the verdict.
 `sample_persona.py --blind` shows two models' replies to the same held-out
 conversations in shuffled order and logs your pick to
-`/home/peacow/lora-outputs/experiments.jsonl`. Change one variable per run
+`/home/peacow/lora-outputs/experiments.jsonl`. A model is `base`, a persona key
+(its live adapter, served as `/mimic` serves it), or `candidate` — a run exported
+with `make train-export-latest PERSONA=… CANDIDATE=1` into `[mimic-candidate]`,
+which nothing live uses. Change one variable per run
 against the baseline — data shape (context length, merge window, min length,
 system prompt or not), then learning rate/epochs, rank and target modules,
 rsLoRA/DoRA, dropout/NEFTune — each in its own config under
-`configs/experiments/` with its own `output_dir`. The config keys for all of
+`configs/experiments/` with its own `output_dir`, `extends:`-ing the persona's
+config so it states only the variable under test. The config keys for all of
 these pass straight through `train_worker.py`.
 
 From the original design: 1–2 epochs, and always train from the fresh base
@@ -269,7 +282,8 @@ across versions.
 Three steps, none of which needs anyone to remember who each persona is. That
 lives in the roster, `/mnt/storage_cold/array/DiscordArchive/training/personas.json`
 (`/archive/training/personas.json` in the container), beside `names.json` and
-out of the repo for the same reason: it holds real names.
+out of the repo for the same reason: it holds real names. The bot reads it too
+(`shared/persona_roster.py`), so it is the one place a persona is defined.
 
 ```bash
 make train-datasets [PERSONA=mimic_user3] [REFRESH=1]   # 1. archive -> train/eval JSONL
@@ -293,8 +307,11 @@ make train-export-latest [PERSONA=mimic_user3]          # 3. put the newest runs
   run first (`make train-sample … ARGS=--blind`). `DRY_RUN=1` shows the picks;
   `PERSONA=… RUN=<dir>` exports a specific run, which is also the rollback.
 
-A new persona needs a roster entry, a `configs/<persona>.yaml` (copy one) and a
-`models.ini` section whose `lora` points at `<persona>-lora.gguf`. Export warns
-if that section is missing. Add the section only once the GGUF exists:
-llama-swappable waits forever on a missing adapter, so `/mimic` hangs until it
-times out.
+A new persona needs a roster entry, a `configs/<persona>.yaml` (copy one: it is
+five lines extending the recipe) and — once its GGUF exists — its path appended to
+`[mimic-multi]`'s `lora` list in `models.ini`. Nothing else: the bot reads the
+roster for who it is and the proxy for its adapter id. Export warns if
+`[mimic-multi]` does not list it. Append it only after the GGUF exists:
+llama-swappable waits forever on a missing adapter, and the adapters load
+together, so one missing file hangs `/mimic` for every persona (export warns
+about that too).

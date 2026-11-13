@@ -59,12 +59,66 @@ def test_eval_loss_is_the_last_evaluation(tmp_path):
     assert el.last_eval_loss(run) == 3.35
 
 
-def test_preset_check(tmp_path):
+def test_preset_check_reads_the_multi_adapter_list(tmp_path):
     ini = tmp_path / "models.ini"
     ini.write_text(
-        "[mimic_user3]\nlora = /srv/models/lora/mimic_user3-lora.gguf\n"
-        "[mimic_user4]\nlora = /srv/models/lora/other.gguf\n"
+        "[mimic-multi]\nlora = /srv/models/lora/mimic_user3-lora.gguf,/srv/models/lora/mimic_user4-lora.gguf\n"
+        "[mimic_user5]\nlora = /srv/models/lora/mimic_user5-lora.gguf\n"
     )
     assert el.preset_problem(str(ini), "mimic_user3") is None
-    assert "other.gguf" in el.preset_problem(str(ini), "mimic_user4")
-    assert "no [mimic_user5]" in el.preset_problem(str(ini), "mimic_user5")
+    # A section of its own is not enough: /mimic is served from [mimic-multi].
+    assert "does not list mimic_user5-lora.gguf" in el.preset_problem(str(ini), "mimic_user5")
+    assert el.preset_problem(str(tmp_path / "unmounted.ini"), "mimic_user5") is None
+
+
+def test_a_missing_adapter_file_is_reported(tmp_path, monkeypatch):
+    lora = tmp_path / "lora"
+    lora.mkdir()
+    (lora / "mimic_user3-lora.gguf").write_text("x")
+    monkeypatch.setattr(el, "LORA_DIR", str(lora))
+    ini = tmp_path / "models.ini"
+    ini.write_text("[mimic-multi]\nlora = /srv/models/lora/mimic_user3-lora.gguf,/srv/models/lora/mimic_user4-lora.gguf\n")
+    assert el.missing_adapters(str(ini)) == ["/srv/models/lora/mimic_user4-lora.gguf"]
+
+
+def test_candidate_export_never_touches_the_live_adapter(tmp_path, monkeypatch):
+    import sys
+    import types
+
+    lora = tmp_path / "lora"
+    lora.mkdir()
+    roster = tmp_path / "personas.json"
+    roster.write_text(json.dumps({"mimic_user3": {"user_ids": "1", "display_name": "x"}}))
+    run = _run(tmp_path / "outputs", "mimic_user3-new", finished_at=100)
+    exported = []
+    monkeypatch.setitem(sys.modules, "export_adapter", types.SimpleNamespace(
+        export=lambda adapter, name: exported.append((adapter, name)) or 0))
+    monkeypatch.setattr(el, "LORA_DIR", str(lora))
+    monkeypatch.setattr(el, "OUTPUTS_DIR", str(tmp_path / "outputs"))
+    monkeypatch.setattr(sys, "argv", [
+        "export_latest.py", "--personas", "mimic_user3", "--candidate",
+        "--roster", str(roster), "--models-ini", str(tmp_path / "none.ini"),
+    ])
+
+    assert el.main() == 0
+    assert exported == [(os.path.join(run, "final"), "candidate")]
+    manifest = json.loads((lora / "candidate-lora.json").read_text())
+    assert (manifest["source"], manifest["persona"]) == (run, "mimic_user3")
+    assert not (lora / "mimic_user3-lora.json").exists()
+
+
+def test_the_manifest_records_how_the_run_was_trained(tmp_path, monkeypatch):
+    monkeypatch.setattr(el, "LORA_DIR", str(tmp_path))
+    recorded = _run(tmp_path, "mimic_user1-new", finished_at=1)
+    with open(os.path.join(recorded, "dataset_stats.json"), "w") as fh:
+        json.dump({"args": {"no_system": True, "context_n": 24}, "counts": {}}, fh)
+    legacy = _run(tmp_path, "mimic_user2-old", finished_at=1)
+
+    el.write_manifest("mimic_user1", recorded, 3.4)
+    el.write_manifest("mimic_user2", legacy, 3.5)
+
+    assert el.persona_roster.trained_format("mimic_user1", str(tmp_path)) == {"no_system": True, "context_n": 24}
+    # A run from before the record: no key at all, so readers assume the legacy format.
+    assert el.persona_roster.trained_format("mimic_user2", str(tmp_path)) == {}
+    with open(el.manifest_path("mimic_user2")) as fh:
+        assert "dataset" not in json.load(fh)

@@ -26,7 +26,8 @@ endif
 	dce-evaluate history-refresh \
 	rag-ingest rag-status \
 	train-submit train-cancel train-status train-logs \
-	train-fetch train-dataset train-export train-sample \
+	train-fetch train-datasets train-queue train-queue-status train-queue-stop \
+	train-export-latest train-sample \
 	gpu-status \
 	test-venvs test lint \
 	nuke
@@ -120,10 +121,12 @@ help:
 	@echo "  train-status      Container state, and what the arbiter thinks"
 	@echo "  train-logs        Tail the training log"
 	@echo "  train-fetch       Pre-download a base model (MODEL=<hf id>) — no GPU lease"
-	@echo "  train-dataset     Build a persona's training set from the archive"
-	@echo "                        Usage: make train-dataset USER_ID=<id> PERSONA=mimic_user1 NAME=<name>"
-	@echo "  train-export      Finished adapter -> /srv/models/lora/<PERSONA>-lora.gguf"
+	@echo "  train-datasets    Archive -> training sets, for the roster or PERSONA=<p>"
+	@echo "  train-queue       Retrain the roster (or PERSONAS=...) one after another, in the background"
+	@echo "  train-queue-status / train-queue-stop"
+	@echo "  train-export-latest  Newest finished runs -> live adapters (PERSONA=, RUN=, CANDIDATE=1, DRY_RUN=1)"
 	@echo "  train-sample      Held-out outputs side by side; ARGS=--blind for a recorded A/B"
+	@echo "                        Usage: make train-sample PERSONA=mimic_user1 MODELS=\"base mimic_user1\""
 	@echo ""
 	@echo "  ── GPU ────────────────────────────────────────────────"
 	@echo "  gpu-status        Who holds the card, why, and how much is free"
@@ -377,33 +380,25 @@ train-fetch:
 ## in the archive (lore can use them) but are not trained on. By id, so a
 ## rename cannot quietly let one back in.
 ##   878129359876149289  #grant-chronicle
-TRAIN_EXCLUDED_CHANNELS ?= 878129359876149289
+##   1094687219450646528 the wordle channel: score grids, not conversation
+TRAIN_EXCLUDED_CHANNELS ?= 878129359876149289,1094687219450646528
 
-## Build one persona's training set from the archive (Tier 3).
-## Usage: make train-dataset USER_ID=<discord id> PERSONA=mimic_user1 NAME=<display name> [ARGS="--context-n 24"]
-##        USER_ID=<old id>,<new id> for a member who has posted from more than one account
-## Writes /mnt/storage_cold/array/DiscordArchive/training/<PERSONA>/ — real
-## messages, so it stays on the archive disk and out of the repo.
-train-dataset:
-	@[ -n "$(USER_ID)" ] && [ -n "$(PERSONA)" ] && [ -n "$(NAME)" ] || { \
-		echo "Usage: make train-dataset USER_ID=<discord id> PERSONA=mimic_user1 NAME=<display name>"; exit 1; }
-	$(TRAINER_RUN) python build_dataset.py --user-id "$(USER_ID)" --persona "$(PERSONA)" \
-		--display-name "$(NAME)" --exclude-channels "$(EXCLUDED_CHANNELS),$(TRAIN_EXCLUDED_CHANNELS)" $(ARGS)
-
-## Convert a finished run's adapter to /srv/models/lora/<PERSONA>-lora.gguf.
-## Usage: make train-export CONFIG=configs/mimic_gemma4_12b.yaml PERSONA=mimic_user1
-train-export:
-	@[ -n "$(PERSONA)" ] || { echo "Usage: make train-export CONFIG=configs/<run>.yaml PERSONA=mimic_user1"; exit 1; }
-	$(TRAINER_RUN) python export_adapter.py --config "$(CONFIG)" --name "$(PERSONA)"
+## UTC days kept out of persona training entirely.
+##   2026-04-01  an April Fools' run of pasted chatbot replies
+TRAIN_EXCLUDED_DATES ?= 2026-04-01
 
 # ── Persona retraining ──
-# The loop for every persona at once, with nobody needing to remember who
+# The loop for every persona, or one, with nobody needing to remember who
 # mimic_user6 is: datasets -> queue -> check -> export. Who each persona is
 # lives in the roster, /mnt/storage_cold/array/DiscordArchive/training/personas.json
-# (real names, so beside names.json and out of the repo).
+# (real names, so beside names.json and out of the repo). A new persona is a
+# roster entry, a configs/<persona>.yaml extending mimic_gemma4_12b.yaml, and
+# — once its GGUF exists — its entry in [mimic-multi]'s lora list in models.ini.
 
-## Rebuild training sets from the archive: every persona, or one.
+## Rebuild training sets from the archive (Tier 3): every persona, or one.
 ## Usage: make train-datasets [PERSONA=mimic_user3] [REFRESH=1] [ARGS="--context-n 24"]
+## Writes /mnt/storage_cold/array/DiscordArchive/training/<persona>/ — real
+## messages, so it stays on the archive disk and out of the repo.
 ## REFRESH=1 first pulls new Discord history into the archive (can take hours).
 ## Don't run it while train-queue is training: the queue reads these files.
 train-datasets:
@@ -415,7 +410,8 @@ train-datasets:
 			|| { echo "Error: archive refresh did not complete"; exit 1; }; \
 	fi
 	$(TRAINER_RUN) python build_all_datasets.py --personas "$(PERSONA)" \
-		--exclude-channels "$(EXCLUDED_CHANNELS),$(TRAIN_EXCLUDED_CHANNELS)" $(if $(ARGS),-- $(ARGS),)
+		--exclude-channels "$(EXCLUDED_CHANNELS),$(TRAIN_EXCLUDED_CHANNELS)" \
+		--exclude-dates "$(TRAIN_EXCLUDED_DATES)" $(if $(ARGS),-- $(ARGS),)
 
 ## Retrain personas one after another, in the background. Survives logout.
 ## Usage: make train-queue [PERSONAS="mimic_user3 mimic_user5"] [JOB=<id>]
@@ -454,17 +450,21 @@ train-queue-stop:
 
 ## Put each persona's newest finished run live on /mimic (or just one).
 ## Usage: make train-export-latest [PERSONA=mimic_user3] [RUN=/home/peacow/lora-outputs/<dir>] [FORCE=1] [DRY_RUN=1]
+##        make train-export-latest PERSONA=mimic_user3 CANDIDATE=1 [RUN=...]
 ## Skips personas already serving their newest run. RUN= picks a specific run
-## for PERSONA — that is also how to roll back.
+## for PERSONA — that is also how to roll back. CANDIDATE=1 exports to the
+## [mimic-candidate] slot instead of going live, for a blind A/B first.
 train-export-latest:
 	$(TRAINER_RUN) python export_latest.py --personas "$(PERSONA)" \
-		$(if $(RUN),--run "$(RUN)",) $(if $(FORCE),--force,) $(if $(DRY_RUN),--dry-run,)
+		$(if $(RUN),--run "$(RUN)",) $(if $(FORCE),--force,) $(if $(DRY_RUN),--dry-run,) \
+		$(if $(CANDIDATE),--candidate,)
 
 ## Read a persona's outputs on held-out prompts. Add --blind for a recorded A/B.
-## Usage: make train-sample PERSONA=mimic_user1 MODELS="mimic-base mimic_user1" [ARGS=--blind]
+## MODELS: base, candidate, or persona keys (served as /mimic serves them).
+## Usage: make train-sample PERSONA=mimic_user1 MODELS="base mimic_user1" [ARGS=--blind]
 train-sample:
 	@[ -n "$(PERSONA)" ] && [ -n "$(MODELS)" ] || { \
-		echo "Usage: make train-sample PERSONA=mimic_user1 MODELS=\"mimic-base mimic_user1\" [ARGS=--blind]"; exit 1; }
+		echo "Usage: make train-sample PERSONA=mimic_user1 MODELS=\"base mimic_user1\" [ARGS=--blind]"; exit 1; }
 	$(TRAINER_RUN) python sample_persona.py --persona "$(PERSONA)" --models $(MODELS) $(ARGS)
 
 # ── GPU ────────────────────────────────────────────────────

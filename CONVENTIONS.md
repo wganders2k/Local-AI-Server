@@ -96,6 +96,15 @@ The rule: vendor small protocol clients rather than coupling build contexts, and
 always say so in the file. Duplication that explains itself is a decision;
 duplication that doesn't is a bug waiting to be half-fixed.
 
+The one exception is `shared/`, and it is the opposite case: code whose whole
+job is that two images agree byte for byte. The persona adapters are trained on
+prompts `lora-training` renders and served prompts `discord-bot` renders, so the
+format (`mimic_format.py`), the persona system prompt (`mimic_persona.md`) and
+the roster reader (`persona_roster.py`) live once in `shared/`, which both
+images copy in with `additional_contexts` and both test suites put on their
+`pythonpath`. A copy here would not be a decision; it would be the drift the
+adapters cannot survive. Keep it stdlib-only and keep it to that contract.
+
 ## 5. Persistence
 
 - JSON stores write to a temp file and `os.replace()` onto the target, so a

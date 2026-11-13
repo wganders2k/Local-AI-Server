@@ -257,16 +257,18 @@ make train-logs
 make train-status
 make train-cancel
 
-# persona pipeline (none of these take the GPU)
-make train-fetch   MODEL=culturerevolt/gemma-4-12b-heretic-abliterated
-make train-dataset USER_ID=<discord id> PERSONA=mimic_user1 NAME=<display name>
-make train-export  CONFIG=configs/mimic_gemma4_12b.yaml PERSONA=mimic_user1
-make train-sample  PERSONA=mimic_user1 MODELS="mimic-base mimic_user1"
+# persona pipeline, driven by the roster (only the queue takes the GPU)
+make train-fetch    MODEL=culturerevolt/gemma-4-12b-heretic-abliterated
+make train-datasets [PERSONA=mimic_user1]
+make train-queue    [PERSONAS="mimic_user1"]
+make train-export-latest PERSONA=mimic_user1 CANDIDATE=1
+make train-sample   PERSONA=mimic_user1 MODELS="mimic_user1 candidate" ARGS=--blind
+make train-export-latest [PERSONA=mimic_user1]
 ```
 
 The container is PID-1 `supervisor.py` holding the arbiter lease, with `train_worker.py` as a child holding the CUDA context. Preemption SIGKILLs the worker; the container survives and resumes from the last checkpoint carrying a `COMPLETE` marker. Being killed is the normal path — see [`lora-training/README.md`](lora-training/README.md) for why the split is forced and why the cadence is wall-clock rather than step-based.
 
-Per-persona training is built but not yet run on real data. `configs/mimic_gemma4_12b.yaml` trains a QLoRA adapter on an abliterated Gemma 4 12B from one member's archived replies, and `export_adapter.py` turns it into a GGUF LoRA that llama-server loads over the shared base. `configs/smoke.yaml` (Qwen3-0.6B) still exists to validate the handover in minutes. Re-run it after any change to the pinned stack.
+Seven personas are trained and live. `configs/mimic_gemma4_12b.yaml` is the QLoRA recipe on an abliterated Gemma 4 12B, which each `configs/mimic_userN.yaml` extends with one member's data; `export_latest.py` turns a finished run into a GGUF LoRA that `[mimic-multi]` serves over the shared base. Who each persona is lives in the roster beside the training data, and the bot reads the same roster. `configs/smoke.yaml` (Qwen3-0.6B) still exists to validate the handover in minutes. Re-run it after any change to the pinned stack.
 
 ## Monitoring
 

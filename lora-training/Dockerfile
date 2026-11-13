@@ -49,6 +49,8 @@ RUN mkdir -p /opt/llama.cpp \
 ENV LLAMA_CPP_DIR=/opt/llama.cpp
 
 COPY . .
+# Beside the modules that import it by bare name (see docker-compose.yml).
+COPY --from=shared mimic_format.py persona_roster.py mimic_persona.md ./
 
 # Unbuffered so a preempted run's logs are not lost with it — SIGKILL gives
 # Python no chance to flush.

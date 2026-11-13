@@ -20,12 +20,13 @@ set -u
 
 JOB="${1:?usage: train_queue.sh <job-id> [persona ...]}"
 shift
-REPO=/home/peacow/local-ai-server
-OUTPUTS=/home/peacow/lora-outputs
-TRAINING=/mnt/storage_cold/array/DiscordArchive/training
-ROSTER="$TRAINING/personas.json"
+# Host paths: the same directories docker-compose.yml binds into lora-trainer.
+REPO="${REPO:-/home/peacow/local-ai-server}"
+OUTPUTS="${OUTPUTS:-/home/peacow/lora-outputs}"
+TRAINING="${TRAINING:-/mnt/storage_cold/array/DiscordArchive/training}"
+ROSTER="${PERSONA_ROSTER:-$TRAINING/personas.json}"
 # lora-outputs is root-owned (the container writes it), so the log lives here.
-LOGDIR=/home/peacow/.local/share/train-queue
+LOGDIR="${LOGDIR:-$HOME/.local/share/train-queue}"
 LOG="$LOGDIR/queue-$JOB.log"
 mkdir -p "$LOGDIR"
 
@@ -36,7 +37,7 @@ cd "$REPO" || exit 1
 # Default: every roster persona. Either way, largest training set first, so the
 # long runs happen while nobody is waiting on the result.
 if [ $# -gt 0 ]; then QUEUE="$*"; else
-  QUEUE=$(python3 -c 'import json,sys; print(" ".join(k for k in json.load(open(sys.argv[1])) if not k.startswith("_")))' "$ROSTER") || exit 1
+  QUEUE=$(python3 shared/persona_roster.py list --roster "$ROSTER") || exit 1
 fi
 QUEUE=$(for p in $QUEUE; do
   n=$({ wc -l < "$TRAINING/$p/train.jsonl"; } 2>/dev/null || echo 0)
@@ -54,9 +55,14 @@ for p in $QUEUE; do
   if [ -f "$RUN/final/COMPLETE" ]; then log "SKIP $p (already finished in $RUN)"; continue; fi
 
   log "SUBMIT $p -> $RUN"
-  if ! make train-submit CONFIG="configs/$p.yaml" OUTPUT_DIR="$RUN" >>"$LOG" 2>&1; then
-    log "FAIL $p: submit failed"; exit 1
-  fi
+  # The submit rebuilds the image, which fetches from GitHub: a DNS blip there
+  # once stopped a whole overnight queue. Retry a few times before giving up.
+  for try in 1 2 3 4; do
+    make train-submit CONFIG="configs/$p.yaml" OUTPUT_DIR="$RUN" >>"$LOG" 2>&1 && break
+    [ "$try" = 4 ] && { log "FAIL $p: submit failed"; exit 1; }
+    log "RETRY $p: submit failed (try $try), waiting $((try * 5)) min"
+    sleep $((try * 300))
+  done
   sleep 20
   while [ "$(docker inspect -f '{{.State.Running}}' lora-trainer 2>/dev/null)" = "true" ]; do sleep 60; done
 

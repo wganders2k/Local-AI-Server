@@ -40,13 +40,18 @@ services:
       start_period: 30s
   # ──────────────────────────────────────────────────────────
   # LoRA trainer
-  # Started and stopped by the arbiter, never by compose. The `managed` profile
-  # is what enforces that: `docker compose up -d` skips it entirely, so it can
-  # only ever reach the GPU through the scheduler. Without the profile a plain
-  # `up` would hand it 16 GB behind the arbiter's back.
+  # Submitted by a human (`make train-submit` / `make train-queue`), never by a
+  # plain compose up: the `managed` profile makes `docker compose up -d` skip
+  # it, so it only reaches the GPU by asking the arbiter for a lease. Without
+  # the profile a plain `up` would hand it 16 GB behind the arbiter's back.
   # ──────────────────────────────────────────────────────────
   lora-trainer:
-    build: ./lora-training
+    build:
+      context: ./lora-training
+      # shared/: the training↔serving contract the bot serves from too, so the
+      # two cannot drift. COPY --from=shared in the Dockerfile.
+      additional_contexts:
+        shared: ./shared
     container_name: lora-trainer
     # Never started by `docker compose up`, and never by the arbiter. A training
     # run is submitted by a human: `make train-submit CONFIG=configs/smoke.yaml`.
@@ -77,7 +82,8 @@ services:
       # of a multi-GB CUDA image.
       # Absolute for the same reason as the discord-bot binds below.
       - /home/peacow/local-ai-server/lora-training/configs:/app/configs:ro
-      # Read by export_latest.py to warn when a persona has no preset to serve it.
+      # Read by export_latest.py to warn when [mimic-multi] does not list a
+      # persona, or lists an adapter file that does not exist.
       - /home/peacow/local-ai-server/models.ini:/app/models.ini:ro
       # Model downloads survive preemption; without this every restart re-fetches
       # the base weights, which dwarfs the training it would have done.
@@ -88,9 +94,6 @@ services:
       # not under configs/ in the repo.
       - /mnt/storage_cold/array/DiscordArchive/archive:/archive/archive:ro
       - /mnt/storage_cold/array/DiscordArchive/training:/archive/training
-      # The bot's persona template, so a training set's system prompt is the
-      # one /mimic will send — not a copy that drifts from it.
-      - /home/peacow/local-ai-server/discord-bot/prompts:/app/persona_prompts:ro
       # export_adapter.py writes GGUF adapters here; llama-swappable reads them
       # through its own /srv/models mount.
       - ${MODELS_DIR:-/srv/models}/lora:/srv/models/lora

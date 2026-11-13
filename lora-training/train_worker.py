@@ -43,6 +43,7 @@ import yaml
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import checkpoints
+import persona_roster
 
 logging.basicConfig(
     level=logging.INFO,
@@ -102,9 +103,35 @@ def _build_callback_class():
     return type("PeriodicSave", (PeriodicSaveCallback, TrainerCallback), {})
 
 
-def load_config(path: str) -> dict:
+def _merge(base: dict, override: dict) -> dict:
+    """`override` on top of `base`, recursing into mappings; anything else is replaced whole."""
+    out = dict(base)
+    for key, value in override.items():
+        out[key] = _merge(out[key], value) if isinstance(value, dict) and isinstance(out.get(key), dict) else value
+    return out
+
+
+def _load_layered(path: str, seen: tuple[str, ...]) -> dict:
+    path = os.path.abspath(path)
+    if path in seen:
+        raise ValueError(f"config extends itself: {' -> '.join(seen + (path,))}")
     with open(path) as fh:
-        cfg = yaml.safe_load(fh)
+        cfg = yaml.safe_load(fh) or {}
+    parent = cfg.pop("extends", None)
+    if parent is None:
+        return cfg
+    # Relative to the extending file, so configs/ works wherever it is mounted.
+    parent_path = parent if os.path.isabs(parent) else os.path.join(os.path.dirname(path), parent)
+    return _merge(_load_layered(parent_path, seen + (path,)), cfg)
+
+
+def load_config(path: str) -> dict:
+    """
+    A run's config. `extends: <file>` layers this file over another, so the
+    per-persona configs hold only what differs (dataset, output_dir, epochs)
+    and the recipe lives once, in the file they extend.
+    """
+    cfg = _load_layered(path, ())
     for required in ("model", "dataset", "output_dir"):
         if required not in cfg:
             raise ValueError(f"{path}: missing required key '{required}'")
@@ -118,6 +145,31 @@ def _load_split(spec: dict, path_key: str):
     if not os.path.isabs(path):
         path = os.path.join(os.path.dirname(os.path.abspath(__file__)), path)
     return load_dataset("json", data_files=path, split="train")
+
+
+def snapshot_dataset_stats(cfg: dict, output_dir: str) -> None:
+    """
+    Copy the training set's stats.json (its build arguments) into the run, once.
+    export_latest carries it into the adapter's manifest, which is how serving
+    knows the shape of prompt this adapter learned — the dataset itself may be
+    rebuilt for the next run long before this one stops serving. Never
+    overwritten on resume: a rebuild between kill and resume would otherwise
+    record a format the first half of the run never saw.
+    """
+    spec = cfg["dataset"]
+    path = spec if isinstance(spec, str) else spec.get("path")
+    target = os.path.join(output_dir, persona_roster.RUN_DATASET_STATS)
+    if not path or os.path.exists(target):
+        return
+    source = os.path.join(os.path.dirname(path), "stats.json")
+    if not os.path.isfile(source):
+        logger.warning(f"No {source} — the exported adapter will be served in the legacy format")
+        return
+    with open(source, encoding="utf-8") as fh:
+        stats = fh.read()
+    with open(target + ".tmp", "w", encoding="utf-8") as fh:
+        fh.write(stats)
+    os.replace(target + ".tmp", target)
 
 
 def build_dataset(cfg: dict):
@@ -258,6 +310,7 @@ def main() -> int:
     cfg = load_config(args.config)
     output_dir = args.output_dir or cfg["output_dir"]
     os.makedirs(output_dir, exist_ok=True)
+    snapshot_dataset_stats(cfg, output_dir)
 
     # Anything without a COMPLETE marker is debris from a kill. Clear it before
     # the Trainer sees it, since its own checkpoint discovery has no idea which

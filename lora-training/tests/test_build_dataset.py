@@ -15,6 +15,7 @@ import re
 import pytest
 
 import build_dataset as bd
+import mimic_format
 
 TARGET = "100"
 OTHER = "200"
@@ -58,6 +59,7 @@ def test_reply_becomes_prompt_completion_with_labelled_context():
         {"role": "user", "content": "[bob]: anyone up\n[carol]: yeah"},
     ]
     assert ex["completion"] == [{"role": "assistant", "content": "unfortunately yes"}]
+    assert ex["context_turns"] == ["[bob]: anyone up", "[carol]: yeah"]
 
 
 def test_no_system_omits_the_system_turn():
@@ -233,53 +235,6 @@ def test_pin_events_are_removed_from_the_timeline():
     assert examples[0]["prompt"][-1]["content"] == "[bob]: look at this"
 
 
-def _pings(name, n, start_mid=100):
-    # Recurring bare pings elsewhere in the archive are what mark `name` as a mention.
-    return [msg(start_mid + i, THIRD, 40 + i, name, channel="c9") for i in range(n)]
-
-
-def test_bare_pings_are_dropped_as_targets_but_kept_as_context():
-    name = '@Bobby "Little Tables" Droptables'
-    examples, stats = build([
-        msg(1, OTHER, 0, "who's coming"),
-        msg(2, TARGET, 1, name),
-        msg(3, OTHER, 5, "he's not answering"),
-        msg(4, TARGET, 6, "typical behaviour honestly"),
-    ] + _pings(name, bd.MENTION_MIN_COUNT))
-
-    assert stats["dropped_mention_only"] == 1
-    assert len(examples) == 1
-    assert f"[alice]: {name}" in examples[0]["prompt"][-1]["content"]
-
-
-def test_a_ping_with_something_to_say_is_kept():
-    name = "@Sir Lags-a-Lot (AFK)"
-    examples, stats = build([
-        msg(1, OTHER, 0, "game tonight?"),
-        msg(2, TARGET, 1, f"{name} are you getting on later"),
-    ] + _pings(name, bd.MENTION_MIN_COUNT))
-
-    assert stats["dropped_mention_only"] == 0
-    assert examples[0]["completion"][0]["content"] == f"{name} are you getting on later"
-
-
-def test_a_recurring_ping_with_a_question_is_not_mistaken_for_a_name():
-    name = "@Filips Oinking Ass Fucked"
-    records = _pings(name, bd.MENTION_MIN_COUNT) + _pings(f"{name} terraria?", bd.MENTION_MIN_COUNT, start_mid=200)
-
-    assert bd.mention_tokens(records) == [name]
-
-
-def test_a_one_off_message_starting_with_at_is_not_a_mention():
-    _, stats = build([
-        msg(1, OTHER, 0, "where are you"),
-        msg(2, TARGET, 1, "@ the store rn"),
-    ])
-
-    assert stats["dropped_mention_only"] == 0
-    assert stats["examples"] == 1
-
-
 @pytest.mark.parametrize("excluded", ["c2", "bot-zone"])
 def test_excluded_channels_match_by_id_or_name(excluded):
     _, stats = build([
@@ -306,7 +261,7 @@ def test_pii_is_scrubbed_from_targets_and_context():
 
 
 def test_bare_digit_runs_are_not_phone_numbers():
-    assert bd.scrub_pii("scored 1234567890 points") == "scored 1234567890 points"
+    assert mimic_format.scrub_pii("scored 1234567890 points") == "scored 1234567890 points"
 
 
 def test_links_become_markers_and_no_snowflake_survives():
@@ -362,20 +317,11 @@ def test_split_holds_out_the_newest_examples():
     assert max(e["timestamp"] for e in train) < min(e["timestamp"] for e in evaluation)
 
 
-def test_system_prompt_renders_like_the_bot(tmp_path):
-    template = tmp_path / "mimic_persona.md"
-    template.write_text("You are {persona}, mimicking {display_name}.\n")
-
-    assert bd.render_system_prompt(str(template), "mimic_user1", "Alice") == "You are mimic_user1, mimicking Alice."
-
-
-def test_the_real_persona_template_renders():
-    """The template the bot ships — a new placeholder in it would break this."""
-    import os
-
-    path = os.path.join(os.path.dirname(bd.HERE), "discord-bot", "prompts", "mimic_persona.md")
-    rendered = bd.render_system_prompt(path, "mimic_user1", "Alice")
+def test_the_shared_persona_template_renders():
+    """The template both sides render — a new placeholder in it would break this."""
+    rendered = mimic_format.render_persona_prompt("mimic_user1", "Alice")
     assert "mimic_user1" in rendered and "Alice" in rendered
+    assert not rendered.endswith("\n")
 
 
 def test_identified_mentions_render_as_the_username_speakers_are_labelled_with():
@@ -387,17 +333,6 @@ def test_identified_mentions_render_as_the_username_speakers_are_labelled_with()
 
     assert examples[0]["completion"][0]["content"] == "@bob is, he said so"
     assert examples[0]["prompt"][-1]["content"] == "[bob]: who is bringing the speaker"
-
-
-def test_an_identified_bare_ping_is_dropped_without_needing_to_recur():
-    _, stats = build([
-        msg(1, OTHER, 0, "anyone on"),
-        msg(2, TARGET, 1, "@Bobby Tables (Big B)",
-            # A handle long enough that the reply clears min_chars before mentions are removed.
-            mentions=[{"user_id": THIRD, "username": "robert_tables_1987", "display": "Bobby Tables (Big B)"}]),
-    ])
-
-    assert stats["dropped_mention_only"] == 1
 
 
 @pytest.mark.parametrize("msg_type", [None, "Default", "Reply"])
@@ -426,18 +361,6 @@ def test_aliases_rename_speakers_and_mentions_alike():
     assert examples[0]["completion"][0]["content"] == "@robert is, he said so"
 
 
-def test_names_file_skips_notes_and_blank_aliases(tmp_path):
-    path = tmp_path / "names.json"
-    path.write_text(json.dumps({
-        "_readme": "fill in alias",
-        "1": {"alias": " bob ", "handle": "bobby_tables"},
-        "2": {"alias": "", "handle": "erin_h"},
-    }))
-
-    assert bd.load_aliases(str(path)) == {"1": "bob"}
-    assert bd.load_aliases(str(tmp_path / "missing.json")) == {}
-
-
 def test_every_account_of_the_member_supplies_targets():
     old_account = "999"
     examples, _ = build([
@@ -449,3 +372,67 @@ def test_every_account_of_the_member_supplies_targets():
 
     assert [e["completion"][0]["content"] for e in examples] == ["maybe later, at work", "yeah getting on now"]
     assert "[dana]: maybe later, at work" in examples[1]["prompt"][-1]["content"]
+
+
+# -- junk --
+
+WALL = " ".join([":jlulke:"] * 30)
+ART = "⠀⠀⠀⡯⡯⡾⠝⠘⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢊⠘⡮⣣⠪⠢⡑⡌\n⠀⠀⠀⠟⠝⠈⠀⠀⠀⠡⠀⠠⢈⠠⢐⢠⢂⢔⣐⢄⡂⢔⠀⡁⢉⠸⢨⢑⠕⡌"
+
+
+@pytest.mark.parametrize("text,reason", [
+    (WALL, "repetitive"),
+    ("poggers " * 10, "repetitive"),
+    (ART, "art"),
+    ("𝔖𝔴𝔞𝔤 𝓢𝔀𝓪𝓰 𝕊𝕨𝕒𝕘 Ｓｗａｇ ꜱᴡᴀɢ 🆂🆆🅰️🅶 Ⓢⓦⓐⓖ 𝙎𝙬𝙖𝙜 𝔖𝔴𝔞𝔤 𝓢𝔀𝓪𝓰", "art"),
+    ("BUSS!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!", None),
+    ("ok so the thing is i really do not think that is how it works at all", None),
+    ("lol :kekw: :kekw:", None),
+])
+def test_junk_reason(text, reason):
+    assert mimic_format.junk_reason(text) == reason
+
+
+def test_context_cuts_junk_to_a_stub_and_long_messages_to_the_cap():
+    assert mimic_format.context_text(WALL) == WALL[:60].rstrip() + " […]"
+    long = " ".join(f"word{i}" for i in range(300))
+    assert mimic_format.context_text(long) == long[:1000].rstrip() + " […]"
+    assert mimic_format.context_text("short and normal") == "short and normal"
+
+
+def test_junk_is_cut_from_a_reply_and_stubbed_in_context():
+    examples, stats = build([
+        msg(1, OTHER, 0, WALL),
+        msg(2, TARGET, 1, "what the hell is wrong with you man"),
+        msg(3, TARGET, 2, ART),
+    ])
+
+    assert examples[0]["completion"][0]["content"] == "what the hell is wrong with you man"
+    assert examples[0]["prompt"][-1]["content"] == "[bob]: " + WALL[:60].rstrip() + " […]"
+    assert stats["trimmed_junk_messages"] == 1
+
+
+def test_a_reply_that_is_only_junk_is_dropped_for_it():
+    _, stats = build([msg(1, OTHER, 0, "say something"), msg(2, TARGET, 1, WALL)])
+
+    assert stats["dropped_repetitive"] == 1 and stats["examples"] == 0
+
+
+def test_copypasta_is_a_long_message_posted_three_times():
+    pasta = "Can I get a " + "very long copypasta sentence that goes on and on " * 5
+    records = [msg(1, OTHER, 0, "go on then")]
+    records += [msg(10 + i, THIRD, 20 + i * 11, pasta, channel=f"c{5 + i}") for i in range(2)]
+    records += [msg(2, TARGET, 1, pasta)]
+
+    _, stats = build(records)
+
+    assert stats["dropped_copypasta"] == 1
+
+
+def test_excluded_dates_leave_the_whole_day_out():
+    _, stats = build([
+        msg(1, OTHER, 0, "hello there friend"),
+        msg(2, TARGET, 1, "hello back to you mate"),
+    ], exclude_dates=["2026-01-01"])
+
+    assert stats["dropped_excluded_date"] == 2 and stats["examples"] == 0
