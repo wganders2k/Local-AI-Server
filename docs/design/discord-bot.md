@@ -373,24 +373,9 @@ Note that compose passes `LORE_TOP_K` with a default of 5 while `config.py` defa
 
 ## 12. File Structure
 
-```
-discord-bot/
-├── Dockerfile
-├── requirements.txt
-├── bot.py              # Entry point: client setup, the three slash commands, on_message
-├── agent_tools.py      # /lore agent: tool schemas, prompt builders, executor, loop, metrics
-├── proxy_client.py     # httpx client: chat, stream, tools, queue depth, model list
-├── rag_client.py       # httpx client for rag-service /retrieve; degrades to empty context
-├── thread_registry.py  # JSON-backed thread_id → model bindings, atomic writes
-├── history.py          # (channel_id, model) → deque conversation windows
-├── rate_limiter.py     # Per-user sliding window
-├── formatters.py       # Streaming split boundaries, disclaimer strip, lore embeds
-├── config.py           # Env loading, persona registry, prompt template, agent constants
-├── data/threads.json   # Persisted thread registry (bind-mounted)
-└── prompts/
-    ├── lore_context.example.md
-    └── lore_context.md        # gitignored — real names
-```
+Kept in one place, [`discord-bot/README.md`](../../discord-bot/README.md#file-structure),
+which is maintained with the code. (This section's earlier copy described a
+single-file layout that no longer exists.)
 
 ---
 

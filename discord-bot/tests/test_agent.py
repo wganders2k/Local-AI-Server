@@ -44,6 +44,7 @@ class RecordingStatus:
     async def searching(self, r, m): self.events.append("searching")
     async def analyzing(self, r, m): self.events.append("analyzing")
     async def condensing(self, r, m): self.events.append("condensing")
+    async def simulating(self): self.events.append("simulating")
     async def writing(self): self.events.append("writing")
     async def generating(self, chars=None): self.events.append("generating")
     async def complete(self, q): self.events.append("complete")
@@ -365,3 +366,37 @@ async def test_condensed_chunks_can_be_shown_again():
     )
 
     assert shown == {chunk_key("kept")}
+
+
+async def test_only_one_simulation_runs_per_question(fake_rag, catalog):
+    class SimProxy(FakeProxy):
+        def __init__(self, turns):
+            super().__init__(turns)
+            self.persona_lines = 0
+
+        async def chat(self, model, messages, lora=None, response_format=None, temperature=None, **kw):
+            if response_format is not None:
+                return '{"reason": "r", "action": "speak", "speaker": "mimic_user1"}'
+            self.persona_lines += 1
+            return "simulated line"
+
+    first = '{"personas": ["User1"], "premise": "pizza?", "length": 2}'
+    second = '{"personas": ["User1"], "premise": "tacos?", "length": 2}'
+    proxy = SimProxy([
+        tool_call("simulate_conversation", first),
+        tool_call("simulate_conversation", second),
+        final("answer"),
+    ])
+    status = RecordingStatus()
+
+    result = await run_agent_loop(
+        user_question="q", proxy_client=proxy, rag_client=fake_rag,
+        status=status, channel_names=[], catalog=catalog,
+    )
+
+    assert result.answer == "answer"
+    assert proxy.persona_lines == 2  # the first simulation only
+    tool_results = [m["content"] for m in result.tool_messages if m["role"] == "tool"]
+    assert tool_results[0].startswith("SIMULATED CONVERSATION")
+    assert "already run a simulation" in tool_results[1]
+    assert status.events.count("simulating") == 1

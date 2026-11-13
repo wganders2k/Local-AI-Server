@@ -79,6 +79,9 @@ class LoreStatus:
     async def condensing(self, round_num: int, max_rounds: int) -> None:
         await self._set(f"\U0001f5dc\ufe0f Condensing earlier results... (round {round_num}/{max_rounds})")
 
+    async def simulating(self) -> None:
+        await self._set("\U0001f3ad Simulating a conversation...")
+
     async def writing(self) -> None:
         await self._set("✍️ Writing answer...")
 

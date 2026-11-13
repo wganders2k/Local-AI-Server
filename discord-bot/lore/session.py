@@ -16,7 +16,7 @@ cost knowingly.
 Research is stored as flat text messages, never as raw ``tool_calls`` /
 ``role="tool"`` messages: leaving tool markup in context made the model imitate
 it and emit tool-call syntax as its answer. See
-``_flatten_research_for_synthesis`` in lore/research.py.
+``flatten_research_for_synthesis`` in lore/research.py.
 """
 
 import hashlib
@@ -27,6 +27,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from lore.metrics import CHARS_PER_TOKEN, fraction
 
 logger = logging.getLogger("mimic-bot.lore-session")
 
@@ -170,15 +172,15 @@ class LoreSession:
         rather than the raw excerpts, and would trip the compaction threshold on
         an almost-empty thread.
 
-        Uses the same ~4 chars/token conversion as the metrics fallback.
+        Uses the same CHARS_PER_TOKEN conversion as the metrics fallback.
         """
         chars = len(self.system_prompt) + sum(
             len(m.get("content") or "") for m in self.transcript
         )
-        return chars // 4
+        return chars // CHARS_PER_TOKEN
 
     def pct_of(self, limit: int) -> float:
-        return self.last_context_tokens / limit if limit else 0.0
+        return fraction(self.last_context_tokens, limit)
 
     # ---- serialisation ----------------------------------------------------
 
@@ -315,9 +317,6 @@ class LoreSessionStore:
             del self._sessions[thread_id]
             self.save()
             logger.info("Removed lore session for thread %d", thread_id)
-
-    def thread_ids(self) -> List[int]:
-        return list(self._sessions.keys())
 
     def expired_threads(self, ttl_seconds: int) -> List[int]:
         """Thread ids whose sessions have been idle longer than ``ttl_seconds``."""

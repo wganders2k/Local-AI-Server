@@ -3,9 +3,13 @@ Mimic Discord Bot — entry point.
 
 Sets up the discord.py client and loads the cogs that own each command surface:
 
-  cogs/mimic.py  — /mimic, one-shot persona replies
-  cogs/chat.py   — /chat, a thread bound to one model
-  cogs/lore.py   — /lore, agentic RAG plus its follow-up threads
+  cogs/mimic.py       — /mimic, one-shot persona replies
+  cogs/mimic_chat.py  — /mimic-chat, a thread of personas talking
+  cogs/chat.py        — /chat, a thread bound to one model
+  cogs/lore.py        — /lore, agentic RAG plus its follow-up threads
+
+Which threads those cogs answer in is threads.ThreadDirectory's job: restored
+here on first connect, and closed here when Discord deletes one.
 
 Everything shared lives on ``bot.services`` (see services.py), built once in
 setup_hook. That matters: on_ready fires again after every gateway re-identify,
@@ -21,7 +25,7 @@ from logging import StreamHandler
 import discord
 from discord.ext import commands
 
-from config import DISCORD_TOKEN, MIMIC_PERSONAS, validate_config
+from config import DISCORD_TOKEN, validate_config
 from services import Services
 
 # ──────────────────────────────────────────────────────────────
@@ -39,7 +43,7 @@ logger = logging.getLogger("mimic-bot")
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("discord.http").setLevel(logging.WARNING)
 
-EXTENSIONS = ("cogs.mimic", "cogs.chat", "cogs.lore")
+EXTENSIONS = ("cogs.mimic", "cogs.mimic_chat", "cogs.chat", "cogs.lore")
 
 
 class MimicBot(commands.Bot):
@@ -66,6 +70,9 @@ class MimicBot(commands.Bot):
         """
         validate_config()
         self.services = Services.create()
+        # Before the cogs load, so lore's tool list and /mimic both see the
+        # personas from the first command. Retried per command if it fails.
+        await self.services.personas.discover(self.services.proxy)
 
         for extension in EXTENSIONS:
             await self.load_extension(extension)
@@ -90,12 +97,19 @@ class MimicBot(commands.Bot):
         """
         if not self._threads_restored:
             self._threads_restored = True
-            chat_cog = self.get_cog("ChatCog")
-            if chat_cog is not None:
-                await chat_cog.restore_threads()
+            await self.services.threads.restore(self.fetch_channel, self.services.sessions.get)
+            for guild in self.guilds:
+                self.services.webhooks.remember_current(guild)
 
         logger.info("Logged in as %s (ID: %s)", self.user.name, self.user.id)
-        logger.info("Available personas: %s", sorted(MIMIC_PERSONAS))
+        logger.info("Available personas: %s", ", ".join(self.services.personas.keys()) or "none")
+
+    async def on_raw_thread_delete(self, payload: discord.RawThreadDeleteEvent) -> None:
+        """A deleted thread is closed whatever its kind; a lore thread's session goes with it."""
+        services = self.services
+        if services.threads.close(payload.thread_id):
+            services.sessions.remove(payload.thread_id)
+            services.history.forget(payload.thread_id)
 
     async def close(self) -> None:
         if self.services is not None:

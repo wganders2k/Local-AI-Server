@@ -6,7 +6,8 @@ OpenAI-compatible API endpoint (/v1/chat/completions).
 """
 
 import json
-from typing import AsyncGenerator
+from contextlib import contextmanager
+from typing import AsyncGenerator, Iterator
 
 import httpx
 from config import (
@@ -23,6 +24,34 @@ class ProxyError(Exception):
     def __init__(self, message: str, status_code: int | None = None):
         super().__init__(message)
         self.status_code = status_code
+
+
+_UNREACHABLE = "The AI backend is currently unreachable. Try again in a moment."
+_EMPTY = "The model returned an empty response."
+
+
+@contextmanager
+def _transport_errors(timeout_message: str) -> Iterator[None]:
+    """httpx's failures as the ProxyError a user is shown. One mapping for every call."""
+    try:
+        yield
+    except httpx.ConnectError:
+        raise ProxyError(_UNREACHABLE)
+    except httpx.TimeoutException:
+        raise ProxyError(timeout_message)
+
+
+def _check_status(status_code: int, body: str, what: str = "Proxy") -> None:
+    if status_code != 200:
+        raise ProxyError(f"{what} returned error {status_code}: {body[:200]}", status_code=status_code)
+
+
+def _payload(model: str, messages: list[dict], stream: bool, **options) -> dict:
+    """The /v1/chat/completions body, with every option left unset (None) omitted."""
+    return {
+        "model": model, "messages": messages, "stream": stream,
+        **{k: v for k, v in options.items() if v is not None},
+    }
 
 
 class ProxyClient:
@@ -50,19 +79,43 @@ class ProxyClient:
             )
         return self._client
 
+    async def _complete(self, payload: dict) -> tuple[dict, dict]:
+        """One buffered completion: (the first choice's message, the whole response)."""
+        client = await self._get_client()
+        with _transport_errors("Request timed out. The model may be busy."):
+            response = await client.post("/v1/chat/completions", json=payload)
+        _check_status(response.status_code, response.text)
+        data = response.json()
+        choices = data.get("choices", [])
+        if not choices:
+            raise ProxyError(_EMPTY)
+        return choices[0].get("message", {}), data
+
     async def chat(
         self,
         model: str,
         messages: list[dict],
-        stream: bool = False,
+        lora: list[dict] | None = None,
+        response_format: dict | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        chat_template_kwargs: dict | None = None,
     ) -> str:
         """
         Send a chat completion request to the proxy.
 
         Args:
-            model: Model alias (e.g. "mimic_user3", "lore").
+            model: Model alias (e.g. "mimic-multi", "lore").
             messages: List of message dicts with "role" and "content".
-            stream: Enable streaming response (Phase 2+).
+            lora: Per-request adapter scales, [{"id": i, "scale": s}, ...], for
+                a model that preloads several (personas.PersonaCatalog.lora).
+            response_format: llama-server's {"type": "json_schema", ...} to
+                constrain the output.
+            temperature: Overrides the model section's own when set.
+            max_tokens: Caps the answer when set.
+            chat_template_kwargs: Per-request template switches, e.g.
+                {"enable_thinking": False} for a mechanical call on a model
+                whose preset leaves thinking on.
 
         Returns:
             The assistant's response text.
@@ -70,45 +123,13 @@ class ProxyClient:
         Raises:
             ProxyError: When the proxy is unreachable or returns an error.
         """
-        client = await self._get_client()
-
-        payload = {
-            "model": model,
-            "messages": messages,
-            "stream": stream,
-        }
-
-        try:
-            response = await client.post(
-                "/v1/chat/completions",
-                json=payload,
-            )
-        except httpx.ConnectError:
-            raise ProxyError(
-                "The AI backend is currently unreachable. Try again in a moment."
-            )
-        except httpx.TimeoutException:
-            raise ProxyError(
-                "Request timed out. The model may be busy."
-            )
-
-        if response.status_code != 200:
-            raise ProxyError(
-                f"Proxy returned error {response.status_code}: {response.text[:200]}",
-                status_code=response.status_code,
-            )
-
-        data = response.json()
-        choices = data.get("choices", [])
-
-        if not choices:
-            raise ProxyError("The model returned an empty response.")
-
-        content = choices[0].get("message", {}).get("content", "").strip()
-
+        message, _ = await self._complete(_payload(
+            model, messages, False, lora=lora, response_format=response_format, temperature=temperature,
+            max_tokens=max_tokens, chat_template_kwargs=chat_template_kwargs,
+        ))
+        content = (message.get("content") or "").strip()
         if not content:
-            raise ProxyError("The model returned an empty response.")
-
+            raise ProxyError(_EMPTY)
         return content
 
     async def chat_with_tools(
@@ -136,43 +157,7 @@ class ProxyClient:
         Raises:
             ProxyError: When the proxy is unreachable or returns an error.
         """
-        client = await self._get_client()
-
-        payload = {
-            "model": model,
-            "messages": messages,
-            "tools": tools,
-            "temperature": temperature,
-            "stream": False,
-        }
-
-        try:
-            response = await client.post(
-                "/v1/chat/completions",
-                json=payload,
-            )
-        except httpx.ConnectError:
-            raise ProxyError(
-                "The AI backend is currently unreachable. Try again in a moment."
-            )
-        except httpx.TimeoutException:
-            raise ProxyError(
-                "Request timed out. The model may be busy."
-            )
-
-        if response.status_code != 200:
-            raise ProxyError(
-                f"Proxy returned error {response.status_code}: {response.text[:200]}",
-                status_code=response.status_code,
-            )
-
-        data = response.json()
-        choices = data.get("choices", [])
-
-        if not choices:
-            raise ProxyError("The model returned an empty response.")
-
-        message = choices[0].get("message", {})
+        message, data = await self._complete(_payload(model, messages, False, tools=tools, temperature=temperature))
         return {
             "content": message.get("content"),
             "tool_calls": message.get("tool_calls"),
@@ -232,36 +217,23 @@ class ProxyClient:
             ProxyError: When the proxy is unreachable or returns an error.
         """
         client = await self._get_client()
-
-        payload = {
-            "model": model,
-            "messages": messages,
-            "stream": True,
-        }
-        if tools:
-            payload["tools"] = tools
-        if not enable_thinking:
-            payload["chat_template_kwargs"] = {"enable_thinking": False}
-        if usage_sink is not None:
+        payload = _payload(
+            model, messages, True,
+            tools=tools or None,
+            chat_template_kwargs=None if enable_thinking else {"enable_thinking": False},
             # Without this the streamed response carries no token counts at all.
-            payload["stream_options"] = {"include_usage": True}
+            stream_options={"include_usage": True} if usage_sink is not None else None,
+        )
 
         # client.stream() keeps the body unread so chunks surface as the model
         # emits them. client.post() would buffer the whole response first,
         # which makes PROXY_READ_TIMEOUT a deadline on the entire generation
         # and leaves the backend generating into a dropped socket on timeout.
-        try:
-            async with client.stream(
-                "POST",
-                "/v1/chat/completions",
-                json=payload,
-            ) as response:
+        with _transport_errors("The model stopped sending output. It may be overloaded."):
+            async with client.stream("POST", "/v1/chat/completions", json=payload) as response:
                 if response.status_code != 200:
                     body = (await response.aread()).decode("utf-8", "replace")
-                    raise ProxyError(
-                        f"Proxy returned error {response.status_code}: {body[:200]}",
-                        status_code=response.status_code,
-                    )
+                    _check_status(response.status_code, body)
 
                 async for line in response.aiter_lines():
                     if not line or not line.startswith("data: "):
@@ -278,18 +250,9 @@ class ProxyClient:
                     choices = chunk.get("choices", [])
                     if not choices:
                         continue
-                    delta = choices[0].get("delta", {})
-                    content = delta.get("content", "")
+                    content = choices[0].get("delta", {}).get("content", "")
                     if content:
                         yield content
-        except httpx.ConnectError:
-            raise ProxyError(
-                "The AI backend is currently unreachable. Try again in a moment."
-            )
-        except httpx.TimeoutException:
-            raise ProxyError(
-                "The model stopped sending output. It may be overloaded."
-            )
 
     async def get_queue_depth(self) -> int:
         """
@@ -302,23 +265,12 @@ class ProxyClient:
             ProxyError: When the proxy is unreachable.
         """
         client = await self._get_client()
-        try:
+        with _transport_errors("Request to backend timed out."):
             response = await client.get("/status")
-        except httpx.ConnectError:
-            raise ProxyError("The AI backend is currently unreachable.")
-        except httpx.TimeoutException:
-            raise ProxyError("Request to backend timed out.")
+        _check_status(response.status_code, response.text, "Proxy /status")
+        return response.json().get("queue_depth", 0)
 
-        if response.status_code != 200:
-            raise ProxyError(
-                f"Proxy /status returned error {response.status_code}",
-                status_code=response.status_code,
-            )
-
-        data = response.json()
-        return data.get("queue_depth", 0)
-
-    async def _models_payload(self) -> list[dict]:
+    async def models_payload(self) -> list[dict]:
         """
         The raw ``data`` array from the proxy /v1/models endpoint.
 
@@ -355,7 +307,7 @@ class ProxyClient:
             List of model name strings. Returns an empty list on failure
             so that autocomplete degrades gracefully.
         """
-        return [m.get("id", "") for m in await self._models_payload() if m.get("id")]
+        return [m.get("id", "") for m in await self.models_payload() if m.get("id")]
 
     async def model_context_sizes(self) -> dict[str, int]:
         """
@@ -372,7 +324,7 @@ class ProxyClient:
             rather than guessed at, and an unreachable proxy yields {}.
         """
         sizes: dict[str, int] = {}
-        for entry in await self._models_payload():
+        for entry in await self.models_payload():
             model_id = entry.get("id")
             args = (entry.get("status") or {}).get("args")
             if not model_id or not isinstance(args, list):

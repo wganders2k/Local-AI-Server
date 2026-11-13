@@ -6,7 +6,7 @@ from lore.research import (
     CONDENSED_KIND,
     SEARCH_NOTE_PREFIX,
     drop_seen_chunks,
-    _flatten_research_for_synthesis,
+    flatten_research_for_synthesis,
     render_research_blocks,
 )
 
@@ -87,7 +87,7 @@ def test_malformed_tool_arguments_do_not_raise():
 
 def test_flattening_produces_a_two_message_exchange():
     msgs = [call("a", query="pigs"), result("a", "chunk")]
-    flat = _flatten_research_for_synthesis(msgs, "what about pigs?")
+    flat = flatten_research_for_synthesis(msgs, "what about pigs?")
     assert [m["role"] for m in flat] == ["system", "user"]
     assert "what about pigs?" in flat[1]["content"]
     assert "chunk" in flat[1]["content"]
@@ -96,7 +96,7 @@ def test_flattening_produces_a_two_message_exchange():
 
 
 def test_flattening_with_no_results_says_so_plainly():
-    flat = _flatten_research_for_synthesis([], "q")
+    flat = flatten_research_for_synthesis([], "q")
     assert "could not find" in flat[1]["content"]
 
 

@@ -20,7 +20,7 @@ from typing import Optional
 
 from config import AGENT_CTX_COMPACT_PCT, AGENT_MODEL
 from lore.context_window import limit as ctx_limit
-from lore.metrics import AgentMetrics
+from lore.metrics import TOOL_CHARS_PER_TOKEN, AgentMetrics
 from lore.prompts import build_compaction_messages
 from lore.research import CONDENSED_KIND, render_research_blocks, split_chunks
 from lore.session import LoreSession, chunk_key
@@ -28,12 +28,6 @@ from lore.streaming import stream_answer
 from proxy_client import ProxyClient, ProxyError
 
 logger = logging.getLogger("mimic-bot.lore.compaction")
-
-# Tool results are counted in characters until the next usage report arrives.
-# Measured at ~3.1 chars/token on RAG excerpts (a 34,088-char result grew the
-# next request by 10,901 tokens), so 3 errs toward acting a little early.
-TOOL_CHARS_PER_TOKEN = 3
-
 
 async def _summarise(
     excerpts: str,

@@ -6,6 +6,7 @@ only called at startup, but importing config with a real .env present would
 otherwise pull the developer's token into the test process.
 """
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -17,10 +18,41 @@ os.environ.setdefault("DISCORD_TOKEN", "test-token")
 os.environ["LORE_CONTEXT_PATH"] = "tests/fixtures/absent_context.md"
 # Likewise the mimic names and persona stats, which hold real names.
 os.environ["MIMIC_TRAINING_DIR"] = "tests/fixtures/absent_training"
+# And the live adapters' manifests, so a test never serves by a real export.
+os.environ["MIMIC_LORA_DIR"] = "tests/fixtures/absent_lora"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
+
+PERSONA_KEYS = [f"mimic_user{i}" for i in range(1, 8)]
+
+
+def write_roster(directory: Path, roster: dict) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "personas.json").write_text(json.dumps(roster))
+    return directory
+
+
+@pytest.fixture
+def training(tmp_path):
+    """
+    A training dir holding only a roster: mimic_userN is "UserN", posting from
+    account 1N. No names.json, no stats — every persona falls back to
+    build_dataset's defaults. Tests add files as they need them.
+    """
+    return write_roster(tmp_path / "training", {
+        key: {"user_ids": str(10 + i), "display_name": f"User{i}"}
+        for i, key in enumerate(PERSONA_KEYS, start=1)
+    })
+
+
+@pytest.fixture
+def catalog(training):
+    """The fixture roster, served by [mimic-multi] adapters in key order — discovery already done."""
+    from personas import PersonaCatalog
+
+    return PersonaCatalog(training_dir=str(training), adapters=list(PERSONA_KEYS))
 
 
 @pytest.fixture

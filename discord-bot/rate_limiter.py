@@ -48,14 +48,3 @@ class RateLimiter:
 
         self.user_timestamps[user_id].append(now)
         return True
-
-    def remaining_requests(self, user_id: int) -> int:
-        """Return how many requests the user has left in the current window."""
-        now = monotonic()
-        cutoff = now - self.window
-        active = [t for t in self.user_timestamps[user_id] if t > cutoff]
-        return max(0, self.max_requests - len(active))
-
-    def reset(self, user_id: int) -> None:
-        """Clear the rate limit history for a specific user."""
-        self.user_timestamps[user_id] = []

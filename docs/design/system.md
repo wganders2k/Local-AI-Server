@@ -402,6 +402,11 @@ Two history-service jobs (details in [`history-service/README.md`](../../history
 
 Every caption carries `caption_excluded_from_training: true`. The distinction it encodes: a caption is **read-only context**. RAG ingestion appends it to the message's effective text so image content is searchable; a future training exporter must never treat it as training data, because a synthetic description is not the user's voice.
 
+**Live captions in the bot** (`discord-bot/vision.py`) are made by whichever model the feature already has loaded, so describing an image never costs a swap:
+
+- **`/lore` threads:** the agent model (`brain-dense-heretic`, which now carries a projector). The caption is appended to the question.
+- **`/mimic-chat`:** `[mimic-multi]` with no adapter applied, read by the controller only. Persona prompts keep `[attachment]`, as trained. This is off (`VISION_MIMIC_ENABLED`) until llama.cpp is new enough for the 12B base's `gemma4uv` projector.
+
 ---
 
 ## 10. LoRA Training

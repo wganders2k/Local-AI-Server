@@ -1,15 +1,18 @@
 """
-Response formatting, disclaimer stripping, and truncation.
+Model output -> Discord-shaped text: disclaimer stripping, splitting to
+Discord's limits, and lore embeds.
 
-Post-processing applied to mimic responses before posting to Discord.
+Discord caps a message at 2000 characters and an embed description at 4096, so
+anything long is split — at a paragraph or line boundary where possible, so a
+code block or list is not cut mid-line. One splitter serves every caller.
 """
 
 import re
 from typing import TYPE_CHECKING
 
-from config import MAX_EMBED_DESCRIPTION_LENGTH
+from config import MAX_EMBED_DESCRIPTION_LENGTH, MAX_MESSAGE_LENGTH
 
-# Applied to mimic responses only. The base model occasionally appends
+# Applied to persona posts and /chat replies. Models occasionally append
 # baked-in disclaimers that break character. Anchored to the end of the
 # response, which is why stripping happens once on the final buffer rather
 # than per streamed chunk.
@@ -35,7 +38,7 @@ if TYPE_CHECKING:
 
 def strip_disclaimers(text: str) -> str:
     """
-    Remove baked-in disclaimers from mimic responses.
+    Remove baked-in trailing disclaimers.
 
     Applies each regex pattern from DISCLAIMER_PATTERNS above
     to strip trailing disclaimers.
@@ -80,50 +83,48 @@ def find_split_boundary(buffer: str, max_length: int) -> int:
     return max_length
 
 
-def format_mimic_response(text: str) -> str:
-    """
-    Apply post-processing for mimic responses.
+def take_chunk(text: str, max_length: int) -> tuple[str, str]:
+    """(the first chunk of `text` that fits, the rest), split at the best boundary."""
+    split_at = find_split_boundary(text, max_length)
+    return text[:split_at].rstrip(), text[split_at:].lstrip("\n")
 
-    Strips disclaimers from the final accumulated chunk.
-    Truncation is no longer needed — streaming handles message splitting.
-    """
-    return strip_disclaimers(text)
+
+def split_message(text: str, max_length: int = MAX_MESSAGE_LENGTH) -> list[str]:
+    """Break text into chunks of at most `max_length` at the best available boundaries."""
+    chunks: list[str] = []
+    while text:
+        if len(text) <= max_length:
+            chunks.append(text)
+            break
+        chunk, text = take_chunk(text, max_length)
+        chunks.append(chunk)
+    return chunks
+
+
+_EMBED_TITLE = "\U0001f4da Lore"
+_EMBED_COLOUR = 0x5865F2
 
 
 def build_lore_embeds(text: str) -> list["discord.Embed"]:
     """
     Build one or more discord.Embed instances for a lore response.
-    
+
     If the text exceeds Discord's embed description limit (~4096 chars),
     it is split into multiple embeds with pagination footers.
     """
     import discord  # noqa: F811
 
     if not text:
-        return [discord.Embed(title="\U0001f4da Lore", description="(No results)", colour=0x5865F2)]
+        return [discord.Embed(title=_EMBED_TITLE, description="(No results)", colour=_EMBED_COLOUR)]
 
-    # Split text into chunks that fit within Discord's embed description limit
-    chunks = []
-    remaining = text
-    while remaining:
-        if len(remaining) <= MAX_EMBED_DESCRIPTION_LENGTH:
-            chunks.append(remaining)
-            break
-        
-        split_idx = find_split_boundary(remaining, MAX_EMBED_DESCRIPTION_LENGTH)
-        # Safety fallback: if no break point found, hard split
-        if split_idx == 0:
-            split_idx = MAX_EMBED_DESCRIPTION_LENGTH
-            
-        chunks.append(remaining[:split_idx].rstrip())
-        remaining = remaining[split_idx:].lstrip()
+    chunks = split_message(text, MAX_EMBED_DESCRIPTION_LENGTH)
 
     embeds = []
     for i, chunk in enumerate(chunks):
         embed = discord.Embed(
-            title="\U0001f4da Lore",
+            title=_EMBED_TITLE,
             description=chunk,
-            colour=0x5865F2,
+            colour=_EMBED_COLOUR,
         )
         if len(chunks) > 1:
             embed.set_footer(text=f"Part {i + 1}/{len(chunks)}")

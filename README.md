@@ -219,7 +219,8 @@ The proxy does not gate on a model list of its own: it forwards *any* model name
 
 | Command | Description |
 |---|---|
-| `/mimic <persona> <message>` | One-shot reply from a mimic persona (see the caveat above) |
+| `/mimic <persona>` | A mimic persona replies to the channel's recent conversation, via webhook |
+| `/mimic-chat <persona1> <premise> [persona2-7] [length]` | A thread where personas chat with each other and with whoever joins in. `/lore` can also run a short simulated chat via its `simulate_conversation` tool |
 | `/chat <model>` | Creates a thread; every subsequent message in it is streamed to that model. Model list is autocompleted live from the proxy's `/v1/models`. Threads survive restarts via `discord-bot/data/threads.json` |
 | `/lore <question> [rounds]` | Agentic RAG. The agent iteratively calls `search_discord_history`, `search_channel_history`, and `summarize_channel` against the RAG service before synthesising an answer. Default 10 rounds, hard cap 25 |
 

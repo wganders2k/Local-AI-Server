@@ -20,7 +20,8 @@ TEMPLATES = [
     "lore_synthesis",
     "lore_compaction_system",
     "lore_compaction_user",
-    "mimic_persona",
+    "mimic_chat_controller",
+    "mimic_chat_controller_turn",
 ]
 
 
@@ -36,8 +37,8 @@ def test_missing_template_raises_rather_than_rendering_a_hole():
 
 def test_missing_placeholder_raises():
     with pytest.raises(prompt_loader.PromptError) as excinfo:
-        prompt_loader.render("mimic_persona", persona="x")  # display_name omitted
-    assert "display_name" in str(excinfo.value)
+        prompt_loader.render("lore_compaction_user")  # excerpts omitted
+    assert "excerpts" in str(excinfo.value)
 
 
 def test_system_prompt_has_no_unrendered_placeholders():

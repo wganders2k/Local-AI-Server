@@ -1,4 +1,4 @@
-"""/mimic — one-shot persona replies in the channel it was invoked from."""
+"""/mimic — a persona replies to the channel's recent conversation, in the channel it was invoked from."""
 
 import logging
 
@@ -6,9 +6,9 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from config import MAX_QUEUE_DEPTH, MIMIC_PERSONAS, get_mimic_system_prompt
-from discord_io import stream_and_send
-from member_names import load_aliases, member_name, normalise_message, persona_display_name
+from cogs.common import admit, handle_resolver, persona_autocomplete
+from config import MIMIC_MODEL
+from mimic.transcript import clean_persona_reply
 from proxy_client import ProxyError
 
 logger = logging.getLogger("mimic-bot.cogs.mimic")
@@ -22,100 +22,48 @@ class MimicCog(commands.Cog):
     def services(self):
         return self.bot.services
 
-    async def persona_autocomplete(
-        self, interaction: discord.Interaction, current: str
-    ) -> list[app_commands.Choice[str]]:
-        """Provide autocomplete suggestions for the persona option."""
-        choices = []
-        for persona in sorted(MIMIC_PERSONAS):
-            # Shown by the name its dataset was built with; the key stays the value.
-            label = persona_display_name(persona) or MIMIC_PERSONAS[persona]
-            if current.lower() in label.lower() or current.lower() in persona.lower():
-                choices.append(app_commands.Choice(name=label, value=persona))
-            if len(choices) >= 25:  # Discord max choices
-                break
-        return choices
-
-    @app_commands.command(name="mimic", description="Chat with a mimic persona")
-    @app_commands.describe(
-        persona="The persona to chat with",
-        message="Your message to the persona",
-    )
+    @app_commands.command(name="mimic", description="Have a mimic persona reply to the conversation here")
+    @app_commands.describe(persona="The persona who should chime in")
     @app_commands.autocomplete(persona=persona_autocomplete)
-    async def mimic(
-        self,
-        interaction: discord.Interaction,
-        persona: str,
-        message: str,
-    ):
+    async def mimic(self, interaction: discord.Interaction, persona: str):
         """Handle the /mimic slash command."""
         services = self.services
-
-        if not services.limiter.is_allowed(interaction.user.id):
-            await interaction.response.send_message(
-                "⚠️ You're sending requests too fast. Slow down a bit.",
-                ephemeral=True,
-            )
+        if not await admit(interaction, services, personas=[persona]):
             return
-
-        if persona not in MIMIC_PERSONAS:
-            logger.warning("No system prompt configured for persona %s", persona)
-            await interaction.response.send_message(
-                f"⚠️ Unknown persona: {persona}",
-                ephemeral=True,
-            )
-            return
-        system_prompt = get_mimic_system_prompt(persona)
-
-        # Queue depth check — reject if backend is too busy
-        try:
-            depth = await services.proxy.get_queue_depth()
-            if depth >= MAX_QUEUE_DEPTH:
-                await interaction.response.send_message(
-                    f"⚠️ The AI backend is busy ({depth} requests queued). "
-                    f"Please try again in a moment.",
-                    ephemeral=True,
-                )
-                return
-        except ProxyError:
-            # If we can't reach the proxy, the chat call below will handle the error.
-            logger.warning("Could not check queue depth — proceeding with request.")
+        channel = interaction.channel
 
         logger.info(
-            "Request from %s in %s: persona=%s, message=%r",
-            interaction.user.name,
-            interaction.channel.name if interaction.channel else "DM",
-            persona,
-            message[:100],
+            "Request from %s in %s: persona=%s", interaction.user.name, getattr(channel, "name", "?"), persona
         )
 
-        # Defer to show typing indicator during inference
-        await interaction.response.defer()
+        # Ephemeral: the reply itself comes from the persona's webhook, and the
+        # placeholder is deleted once it lands.
+        await interaction.response.defer(ephemeral=True, thinking=True)
 
         try:
-            channel_id = interaction.channel.id if interaction.channel else 0
-            conv_history = services.history.get_history(channel_id, persona)
-
-            # Labelled and normalised exactly as the adapter's training data
-            # was (see member_names): alias or handle, never the server
-            # nickname, and mentions as "@name" rather than raw markup.
-            aliases = load_aliases()
-            labeled = (
-                f"[{member_name(interaction.user.id, interaction.user.name, aliases)}]: "
-                f"{normalise_message(message, lambda uid: self._name_for_id(uid, aliases), self._channel_name_for_id)}"
-            )
-
-            msgs: list[dict] = [{"role": "system", "content": system_prompt}]
-            msgs.extend(conv_history)
-            msgs.append({"role": "user", "content": labeled})
-
-            async with interaction.channel.typing():
-                full_response = await stream_and_send(
-                    interaction.followup.send, services.proxy, persona, msgs
+            reader = services.webhooks.reader(interaction.guild, handle_resolver(self.bot))
+            prompt = reader.cast.prompt(persona, await reader.fetch_lines(channel))
+            if prompt is None:
+                await interaction.followup.send(
+                    "⚠️ There's no recent conversation here to reply to.", ephemeral=True
                 )
+                return
+            logger.debug("Prompt for %s:\n%s", persona, prompt[-1]["content"])
 
-            services.history.add_turn(channel_id, persona, labeled, full_response)
+            raw = await services.proxy.chat(MIMIC_MODEL, prompt, lora=services.personas.lora(persona))
+            reply = clean_persona_reply(raw)
+            if not reply:
+                raise ProxyError("The model returned an empty response.")
 
+            await services.webhooks.post(persona, reply, channel)
+            await interaction.delete_original_response()
+
+        except discord.Forbidden:
+            logger.warning("Missing permissions for /mimic in %s", getattr(channel, "name", "?"))
+            await interaction.followup.send(
+                "⚠️ I need **Manage Webhooks** and **Read Message History** here to post as a persona.",
+                ephemeral=True,
+            )
         except ProxyError as e:
             logger.warning("Proxy error: %s", e)
             await interaction.followup.send(f"⚠️ {e}", ephemeral=True)
@@ -125,16 +73,6 @@ class MimicCog(commands.Cog):
                 "An unexpected error occurred. Please try again.",
                 ephemeral=True,
             )
-
-
-    def _name_for_id(self, user_id: str, aliases: dict[str, str]) -> str:
-        user = self.bot.get_user(int(user_id))
-        # build_dataset renders a mention it cannot resolve as "@someone".
-        return member_name(user_id, user.name if user else "someone", aliases)
-
-    def _channel_name_for_id(self, channel_id: str) -> str:
-        channel = self.bot.get_channel(int(channel_id))
-        return getattr(channel, "name", None) or "channel"
 
 
 async def setup(bot: commands.Bot) -> None:

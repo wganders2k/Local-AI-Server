@@ -21,13 +21,13 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
+from cogs.common import admit, admit_message
 from config import (
     AGENT_MODEL,
     LORE_OFFER_TTL_SECONDS,
     LORE_SWEEP_INTERVAL_SECONDS,
     LORE_THREAD_EMOJI,
     LORE_THREAD_TTL_SECONDS,
-    MAX_QUEUE_DEPTH,
 )
 from cogs.lore_status import LoreStatus
 from discord_io import post_lore_answer
@@ -35,8 +35,11 @@ from formatters import build_lore_embeds
 from lore.agent import run_agent_loop, run_lore_turn, seed_session_from_run
 from lore.compaction import maybe_compact_session
 from lore.context_window import discover, ensure_discovered, limit as ctx_limit
+from lore.metrics import fraction
 from lore.session import LoreSession
 from proxy_client import ProxyError
+from threads import LORE
+from vision import is_image, with_captions
 
 logger = logging.getLogger("mimic-bot.cogs.lore")
 
@@ -60,8 +63,7 @@ def _lore_footer(session: LoreSession, metrics=None, searched: bool = False) -> 
     """
     used = session.last_context_tokens
     total = ctx_limit()
-    pct = (used / total * 100) if total else 0.0
-    bits = [f"🧠 {used:,}/{total:,} ({pct:.0f}%)"]
+    bits = [f"🧠 {used:,}/{total:,} ({fraction(used, total):.0%})"]
     if searched:
         calls = metrics.total_tool_calls
         bits.append(f"{calls} search{'' if calls == 1 else 'es'}")
@@ -124,17 +126,8 @@ class LoreCog(commands.Cog):
 
         # No rate limit check — lore queries are long-running and don't benefit
         # from it. Queue depth still applies: reject if the backend is busy.
-        try:
-            depth = await services.proxy.get_queue_depth()
-            if depth >= MAX_QUEUE_DEPTH:
-                await interaction.response.send_message(
-                    f"⚠️ The AI backend is busy ({depth} requests queued). "
-                    f"Please try again in a moment.",
-                    ephemeral=True,
-                )
-                return
-        except ProxyError:
-            logger.warning("Could not check queue depth — proceeding with request.")
+        if not await admit(interaction, services, rate=False):
+            return
 
         logger.info(
             "Lore request from %s in %s: question=%r",
@@ -166,6 +159,7 @@ class LoreCog(commands.Cog):
                 status=status,
                 channel_names=channel_names,
                 max_rounds=rounds,
+                catalog=services.personas,
             )
 
             for embed in build_lore_embeds(result.answer):
@@ -274,9 +268,7 @@ class LoreCog(commands.Cog):
             return
 
         try:
-            services.threads.models[thread.id] = AGENT_MODEL
-            services.threads.lore.add(thread.id)
-            services.registry.register(thread.id, AGENT_MODEL, thread.name, kind="lore")
+            services.threads.open(thread.id, LORE, AGENT_MODEL, thread.name)
 
             logger.info(
                 "Opened lore thread %d from offer %d for %s",
@@ -345,12 +337,9 @@ class LoreCog(commands.Cog):
         if message.author == self.bot.user:
             return
         thread = message.channel
-        if not isinstance(thread, discord.Thread):
-            return
-
         services = self.services
-        if thread.id not in services.threads.lore:
-            return  # ChatCog's problem, or nobody's.
+        if services.threads.kind_of(thread.id) != LORE:
+            return
 
         session = services.sessions.get(thread.id)
         if session is None:
@@ -359,10 +348,7 @@ class LoreCog(commands.Cog):
 
         await ensure_discovered(services.proxy)
 
-        if not services.limiter.is_allowed(message.author.id):
-            await thread.send(
-                f"{message.author.mention} ⚠️ You're sending requests too fast."
-            )
+        if not await admit_message(message, services):
             return
 
         logger.info(
@@ -386,15 +372,21 @@ class LoreCog(commands.Cog):
             if session is None:
                 logger.warning("Lore session for thread %d vanished — ignoring", thread.id)
                 return
+            # An image posted with (or as) the follow-up is described by the
+            # agent model itself, already loaded for this turn, and the
+            # description rides along in the question as plain text.
+            question = message.content
+            if services.vision is not None and any(is_image(a) for a in message.attachments):
+                question = with_captions(question, await services.vision.captions(message.attachments, AGENT_MODEL))
             try:
-                async with thread.typing():
-                    answer, metrics, searched = await run_lore_turn(
-                        session=session,
-                        question=message.content,
-                        proxy_client=services.proxy,
-                        rag_client=services.rag,
-                        status=status,
-                    )
+                answer, metrics, searched = await run_lore_turn(
+                    session=session,
+                    question=question,
+                    proxy_client=services.proxy,
+                    rag_client=services.rag,
+                    status=status,
+                    catalog=services.personas,
+                )
             except ProxyError as e:
                 logger.warning("Proxy error in lore follow-up: %s", e)
                 await status.failed()
@@ -432,8 +424,7 @@ class LoreCog(commands.Cog):
         already unrouted and cannot be answered from a half-purged state.
         """
         services = self.services
-        services.threads.forget(thread_id)
-        services.registry.remove(thread_id)
+        services.threads.close(thread_id)
         services.sessions.remove(thread_id)
         logger.info("Retired lore thread %d (%s)", thread_id, reason)
 
@@ -453,8 +444,7 @@ class LoreCog(commands.Cog):
         retired = 0
 
         for thread_id in expired:
-            lock = services.threads.locks.get(thread_id)
-            if lock is not None and lock.locked():
+            if services.threads.is_busy(thread_id):
                 logger.info("Thread %d is mid-answer — deferring expiry", thread_id)
                 continue
 

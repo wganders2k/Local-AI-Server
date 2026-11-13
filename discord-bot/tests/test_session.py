@@ -109,13 +109,13 @@ def test_store_skips_malformed_entries_rather_than_failing_to_start(tmp_path):
     path = tmp_path / "sessions.json"
     path.write_text(json.dumps({"threads": {"7": {"nonsense": True}}}))
     store = LoreSessionStore(str(path))
-    assert store.thread_ids() == []
+    assert store.get(7) is None and store.expired_threads(0) == []
 
 
 def test_store_survives_a_corrupt_file(tmp_path):
     path = tmp_path / "sessions.json"
     path.write_text("{ not json")
-    assert LoreSessionStore(str(path)).thread_ids() == []
+    assert LoreSessionStore(str(path)).expired_threads(0) == []
 
 
 def test_save_is_atomic_and_reloadable(tmp_path):

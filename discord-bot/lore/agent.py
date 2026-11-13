@@ -35,21 +35,23 @@ from config import (
     AGENT_MAX_REPEATED_SEARCHES,
     AGENT_TEMPERATURE,
     LORE_FOLLOWUP_MAX_ROUNDS,
+    LORE_MAX_SIMULATIONS,
 )
-from lore.compaction import TOOL_CHARS_PER_TOKEN, compact_tool_rounds
+from lore.compaction import compact_tool_rounds
 from lore.context_window import limit as ctx_limit
-from lore.metrics import AgentMetrics
+from lore.metrics import TOOL_CHARS_PER_TOKEN, AgentMetrics, fraction
 from lore.progress import ProgressReporter
 from lore.prompts import build_lore_followup_prompt, build_system_prompt
 from lore.research import (
     SEARCH_NOTE_PREFIX,
-    _flatten_research_for_synthesis,
+    flatten_research_for_synthesis,
     drop_seen_chunks,
     render_research_blocks,
 )
 from lore.session import LoreSession
 from lore.streaming import stream_answer
-from lore.tools import TOOLS, execute_tool
+from lore.tools import ToolContext, build_tools, execute_tool
+from personas import PersonaCatalog
 from proxy_client import ProxyClient, ProxyError
 from rag_client import RAGClient
 
@@ -79,7 +81,8 @@ class LoreRunResult:
 async def _run_tool_rounds(
     messages: list[dict],
     proxy_client: ProxyClient,
-    rag_client: RAGClient,
+    ctx: ToolContext,
+    tools: list[dict],
     metrics: AgentMetrics,
     max_rounds: int,
     status: Optional[ProgressReporter] = None,
@@ -108,6 +111,8 @@ async def _run_tool_rounds(
     Args:
         messages: Conversation to extend. Mutated in place with the assistant
             and tool messages produced by each round.
+        ctx: What the tools run with (lore.tools.ToolContext).
+        tools: The schemas sent with every request (lore.tools.build_tools).
         metrics: Updated with usage, timings and tool counts.
         max_rounds: Hard cap on rounds.
         status: Progress reporter, or None.
@@ -127,6 +132,7 @@ async def _run_tool_rounds(
     shown = set(seen_keys or ())
     ran: dict[str, int] = {}  # call signature -> round it first ran in
     repeats = 0
+    simulations = 0
 
     for round_num in range(max_rounds):
         metrics.rounds_executed += 1
@@ -142,7 +148,7 @@ async def _run_tool_rounds(
             result = await proxy_client.chat_with_tools(
                 model=AGENT_MODEL,
                 messages=messages,
-                tools=TOOLS,
+                tools=tools,
                 temperature=AGENT_TEMPERATURE,
             )
         finally:
@@ -194,7 +200,13 @@ async def _run_tool_rounds(
 
             metrics.total_tool_calls += 1
             signature = json.dumps([function_name, function_args], sort_keys=True)
-            if signature in ran:
+            if function_name == "simulate_conversation" and simulations >= LORE_MAX_SIMULATIONS:
+                logger.warning("Simulation %d refused (cap %d)", simulations + 1, LORE_MAX_SIMULATIONS)
+                tool_result = (
+                    f"{SEARCH_NOTE_PREFIX} You have already run a simulation for this "
+                    "question; its transcript is above. Answer from it and your research."
+                )
+            elif signature in ran:
                 repeats += 1
                 logger.warning(
                     "Repeat of round %d's %s call — refused (%d/%d)",
@@ -208,9 +220,11 @@ async def _run_tool_rounds(
                 )
             else:
                 ran[signature] = round_num + 1
-                raw = await execute_tool(
-                    function_name, function_args, rag_client, metrics=metrics
-                )
+                if function_name == "simulate_conversation":
+                    simulations += 1
+                    if status:
+                        await status.simulating()
+                raw = await execute_tool(function_name, function_args, ctx)
                 tool_result = drop_seen_chunks(raw, shown)
                 logger.info(
                     "Tool %s returned %d chars, %d new", function_name, len(raw), len(tool_result),
@@ -277,6 +291,39 @@ async def _run_tool_rounds(
     return None, tool_messages
 
 
+async def _generate_answer(
+    proxy_client: ProxyClient,
+    messages: list[dict],
+    metrics: AgentMetrics,
+    status: Optional[ProgressReporter],
+    tools: Optional[list[dict]] = None,
+) -> str:
+    """
+    Stream one answer and record its timing and usage. Streamed so a long
+    answer cannot trip the read timeout, and so the user sees progress — see
+    stream_answer().
+
+    With tools attached, an empty answer means the model emitted a tool call
+    instead of prose despite being told not to, so there were no content deltas
+    to collect. It is retried once without tools, which removes the option
+    entirely at the cost of one cold prefill.
+    """
+    llm_start = time.monotonic()
+    text, usage = await stream_answer(proxy_client, AGENT_MODEL, messages, status=status, tools=tools)
+    if tools and not text.strip():
+        logger.warning("Streamed answer was empty (likely a tool call) — retrying without tools")
+        text, usage = await stream_answer(proxy_client, AGENT_MODEL, messages, status=status)
+    elapsed = time.monotonic() - llm_start
+    metrics.llm_response_times.append(elapsed)
+    metrics.record_usage(
+        usage,
+        fallback_prompt_chars=sum(len(m.get("content") or "") for m in messages),
+        fallback_completion_chars=len(text),
+    )
+    logger.info("Answer generated in %.2fs (%d chars) — %s", elapsed, len(text), metrics.context_line())
+    return text.strip()
+
+
 async def run_agent_loop(
     user_question: str,
     proxy_client: ProxyClient,
@@ -284,6 +331,7 @@ async def run_agent_loop(
     status: ProgressReporter,
     channel_names: Optional[list[str]] = None,
     max_rounds: Optional[int] = None,
+    catalog: Optional[PersonaCatalog] = None,
 ) -> LoreRunResult:
     """
     Run the opening agentic RAG turn for /lore.
@@ -304,6 +352,8 @@ async def run_agent_loop(
             could not be sent, so there is never a None to guard against.
         channel_names: Channel names for the system prompt.
         max_rounds: Round cap (defaults to AGENT_MAX_ROUNDS, hard-capped).
+        catalog: The personas simulate_conversation may use; None leaves the
+            tool out.
 
     Returns:
         LoreRunResult carrying the answer, the metrics, and the raw tool
@@ -325,8 +375,8 @@ async def run_agent_loop(
 
     try:
         direct_answer, tool_messages = await _run_tool_rounds(
-            messages, proxy_client, rag_client, metrics, max_rounds,
-            status=status, label="Agent",
+            messages, proxy_client, ToolContext(rag_client, proxy_client, catalog, metrics),
+            build_tools(catalog), metrics, max_rounds, status=status, label="Agent",
         )
     except ProxyError as e:
         metrics.error = str(e)
@@ -344,7 +394,6 @@ async def run_agent_loop(
     # Budget exhausted — synthesise from everything gathered.
     await status.generating()
     try:
-        llm_start = time.monotonic()
         # Flatten the tool-calling history into a single plain-text user turn.
         # Replacing just the system prompt left the assistant/tool_calls and
         # role="tool" messages in context and the model kept imitating them,
@@ -352,27 +401,13 @@ async def run_agent_loop(
         # markup reaches the user instead of being parsed out.
         # From tool_messages rather than messages: it carries any research
         # condensed mid-loop in a form the flattener recognises.
-        synthesis_messages = _flatten_research_for_synthesis(tool_messages, user_question)
+        synthesis_messages = flatten_research_for_synthesis(tool_messages, user_question)
         # No tools in this request either way — the synthesis prompt carries no
         # tool-calling pattern to continue, which is the whole point of
-        # flattening it. See stream_answer() for why it is streamed.
-        answer, usage = await stream_answer(
-            proxy_client, AGENT_MODEL, synthesis_messages, status=status
-        )
-        llm_elapsed = time.monotonic() - llm_start
-        metrics.llm_response_times.append(llm_elapsed)
-        # The synthesis prompt is the largest single request the run makes, so
-        # this is normally where peak_context_tokens is set.
-        metrics.record_usage(
-            usage,
-            fallback_prompt_chars=sum(len(m.get("content") or "") for m in synthesis_messages),
-            fallback_completion_chars=len(answer),
-        )
-        logger.info(
-            "Final answer generation took %.2fs (%d chars) — %s",
-            llm_elapsed, len(answer), metrics.context_line(),
-        )
-        answer = (answer or "I've exhausted my search rounds. Please try rephrasing your question.").strip()
+        # flattening it. The synthesis prompt is the largest single request the
+        # run makes, so this is normally where peak_context_tokens is set.
+        answer = await _generate_answer(proxy_client, synthesis_messages, metrics, status)
+        answer = answer or "I've exhausted my search rounds. Please try rephrasing your question."
         logger.info(metrics.summary())
         logger.info("Final answer preview: %s...", answer[:100])
         await status.complete(user_question)
@@ -398,12 +433,11 @@ def _budget_notice(used: int, limit: int) -> dict:
     every turn would re-prefill the entire thread each time.
     """
     remaining = max(0, limit - used)
-    pct = (used / limit * 100) if limit else 0.0
     return {
         "role": "user",
         "content": (
             f"CONTEXT BUDGET: this thread has used {used:,} of {limit:,} tokens "
-            f"({pct:.0f}%); about {remaining:,} remain. Prefer answering from the "
+            f"({fraction(used, limit):.0%}); about {remaining:,} remain. Prefer answering from the "
             "material already gathered. Search again only if the question truly "
             "cannot be answered without it, and keep any new search narrow."
         ),
@@ -430,6 +464,7 @@ async def run_lore_turn(
     rag_client: RAGClient,
     max_rounds: Optional[int] = None,
     status: Optional[ProgressReporter] = None,
+    catalog: Optional[PersonaCatalog] = None,
 ) -> tuple[str, AgentMetrics, bool]:
     """
     Run one follow-up turn against an existing lore session.
@@ -467,6 +502,8 @@ async def run_lore_turn(
         max_rounds: Tool rounds allowed this turn. Defaults to
             LORE_FOLLOWUP_MAX_ROUNDS.
         status: Progress reporter, or None.
+        catalog: The personas simulate_conversation may use; None leaves the
+            tool out.
 
     Returns:
         (answer, metrics, searched) — the answer text, this turn's metrics, and
@@ -477,6 +514,9 @@ async def run_lore_turn(
     max_rounds = max(1, min(max_rounds, AGENT_MAX_ROUNDS_HARD_CAP))
 
     metrics = AgentMetrics()
+    # Built once for the turn: the loop and the answer call must send identical
+    # tools, or the answer call cold-prefills the thread.
+    tools = build_tools(catalog)
     used = session.last_context_tokens
     ctx_total = ctx_limit()
     pct = session.pct_of(ctx_total)
@@ -514,7 +554,7 @@ async def run_lore_turn(
     if allow_tools:
         work = session.build_messages(extra=extra)
         direct_answer, tool_messages = await _run_tool_rounds(
-            work, proxy_client, rag_client, metrics, max_rounds,
+            work, proxy_client, ToolContext(rag_client, proxy_client, catalog, metrics), tools, metrics, max_rounds,
             status=status, label="Lore follow-up", seen_keys=session.seen_keys,
         )
         if direct_answer:
@@ -552,34 +592,11 @@ async def run_lore_turn(
         logger.info("Generating answer (streamed)...")
         if status:
             await status.generating()
-        llm_start = time.monotonic()
-        answer_messages = session.build_messages(extra=[_ANSWER_NUDGE])
         # Tools stay attached even though this turn must not call them: the
         # prompt shape has to match the surrounding calls or the whole thread
         # re-prefills. _ANSWER_NUDGE is what actually holds the model back.
-        text, usage = await stream_answer(
-            proxy_client, AGENT_MODEL, answer_messages, status=status, tools=TOOLS
-        )
-        answer = text.strip()
-
-        if not answer:
-            # The model answered with a tool call instead of prose despite the
-            # nudge, so there were no content deltas to collect. Retry without
-            # tools, which removes the option entirely at the cost of one cold
-            # prefill.
-            logger.warning(
-                "Streamed answer was empty (likely a tool call) — retrying without tools"
-            )
-            text, usage = await stream_answer(
-                proxy_client, AGENT_MODEL, answer_messages, status=status
-            )
-            answer = text.strip()
-
-        metrics.llm_response_times.append(time.monotonic() - llm_start)
-        metrics.record_usage(usage)
-        logger.info(
-            "Answer generated in %.2fs (%d chars) — %s",
-            metrics.llm_response_times[-1], len(answer), metrics.context_line(),
+        answer = await _generate_answer(
+            proxy_client, session.build_messages(extra=[_ANSWER_NUDGE]), metrics, status, tools=tools
         )
 
     if not answer:

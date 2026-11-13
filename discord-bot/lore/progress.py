@@ -30,6 +30,9 @@ class ProgressReporter(Protocol):
     async def condensing(self, round_num: int, max_rounds: int) -> None:
         """Summarising older results mid-run to free context."""
 
+    async def simulating(self) -> None:
+        """Running simulate_conversation: persona models, a model swap away."""
+
     async def writing(self) -> None: ...
 
     async def generating(self, chars: Optional[int] = None) -> None: ...

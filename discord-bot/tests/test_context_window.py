@@ -143,7 +143,7 @@ async def sizes_from(entries):
     async def payload():
         return entries
 
-    client._models_payload = payload
+    client.models_payload = payload
     return await client.model_context_sizes()
 
 

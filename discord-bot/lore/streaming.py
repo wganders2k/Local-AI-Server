@@ -12,7 +12,7 @@ from typing import Optional
 from lore.progress import ProgressReporter
 from proxy_client import ProxyClient
 
-logger = logging.getLogger("mimic-bot.lore.agent")
+logger = logging.getLogger("mimic-bot.lore.streaming")
 
 # How often the "generating final answer" status message is refreshed while the
 # synthesis streams. Discord allows roughly 5 edits per 5s on one message; the

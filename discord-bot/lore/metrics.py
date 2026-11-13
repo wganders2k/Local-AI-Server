@@ -11,6 +11,21 @@ from typing import Optional
 
 from lore.context_window import limit as ctx_limit
 
+# The char -> token estimates, for the few places that have no usage report to
+# hand. One home, so every estimate in a run agrees.
+#
+# General text: the same ~4 chars/token proxy/main.py's Prometheus fallback uses.
+CHARS_PER_TOKEN = 4
+# RAG excerpts specifically, counted until the next usage report arrives.
+# Measured at ~3.1 chars/token (a 34,088-char result grew the next request by
+# 10,901 tokens), so 3 errs toward acting a little early.
+TOOL_CHARS_PER_TOKEN = 3
+
+
+def fraction(used: int, limit: int) -> float:
+    """used / limit, or 0 for an unknown limit. Callers format it as a percentage."""
+    return used / limit if limit else 0.0
+
 
 @dataclass
 class AgentMetrics:
@@ -20,7 +35,6 @@ class AgentMetrics:
     rounds_executed: int = 0
     tool_call_times: list[float] = field(default_factory=list)
     llm_response_times: list[float] = field(default_factory=list)
-    rag_query_times: list[float] = field(default_factory=list)
     tools_used: list[str] = field(default_factory=list)
     error: Optional[str] = None
 
@@ -48,8 +62,7 @@ class AgentMetrics:
 
         The backend reports real counts on both the streamed and buffered
         paths, so the character estimate is only a guard against a build that
-        drops the field — it uses the same ~4 chars/token conversion as
-        proxy/main.py's Prometheus fallback.
+        drops the field (CHARS_PER_TOKEN).
         """
         if usage:
             self.prompt_tokens = int(usage.get("prompt_tokens") or 0)
@@ -57,8 +70,8 @@ class AgentMetrics:
             details = usage.get("prompt_tokens_details") or {}
             self.cached_tokens = int(details.get("cached_tokens") or 0)
         else:
-            self.prompt_tokens = fallback_prompt_chars // 4
-            self.completion_tokens = fallback_completion_chars // 4
+            self.prompt_tokens = fallback_prompt_chars // CHARS_PER_TOKEN
+            self.completion_tokens = fallback_completion_chars // CHARS_PER_TOKEN
             self.cached_tokens = 0
         self.total_completion_tokens += self.completion_tokens
         self.peak_context_tokens = max(
@@ -73,15 +86,13 @@ class AgentMetrics:
     @property
     def context_pct(self) -> float:
         """Peak context occupancy as a fraction of the model's window."""
-        return self.peak_context_tokens / ctx_limit() if ctx_limit() else 0.0
+        return fraction(self.peak_context_tokens, ctx_limit())
 
     def context_line(self) -> str:
         """One-line context summary for the round log."""
-        used = self.context_used
-        limit = ctx_limit()
-        pct = (used / limit * 100) if limit else 0.0
+        used, limit = self.context_used, ctx_limit()
         return (
-            f"context={used:,}/{limit:,} ({pct:.0f}%) "
+            f"context={used:,}/{limit:,} ({fraction(used, limit):.0%}) "
             f"cached={self.cached_tokens:,}"
         )
 
@@ -91,7 +102,7 @@ class AgentMetrics:
             f"rounds={self.rounds_executed}, tool_calls={self.total_tool_calls}, "
             f"tools={self.tools_used!r}, "
             f"avg_llm={sum(self.llm_response_times)/max(len(self.llm_response_times),1):.2f}s, "
-            f"avg_rag={sum(self.rag_query_times)/max(len(self.rag_query_times),1):.2f}s, "
+            f"avg_tool={sum(self.tool_call_times)/max(len(self.tool_call_times),1):.2f}s, "
             f"peak_context={self.peak_context_tokens:,}/{ctx_limit():,} "
             f"({self.context_pct * 100:.0f}%), "
             f"generated={self.total_completion_tokens:,} tok"

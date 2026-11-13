@@ -26,7 +26,7 @@ logger = logging.getLogger("mimic-bot.lore.research")
 # chunks be dropped across searches. If that formatter ever changes separator
 # this degrades safely: the split yields one element and dedup still catches
 # whole results that are byte-identical.
-_RAG_CHUNK_SEPARATOR = "\n\n---\n\n"
+CHUNK_SEPARATOR = "\n\n---\n\n"
 
 # Tags a summary that lore.compaction put into a run's tool_messages in place of
 # the results it condensed. render_research_blocks() passes it through as a
@@ -42,7 +42,7 @@ SEARCH_NOTE_PREFIX = "[Search note]"
 
 def split_chunks(result: str) -> list[str]:
     """The retrieved chunks in one tool result, stripped, empties dropped."""
-    return [c.strip() for c in result.split(_RAG_CHUNK_SEPARATOR) if c.strip()]
+    return [c.strip() for c in result.split(CHUNK_SEPARATOR) if c.strip()]
 
 
 def drop_seen_chunks(result: str, seen: set[str]) -> str:
@@ -81,12 +81,12 @@ def drop_seen_chunks(result: str, seen: set[str]) -> str:
             "nothing new. Change the wording, the tool or the scope, or answer "
             "from what you have."
         )
-    return _RAG_CHUNK_SEPARATOR.join(fresh + [
+    return CHUNK_SEPARATOR.join(fresh + [
         f"{SEARCH_NOTE_PREFIX} {dropped} of {len(chunks)} excerpt(s) omitted — "
         "already shown earlier in this conversation."
     ])
 
-def _flatten_research_for_synthesis(
+def flatten_research_for_synthesis(
     messages: list[dict],
     user_question: str,
 ) -> list[dict]:
@@ -231,7 +231,7 @@ def render_research_blocks(
 
         blocks.append(
             f"[Search {start_index + len(blocks) + 1}] {label}\n"
-            + _RAG_CHUNK_SEPARATOR.join(fresh)
+            + CHUNK_SEPARATOR.join(fresh)
         )
 
     logger.info(

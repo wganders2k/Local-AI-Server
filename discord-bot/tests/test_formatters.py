@@ -1,6 +1,6 @@
 """Text post-processing: splitting, disclaimer stripping, embeds."""
 
-from discord_io import split_message
+from formatters import split_message
 from formatters import build_lore_embeds, find_split_boundary, strip_disclaimers
 
 

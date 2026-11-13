@@ -9,7 +9,7 @@ services:
   # model is requested. The proxy serialises access via lock.
   # ──────────────────────────────────────────────────────────
   llama-swappable:
-    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    image: ghcr.io/ggml-org/llama.cpp@sha256:0283744a35a6e7698b4f7a2d63360233dc769ece51e84bdba7aa187a33978276  # server-cuda12-b11977 (2026-10-29): first build with the gemma4uv projector we pinned
     restart: unless-stopped
     runtime: nvidia
     environment:
@@ -21,7 +21,7 @@ services:
       - /home/peacow/local-ai-server/models.ini:/models.ini:ro
     command: >
       --models-preset /models.ini --models-max 1 --host 0.0.0.0 --port 8080 -fa
-      on --parallel 1 --log-prefix --threads-batch 12 --jinja
+      on --fit off --parallel 1 --log-prefix --threads-batch 12 --jinja
     deploy:
       resources:
         reservations:
@@ -193,7 +193,13 @@ services:
   # Slash commands, typing indicators, lore+mimic chain.
   # ──────────────────────────────────────────────────────────
   discord-bot:
-    build: ./discord-bot
+    build:
+      context: ./discord-bot
+      # shared/: the training↔serving contract — the prompt format, the persona
+      # system prompt and the roster reader, so /mimic serves exactly what the
+      # adapters were trained on. COPY --from=shared in the Dockerfile.
+      additional_contexts:
+        shared: ./shared
     restart: unless-stopped
     depends_on:
       proxy:
@@ -204,10 +210,14 @@ services:
       - DISCORD_TOKEN=${DISCORD_TOKEN}
       - PROXY_URL=${PROXY_URL}
       - MAX_QUEUE_DEPTH=${MAX_QUEUE_DEPTH:-3}
+      - MIMIC_ADAPTER_SCALE=${MIMIC_ADAPTER_SCALE:-0.85}
       - RATE_LIMIT_PER_USER=${RATE_LIMIT_PER_USER:-5}
       - RAG_SERVICE_URL=http://rag-service:8001
       - RAG_ENABLED=${RAG_ENABLED:-true}
       - LORE_CONTEXT_PATH=${LORE_CONTEXT_PATH:-bot_context/lore/context.md}
+      # Live image captions for the mimic chat controller. Leave off until
+      # [mimic-multi] has a vision projector (needs a newer llama.cpp; see models.ini).
+      - VISION_MIMIC_ENABLED=${VISION_MIMIC_ENABLED:-false}
     volumes:
       # Absolute, not ./relative. Compose resolves relative binds against the
       # directory it is invoked from, so recreating this stack through dockge
@@ -228,12 +238,16 @@ services:
       # code baked into the image — binding the host directory over them would
       # shadow the image's copies with the working tree.
       - /mnt/storage/array/DiscordArchive/bot_context:/app/bot_context
-      # The mimic training data's names.json (member aliases) and each
-      # persona's stats.json, so /mimic labels speakers, renders mentions and
-      # renders its system prompt exactly as the adapters were trained — see
-      # member_names.py. Read-only: the bot only ever reads what
-      # lora-training/build_dataset.py and the hand-filled names file wrote.
+      # The persona roster (personas.json: who each persona is) and the member
+      # aliases (names.json), so /mimic knows its personas, labels speakers and
+      # renders mentions exactly as the adapters were trained — see personas.py.
+      # Read-only: the bot only ever reads what lora-training and the
+      # hand-filled files wrote. Adapter ids come from the proxy, not from here.
       - /mnt/storage_cold/array/DiscordArchive/training:/archive/training:ro
+      # The live adapters' manifests (<persona>-lora.json): how each adapter's
+      # prompts were shaped — system prompt or not, context turns, gap, merge.
+      # Read-only, and only the manifests are read; the GGUFs are the proxy's.
+      - ${MODELS_DIR:-/srv/models}/lora:/srv/models/lora:ro
 
   # ──────────────────────────────────────────────────────────
   # Open WebUI (:3000)

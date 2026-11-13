@@ -7,9 +7,9 @@ code that applies them (formatters.py).
 """
 
 import os
-from typing import Dict
-
 from dotenv import load_dotenv
+
+from persona_roster import DEFAULT_ADAPTER_SCALE
 
 load_dotenv()
 
@@ -25,11 +25,11 @@ PROXY_URL: str = os.environ.get("PROXY_URL", "http://proxy:11436")
 RATE_LIMIT_PER_USER: int = int(os.environ.get("RATE_LIMIT_PER_USER", "5"))
 RATE_LIMIT_WINDOW_SECONDS: int = 60
 
-# Queue depth — consumed by bot.py §3.2 (queue depth check before proxy call)
+# Backend queue depth at which a command refuses rather than queue behind it
 MAX_QUEUE_DEPTH: int = int(os.environ.get("MAX_QUEUE_DEPTH", "3"))
 
 # Conversation history
-HISTORY_MAX_TURNS: int = 20  # Rolling 10-turn window per channel/persona
+HISTORY_MAX_MESSAGES: int = 20  # A /chat thread's rolling window: 10 exchanges
 
 # Response caps
 MAX_MESSAGE_LENGTH: int = 2000  # Discord message limit
@@ -77,6 +77,9 @@ AGENT_MAX_ROUNDS_HARD_CAP: int = 25  # Hard cap for user-specified rounds in /lo
 # Identical tool calls are refused rather than re-run; after this many refusals
 # in one run, searching stops and the answer is written from what was found.
 AGENT_MAX_REPEATED_SEARCHES: int = 2
+# simulate_conversation runs per /lore run or thread turn. Each is a model swap
+# away from AGENT_MODEL and back, and a re-prefill of the whole research context.
+LORE_MAX_SIMULATIONS: int = 1
 AGENT_TEMPERATURE: float = 0.1    # Low temperature for deterministic tool calling
 AGENT_TOP_K: int = 10             # Default chunks per tool call (higher than lore's 5)
 
@@ -162,42 +165,70 @@ LORE_CONTEXT_PATH: str = os.environ.get(
 # Persona Configuration
 # ──────────────────────────────────────────────────────────────
 
-# Display name mapping: persona_key → human-readable name
-MIMIC_PERSONAS: Dict[str, str] = {
-    "mimic_user1": "User1",
-    "mimic_user2": "User2",
-    "mimic_user3": "User3",
-    "mimic_user4": "User4",
-    "mimic_user5": "User5",
-    "mimic_user6": "User6",
-    "mimic_user7": "User7",
-}
+# Who the personas are is not configured here: the roster (personas.json, on
+# the archive disk) names them, and [mimic-multi]'s lora list in models.ini
+# gives each its adapter id, read from the proxy at startup. See personas.py.
 
-# ──────────────────────────────────────────────────────────────
-# System Prompts
-# ──────────────────────────────────────────────────────────────
-# Prompt text is not configuration. It lives in prompts/*.md and is loaded by
-# prompt_loader.render(); the /lore agent's prompts are assembled in
-# lore/prompts.py. Only the persona -> prompt mapping is here.
+# Every persona is served from one loaded base with its adapter picked per
+# request — see [mimic-multi] in models.ini — so a change of speaker never
+# reloads the model.
+MIMIC_MODEL: str = "mimic-multi"
 
+# How strongly a persona's adapter is applied — see DEFAULT_ADAPTER_SCALE in
+# shared/persona_roster.py, which training's sampler uses too.
+MIMIC_ADAPTER_SCALE: float = float(os.environ.get("MIMIC_ADAPTER_SCALE", DEFAULT_ADAPTER_SCALE))
 
-def get_mimic_system_prompt(persona: str) -> str:
-    """Generate the system prompt for a given mimic persona."""
-    # Imported lazily: prompt_loader has no config dependency today, and this
-    # keeps it that way if it ever gains one.
-    from prompt_loader import render
+# How far back /mimic and /mimic-chat read a channel: enough raw messages to
+# fill a persona's trained context_n merged turns after dropping bot/command
+# noise. Two Discord history pages. How much of it a persona reads is its own
+# training window (mimic.transcript.build_persona_prompt), not set here.
+MIMIC_HISTORY_FETCH: int = 200
+# Turns a persona keeps however long the silence before them, so a chat picked
+# up after a break still has a little of what came before. Training cut at the
+# silence, so keep it small: past a few turns the old topic outweighs the new.
+MIMIC_MIN_CONTEXT_TURNS: int = 4
+# In a one-on-one /mimic-chat, what the persona sees its own member called.
+# Under their own name their lines would read as the persona's own, merge with
+# them into one turn, and the persona would carry on the member's thought
+# instead of answering it.
+MIMIC_SELF_LABEL: str = "member"
+# A human message starting with one of these resets what the personas see:
+# from then on their windows reach back no further than that many turns,
+# counting the message itself. The prefix is stripped before anything reads
+# the message. Longest first, so ">>>" is not read as ">>" plus ">".
+MIMIC_RESET_PREFIXES: tuple[tuple[str, int], ...] = ((">>>", 1), (">>", 4))
 
-    from member_names import persona_display_name
+# One webhook per channel posts every persona's lines under its own name. The
+# bot needs manage_webhooks in any channel /mimic or /mimic-chat is used in.
+MIMIC_WEBHOOK_NAME: str = "mimic-chat"
+# Appended to a persona's name on every post, so no one mistakes it for the member.
+MIMIC_WEBHOOK_SUFFIX: str = " (mimic)"
+# Every webhook name a persona has posted under (they follow nicknames), so its
+# earlier lines still read back as the persona after a nickname change.
+PERSONA_NAMES_PATH: str = os.environ.get("PERSONA_NAMES_PATH", "bot_context/persona_names.json")
 
-    # The name the adapter's training prompt was rendered with, so the served
-    # system prompt is the trained one. Falls back to the placeholder for a
-    # persona whose dataset has not been built.
-    return render(
-        "mimic_persona",
-        persona=persona,
-        display_name=persona_display_name(persona) or MIMIC_PERSONAS.get(persona, persona),
-    )
-
+# /mimic-chat. One slash-command option per persona (persona1..persona7), and
+# the same cap on lore's simulate_conversation.
+MIMIC_CHAT_MAX_PERSONAS: int = 7
+# Bot turns in a row, with nobody else talking, before the chat waits for a
+# human whatever the controller wants. Keeps one thread from holding the GPU.
+MIMIC_CHAT_MAX_BURST: int = 15
+# A persona following up on its own message is part of the same turn and costs
+# nothing against the burst or `length`, up to this many follow-ups in a row;
+# past that each one counts as a new turn.
+MIMIC_CHAT_FREE_FOLLOWUPS: int = 3
+# Ceiling on the `length` option (in turns), and on lore's simulate_conversation.
+MIMIC_CHAT_MAX_LENGTH: int = 20
+MIMIC_CHAT_DEFAULT_SIM_LENGTH: int = 8
+# A human message waits this long for follow-ups before the bots answer, so
+# three quick messages get one reply rather than three.
+MIMIC_CHAT_DEBOUNCE_SECONDS: float = 3.0
+# How much of the transcript the controller reads. It only decides who speaks,
+# so it can see further back than a persona's training window.
+MIMIC_CHAT_CONTROLLER_LINES: int = 60
+MIMIC_CHAT_CONTROLLER_TEMPERATURE: float = 0.3
+# The speaker label for the premise in a simulation nobody started in Discord.
+MIMIC_SIM_SEED_NAME: str = "someone"
 
 # ──────────────────────────────────────────────────────────────
 # Validation
@@ -215,3 +246,29 @@ def validate_config() -> None:
         )
     if not PROXY_URL:
         raise ValueError("PROXY_URL environment variable is required.")
+
+
+# ──────────────────────────────────────────────────────────────
+# Vision (vision.py) — describing images posted to the bot
+# ──────────────────────────────────────────────────────────────
+
+# Images larger than this are not read. Discord's non-boosted upload cap is
+# 25 MB; screenshots and memes are almost always under a few.
+VISION_MAX_BYTES: int = 15 * 1024 * 1024
+# Longest side sent to the model; the encoders resize anyway, so more is only
+# a bigger request body.
+VISION_MAX_SIDE: int = 1536
+# Captions remembered by attachment id. A mimic chat re-reads its whole thread
+# every burst, so without this each image would be captioned once per burst.
+VISION_CACHE_SIZE: int = 512
+# At most this many uncaptioned images are described per mimic burst. Each is
+# a few seconds on the resident model; a dump of twenty screenshots should not
+# hold the reply for a minute. Later bursts pick up the rest via the cache.
+VISION_MAX_NEW_PER_BURST: int = 4
+# Ceiling on one caption: 1-3 sentences plus any transcribed text.
+VISION_MAX_TOKENS: int = 200
+# Live captions for the mimic chat controller. Off until [mimic-multi] has a
+# working vision projector: the 12B base's needs a newer llama.cpp than the
+# image we run (see models.ini), and an image request to a preset without one
+# fails. Lore captions need no switch — the agent model has its projector.
+VISION_MIMIC_ENABLED: bool = os.environ.get("VISION_MIMIC_ENABLED", "false").lower() == "true"

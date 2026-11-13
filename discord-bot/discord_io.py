@@ -1,10 +1,6 @@
 """
-Getting model output into Discord: streaming, splitting, posting.
-
-Discord caps a message at 2000 characters, so anything long has to be broken
-up. Splitting happens at paragraph or line boundaries where possible
-(formatters.find_split_boundary) so a code block or list does not get cut
-mid-line.
+Getting model output into Discord: streaming and posting. The text shaping —
+splitting to Discord's limit, stripping disclaimers — is formatters.py's.
 """
 
 import logging
@@ -13,7 +9,7 @@ from typing import Awaitable, Callable, Optional
 import discord
 
 from config import MAX_MESSAGE_LENGTH
-from formatters import find_split_boundary, format_mimic_response
+from formatters import split_message, strip_disclaimers, take_chunk
 from proxy_client import ProxyClient
 
 logger = logging.getLogger("mimic-bot.io")
@@ -21,20 +17,6 @@ logger = logging.getLogger("mimic-bot.io")
 # Anything that takes a string and posts it: interaction.followup.send,
 # channel.send, thread.send.
 Sender = Callable[[str], Awaitable[object]]
-
-
-def split_message(text: str, max_length: int = MAX_MESSAGE_LENGTH) -> list[str]:
-    """Break text into Discord-sized chunks at the best available boundary."""
-    chunks: list[str] = []
-    buffer = text
-    while buffer:
-        if len(buffer) <= max_length:
-            chunks.append(buffer)
-            break
-        split_at = find_split_boundary(buffer, max_length)
-        chunks.append(buffer[:split_at].rstrip())
-        buffer = buffer[split_at:].lstrip("\n")
-    return chunks
 
 
 async def stream_and_send(
@@ -63,13 +45,11 @@ async def stream_and_send(
         full_response += token
 
         while len(buffer) >= MAX_MESSAGE_LENGTH:
-            split_at = find_split_boundary(buffer, MAX_MESSAGE_LENGTH)
-            chunk = buffer[:split_at].rstrip()
-            buffer = buffer[split_at:].lstrip("\n")
+            chunk, buffer = take_chunk(buffer, MAX_MESSAGE_LENGTH)
             if chunk:
                 await send(chunk)
 
-    buffer = format_mimic_response(buffer).strip()
+    buffer = strip_disclaimers(buffer)
     if buffer:
         await send(buffer)
 
