@@ -77,9 +77,12 @@ IMAGE_CAPTION_MAX_ATTEMPTS: int = int(os.environ.get("IMAGE_CAPTION_MAX_ATTEMPTS
 # Longest side sent to the model. Gemma 4's vision encoder resizes anyway, so
 # a 4K screenshot sent whole is only a bigger request body for no gain.
 IMAGE_CAPTION_MAX_SIDE: int = int(os.environ.get("IMAGE_CAPTION_MAX_SIDE", "1536"))
-# Generous because the proxy holds batch requests behind interactive traffic
-# and may need a model swap first (see the local-ai-proxy notes: 600s).
-IMAGE_CAPTION_TIMEOUT_S: float = float(os.environ.get("IMAGE_CAPTION_TIMEOUT_S", "600"))
+# How long one caption request may wait for its answer. Hours, not minutes: the
+# proxy holds batch requests for as long as people are using the GPU, and a
+# client timeout does not withdraw a request — it only abandons one the GPU
+# will still run later (lora-training/cut_context.py's CLIENT_TIMEOUT, same
+# reason). Waiting is free; the job's max_instances=1 skips runs meanwhile.
+IMAGE_CAPTION_TIMEOUT_S: float = float(os.environ.get("IMAGE_CAPTION_TIMEOUT_S", str(6 * 3600)))
 
 
 # ──────────────────────────────────────────────────────────────

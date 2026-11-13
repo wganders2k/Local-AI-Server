@@ -82,11 +82,12 @@ def test_batch_writes_caption_with_provenance(archive, use_proxy):
     assert kinds == ["image_url", "text"]
 
 
-def test_failures_retry_then_give_up(archive, use_proxy, monkeypatch):
+@pytest.mark.parametrize("answer,status", [("", 200), ("", 400)])
+def test_the_images_own_failures_retry_then_give_up(archive, use_proxy, monkeypatch, answer, status):
     monkeypatch.setattr("image_captioner.IMAGE_CAPTION_MAX_ATTEMPTS", 2)
     rel = write_image(archive, "media/c/1.png")
     append_messages("u", [{"message_id": "1", "attachments": [stored("1", rel)]}])
-    use_proxy(proxy("", status=503))
+    use_proxy(proxy(answer, status=status))
     image_captioner.process_pending_batch(10)
     [a] = load_all_records("u")[0]["attachments"]
     assert a["caption_status"] == "pending" and a["caption_attempts"] == 1
@@ -94,6 +95,39 @@ def test_failures_retry_then_give_up(archive, use_proxy, monkeypatch):
     [a] = load_all_records("u")[0]["attachments"]
     assert a["caption_status"] == "error"
     assert image_captioner.process_pending_batch(10) == 0
+
+
+def refusing(status=None, exc=None, seen=None):
+    def handler(req):
+        if seen is not None:
+            seen.append(req)
+        if exc is not None:
+            raise exc
+        return httpx.Response(status, text="busy")
+    return httpx.MockTransport(handler)
+
+
+@pytest.mark.parametrize("transport_args", [
+    {"status": 503}, {"status": 429}, {"status": 502},
+    {"exc": httpx.ConnectError("refused")}, {"exc": httpx.ReadTimeout("slow")},
+])
+def test_a_proxy_failure_costs_no_attempt_and_stops_the_batch(archive, use_proxy, monkeypatch, transport_args):
+    """An outage must not use up attempts: an hour of 503s used to give up on hundreds of images."""
+    monkeypatch.setattr("image_captioner.IMAGE_CAPTION_MAX_ATTEMPTS", 1)
+    rel = write_image(archive, "media/c/1.png")
+    append_messages("u", [{"message_id": "1", "attachments": [stored("1", rel), stored("2", rel), stored("3", rel)]}])
+    seen = []
+    use_proxy(refusing(seen=seen, **transport_args))
+    for _ in range(3):
+        image_captioner.process_pending_batch(10)
+    for a in load_all_records("u")[0]["attachments"]:
+        assert a["caption_status"] == "pending" and "caption_attempts" not in a
+    assert len(seen) == 3, "each run should stop at the first proxy failure"
+
+
+def test_the_client_waits_as_long_as_the_proxy_holds_a_batch_request():
+    """A short read timeout abandons a request the proxy still runs later."""
+    assert image_captioner.IMAGE_CAPTION_TIMEOUT_S >= 3600
 
 
 def test_unreadable_file_is_marked(archive, use_proxy):

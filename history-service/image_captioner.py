@@ -76,7 +76,20 @@ def encode_image(path: str, max_side: int = IMAGE_CAPTION_MAX_SIDE) -> str:
     return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
 
 
+class ProxyUnavailable(Exception):
+    """
+    The proxy could not answer: unreachable, timed out, refusing (503/429) or
+    failing (5xx). Nothing about the image, so it costs the image no attempt,
+    and the rest of the batch would only fail the same way.
+    """
+
+
 def caption_image(client: httpx.Client, data_url: str) -> Optional[str]:
+    """
+    The caption, or None when the model could not describe this image (an
+    error about the request, or an empty answer). Raises ProxyUnavailable when
+    the failure is the proxy's rather than the image's.
+    """
     payload = {
         "model": IMAGE_CAPTION_MODEL,
         "messages": [{
@@ -91,10 +104,11 @@ def caption_image(client: httpx.Client, data_url: str) -> Optional[str]:
     try:
         resp = client.post(f"{PROXY_URL}/v1/chat/completions", json=payload)
     except httpx.HTTPError as e:
-        logger.warning(f"Caption request failed: {e}")
-        return None
+        raise ProxyUnavailable(f"{type(e).__name__}: {e}") from e
+    if resp.status_code in (429, 503) or resp.status_code >= 500:
+        raise ProxyUnavailable(f"HTTP {resp.status_code} — {resp.text[:200]}")
     if resp.status_code != 200:
-        logger.warning(f"Caption request failed: HTTP {resp.status_code} — {resp.text[:200]}")
+        logger.warning(f"Caption request refused: HTTP {resp.status_code} — {resp.text[:200]}")
         return None
     choices = resp.json().get("choices") or []
     text = (choices[0].get("message", {}).get("content") or "").strip() if choices else ""
@@ -111,7 +125,8 @@ def process_pending_batch(limit: int = IMAGE_CAPTION_BATCH_SIZE) -> int:
     by_user: Dict[str, Dict[tuple, dict]] = {}
     done = 0
 
-    with httpx.Client(timeout=IMAGE_CAPTION_TIMEOUT_S) as client:
+    timeout = httpx.Timeout(connect=10.0, read=IMAGE_CAPTION_TIMEOUT_S, write=60.0, pool=None)
+    with httpx.Client(timeout=timeout) as client:
         for user_id, message_id, attachment_id, att in work:
             attempts = att.get("caption_attempts", 0) + 1
             changes: dict = {"caption_attempts": attempts}
@@ -121,7 +136,13 @@ def process_pending_batch(limit: int = IMAGE_CAPTION_BATCH_SIZE) -> int:
                 logger.info(f"Unreadable image {att.get('media_path')}: {e}")
                 changes["caption_status"] = "unreadable"
             else:
-                caption = caption_image(client, data_url)
+                try:
+                    caption = caption_image(client, data_url)
+                except ProxyUnavailable as e:
+                    # Not this image's fault: no attempt recorded for it, and the
+                    # rest of the batch waits for the next run.
+                    logger.warning(f"Proxy unavailable, stopping this batch: {e}")
+                    break
                 if caption:
                     changes.update(
                         caption=caption,
