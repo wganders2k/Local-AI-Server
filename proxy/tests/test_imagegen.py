@@ -176,6 +176,48 @@ async def test_image_server_start_stop_and_generate():
     assert ("POST", "/containers/imagegen/stop", {"t": "0"}) in calls
 
 
+async def test_a_crashed_server_is_started_again_and_the_request_retried():
+    """
+    sd-server is the container's only process: nothing listening means it has
+    exited and freed its memory. `running` used to stay set, so every later
+    request went to a dead server until the idle evictor happened to stop it.
+    """
+    calls = []
+    alive = {"up": False}
+
+    def handler(req):
+        calls.append((req.method, req.url.path))
+        if req.url.host == "docker":
+            if req.url.path.endswith("/start"):
+                alive["up"] = True
+            return httpx.Response(204)
+        if not alive["up"]:
+            raise httpx.ConnectError("refused")
+        if req.url.path == "/v1/images/generations":
+            return httpx.Response(200, json={"data": []})
+        return httpx.Response(200, text="ok")
+
+    srv = imagegen.ImageServer("http://img:8080", "http://docker:2375", "imagegen", 5, 5)
+    srv.running = True  # believed up; actually crashed
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+        resp = await srv.generate(c, {"prompt": "x"})
+    assert resp.status_code == 200 and srv.running
+    assert ("POST", "/containers/imagegen/start") in calls
+
+
+async def test_a_slow_server_is_not_assumed_dead():
+    """A read timeout may mean it is still generating, holding its memory."""
+    def handler(req):
+        raise httpx.ReadTimeout("slow")
+
+    srv = imagegen.ImageServer("http://img:8080", "http://docker:2375", "imagegen", 5, 5)
+    srv.running = True
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+        with pytest.raises(httpx.ReadTimeout):
+            await srv.generate(c, {"prompt": "x"})
+    assert srv.running
+
+
 async def test_failed_stop_keeps_running_set():
     srv = imagegen.ImageServer("http://img:8080", "http://docker:2375", "imagegen", 5, 5)
     srv.running = True

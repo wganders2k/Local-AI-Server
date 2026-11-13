@@ -112,9 +112,26 @@ class ImageServer:
         return True
 
     async def generate(self, client: httpx.AsyncClient, body: dict) -> httpx.Response:
-        if not self.running:
-            logger.info("Starting the image server")
-            await self.start(client)
-        resp = await client.post(f"{self.url}/v1/images/generations", json=body, timeout=self.request_timeout)
-        self.last_used = time.monotonic()
-        return resp
+        for attempt in (1, 2):
+            if not self.running:
+                logger.info("Starting the image server")
+                await self.start(client)
+            try:
+                resp = await client.post(
+                    f"{self.url}/v1/images/generations", json=body, timeout=self.request_timeout
+                )
+            except httpx.ConnectError:
+                # Nothing listening: sd-server is the container's only process,
+                # so it has exited (a crash, an OOM) and its memory is free.
+                # Without this `running` stays set, every request goes to a dead
+                # server, and each failure resets the idle clock that would
+                # otherwise stop it. A read timeout is different — the server
+                # may still be generating — so it keeps `running` set.
+                if attempt == 2:
+                    raise
+                logger.warning("Image server not answering — it has exited; starting it again")
+                self.running = False
+                continue
+            self.last_used = time.monotonic()
+            return resp
+        raise AssertionError("unreachable")
