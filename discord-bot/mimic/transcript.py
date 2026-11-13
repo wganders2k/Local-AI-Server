@@ -16,7 +16,7 @@ and builds the Cast, and lore's simulations build a Cast with no guild at all.
 """
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Callable, Mapping, Optional
 
@@ -83,11 +83,20 @@ def since_reset(lines: list[Line], merge_seconds: float) -> list[Line]:
     `lines` from the latest reset on: the reset line and the reset-1 turns
     before it, then everything after. The reset line starts a turn of its own,
     so ">>>>" keeps nothing its sender said before it.
+
+    Turns are counted by who posted each line: a persona's lines are never one
+    turn with its member's, though both carry the member's id. Counted on the
+    ids alone, a back-and-forth between the two merged into one "turn" and a
+    reset kept far more than it said.
     """
     at = next((i for i in range(len(lines) - 1, -1, -1) if lines[i].reset is not None), None)
     if at is None:
         return lines
-    before = mimic_format.merge_turns([line.msg for line in lines[:at]], merge_seconds)
+    posted = [
+        replace(line.msg, user_id=f"persona:{line.persona}") if line.persona else line.msg
+        for line in lines[:at]
+    ]
+    before = mimic_format.merge_turns(posted, merge_seconds)
     kept = before[-(lines[at].reset - 1):] if lines[at].reset > 1 else []
     return lines[at - sum(len(t.texts) for t in kept):]
 

@@ -320,3 +320,23 @@ def test_a_reset_is_not_undone_by_the_minimum_turns(catalog):
     lines = chat(r, (BOB, "a"), (CAROL, "b"), (BOB, "c"), (ERIN, ">>>> d"))
 
     assert shown(r, lines) == "[erin]: d"
+
+
+def test_a_reset_counts_a_persona_and_its_member_as_separate_turns(catalog):
+    """
+    The member's lines and their persona's carry the same id, so counted on ids
+    a quick back-and-forth between them merged into one turn and ">>" kept the
+    whole of it. Counted by who posted, each line here is a turn.
+    """
+    r = reader(catalog)
+    alice = user(MEMBER, "alice")
+    lines = []
+    for i in range(8):
+        if i % 2 == 0:
+            lines.append(r.to_line(message(alice, f"m{i}", second=20 * i)))
+        else:
+            lines.append(r.cast.persona_line("mimic_user1", f"m{i}", T0 + timedelta(seconds=20 * i)))
+    lines.append(r.to_line(message(alice, ">> new topic", minute=3)))
+
+    kept = transcript.since_reset(lines, 600.0)
+    assert [line.msg.text for line in kept] == ["m5", "m6", "m7", "new topic"]
