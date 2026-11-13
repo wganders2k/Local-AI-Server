@@ -30,22 +30,22 @@ One card, several tenants. The proxy owns *which model answers a request*; the a
 │   │  FastAPI             │◀── granted ──│  the only component that  │  │
 │   │  routes + serialises │              │  can see the card         │  │
 │   └──────────────────────┘              └───────────────────────────┘  │
-│        │              │                        │            │          │
-│        ▼              ▼                        │            │          │
-│  ┌─────────────┐  ┌──────────────────────┐     │            │          │
-│  │ llama       │  │ llama-swappable      │◀────┘            ▼          │
-│  │ -permanent  │  │ :11434               │           ┌──────────────┐  │
-│  │ :11435      │  │ router — one model   │           │ lora-trainer │  │
-│  │ autocomplete│  │ resident at a time   │           │ preemptible  │  │
-│  │ (profile)   │  │ (models.ini presets) │           │ (profile)    │  │
-│  └─────────────┘  └──────────────────────┘           └──────────────┘  │
+│                       │                        │            │          │
+│                       ▼                        │            │          │
+│                   ┌──────────────────────┐     │            │          │
+│                   │ llama-swappable      │◀────┘            ▼          │
+│                   │ :11434               │           ┌──────────────┐  │
+│                   │ router — one model   │           │ lora-trainer │  │
+│                   │ resident at a time   │           │ preemptible  │  │
+│                   │ (models.ini presets) │           │ (profile)    │  │
+│                   └──────────────────────┘           └──────────────┘  │
 │                                                                        │
 │   CPU-only: rag-service ─▶ chromadb   history-service ─▶ DCE           │
 │   Observability: proxy /metrics ─▶ host monitoring stack (Grafana)     │
 └────────────────────────────────────────────────────────────────────────┘
         ▲                     ▲                    ▲
     VS Code /             Open WebUI           Discord Bot
-    Cursor                :3000
+    Cursor (chat)         :3000
 ```
 
 - [`arbiter/README.md`](arbiter/README.md) — GPU admission control, the lease model, and why there is no privileged tenant.
@@ -132,15 +132,9 @@ make status
 make check-gpu
 ```
 
-`make up` deliberately skips three profiled services: `llama-permanent` (`autocomplete`), `lora-trainer` (`managed`), and `discord-chat-exporter` (`manual`). The trainer in particular would take 16 GB behind the arbiter's back if a plain `up` started it.
+`make up` deliberately skips two profiled services: `lora-trainer` (`managed`) and `discord-chat-exporter` (`manual`). The trainer in particular would take 16 GB behind the arbiter's back if a plain `up` started it.
 
-### 4. Optional: enable IDE autocomplete
-
-```bash
-make enable-autocomplete      # starts llama-permanent on :11435
-```
-
-The permanent slot currently serves `qwen2.5-coder-1.5b-q8_0` (~1.65 GB VRAM); the Qwen3.5-2B line is commented out in `docker-compose.yml`. With autocomplete disabled, requests for the `autocomplete` alias get a `503` and everything else is unaffected. The setting persists to `.env` as `AUTOCOMPLETE_ENABLED`.
+**No IDE autocomplete.** An always-resident autocomplete model (`llama-permanent`, :11435) was removed on 2026-11-12. It went unused and held 2.2 GB of VRAM around the clock. It can't come back as a `models.ini` preset either: the router holds one model at a time, so every completion would evict the chat model.
 
 ## Common Commands
 
@@ -164,7 +158,6 @@ The permanent slot currently serves `qwen2.5-coder-1.5b-q8_0` (~1.65 GB VRAM); t
 | `make rag-ingest` / `rag-status` | Ingest lore into ChromaDB; show collection counts |
 | `make dce-evaluate` (alias `history-refresh`) | Trigger channel evaluation + targeted exports |
 | `make dce-export-full` / `dce-export-guild` / `dce-export-channel` | Manual DCE exports |
-| `make enable-autocomplete` / `disable-autocomplete` / `status-autocomplete` | Permanent-slot toggle |
 | `make nuke` | ⚠️ Remove containers + anonymous volumes (`/opt/appdata` and `$MODELS_DIR` survive) |
 
 ## Services
@@ -172,7 +165,6 @@ The permanent slot currently serves `qwen2.5-coder-1.5b-q8_0` (~1.65 GB VRAM); t
 | Service | Port | Profile | Description |
 |---|---|---|---|
 | `llama-swappable` | `:11434` | — | Router mode, `--models-max 1`; loads a preset on demand |
-| `llama-permanent` | `:11435` | `autocomplete` | Permanent autocomplete model |
 | `proxy` | `:11436` | — | FastAPI orchestration proxy |
 | `arbiter` | `127.0.0.1:11438` | — | GPU admission control; NVML-only, no CUDA |
 | `history-service` | `127.0.0.1:11437` | — | DCE orchestration, archive merge, image captioning |
@@ -198,7 +190,6 @@ history  GET  /health  /status                  POST /evaluate  /reparse  /clear
 ## Model Management
 
 - **`models.ini`** — every swappable-slot preset. Each `[section]` is a named alias with its GGUF path and inference parameters.
-- **`docker-compose.yml`** — the permanent-slot model, via the `--model` flag on `llama-permanent`.
 
 Currently enabled aliases in `models.ini`:
 
@@ -215,14 +206,13 @@ Currently enabled aliases in `models.ini`:
 
 **Commented out and therefore unavailable:** `mimic_user1` (a template awaiting its trained adapter) and `image-caption`. `/mimic` still offers `mimic_user1`–`mimic_user6` via autocomplete, but a request reaches llama-server and finds no such preset. `mimic-base` is the bare persona base, used as the control in `make train-sample`.
 
-The proxy does not gate on a model list of its own: it forwards *any* non-autocomplete model name to the swappable slot and lets llama-server decide. `models.ini` is the single source of truth for what's actually available.
+The proxy does not gate on a model list of its own: it forwards *any* model name to the swappable slot and lets llama-server decide. `models.ini` is the single source of truth for what's actually available.
 
 ### Switching a model or quant
 
-1. Edit the preset in `models.ini` (or the `--model` flag in `docker-compose.yml` for the permanent slot).
-2. Add or update the entry in `scripts/download_models.py`.
-3. `make models-download`
-4. `make restart-llama-swappable` (or `restart-llama-permanent`).
+1. Edit the preset in `models.ini`; `scripts/download_models.py` derives its list from it.
+2. `make models-download`
+3. `make restart-llama-swappable`. A plain `up -d` does not pick up a `models.ini` edit, because the file is a bind mount.
 
 ## Discord Bot
 

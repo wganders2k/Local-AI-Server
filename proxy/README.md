@@ -6,8 +6,7 @@ It has no GPU access. Giving it any would be a second answer to a question the a
 
 ## What it does
 
-- **Routes autocomplete requests to the permanent slot** (`:11435`) — no lock, no arbiter, no swap. If `AUTOCOMPLETE_ENABLED` is false, these get a `503` instead.
-- **Serialises every other request** through an `asyncio.Lock`, one at a time.
+- **Serialises every model request** through an `asyncio.Lock`, one at a time.
 - **Acquires the GPU lease before touching the backend.** The router auto-loads on first request, so the card has to be clear before anything is forwarded. One call to the arbiter stops whatever is running, waits for the driver, and answers. A refusal becomes a `503` with `Retry-After: 30`.
 - **Releases the lease only when idle** — when in-flight count and queue depth both hit zero, not after each request, so a burst of Discord traffic does not hand the card away mid-conversation.
 - **Evicts the resident model after an idle period** so background jobs get a real VRAM window (see below).
@@ -19,7 +18,7 @@ It has no GPU access. Giving it any would be a second answer to a question the a
 
 **It does not report GPU state.** `/status` returns proxy state only. What is on the card and why is `/gpu/status` on the arbiter — asking two services the same question is how they end up disagreeing.
 
-**It does not gate on the model list.** Any request carrying a model name that isn't an autocomplete alias goes to the swappable slot and llama-server decides whether it knows it; a request with no model in the body is forwarded unlocked (this is what makes `GET /v1/models` work). The model list is whatever `models.ini` defines — the proxy doesn't parse it, `GET /v1/models` just forwards to `llama-swappable` and surfaces its own parse.
+**It does not gate on the model list.** Any request carrying a model name goes to the swappable slot and llama-server decides whether it knows it; a request with no model in the body is forwarded unlocked (this is what makes `GET /v1/models` work). The model list is whatever `models.ini` defines — the proxy doesn't parse it, `GET /v1/models` just forwards to `llama-swappable` and surfaces its own parse.
 
 ## Idle eviction
 
@@ -52,11 +51,9 @@ GPU metrics are the arbiter's — it is the only component that reads the card.
 
 | Variable | Default | Description |
 |---|---|---|
-| `LLAMA_PERMANENT` | `http://localhost:11435` | Permanent slot |
 | `LLAMA_SWAPPABLE` | `http://localhost:11434` | Swappable slot |
 | `ARBITER_URL` | `http://arbiter:11438` | The proxy's whole interface to the GPU |
 | `ARBITER_JOB_NAME` | `llm` | Which entry in `arbiter/jobs.yaml` this proxy is. It sends this and nothing else — priority and VRAM are decided there. An unknown name falls back to priority 0 and is logged loudly |
-| `AUTOCOMPLETE_ENABLED` | `true` | False makes the `autocomplete` alias return 503 |
 | `IDLE_EVICT_ENABLED` | `true` | |
 | `IDLE_EVICT_SECONDS` | `600` | Idle time before unloading |
 | `IDLE_EVICT_POLL_SECONDS` | `30` | How often the evictor checks |

@@ -20,13 +20,10 @@ logger = logging.getLogger(__name__)
 from config import (
     ARBITER_JOB_NAME,
     ARBITER_URL,
-    AUTOCOMPLETE_ENABLED,
-    AUTOCOMPLETE_MODELS,
     IDLE_EVICT_ENABLED,
     IDLE_EVICT_POLL_SECONDS,
     IDLE_EVICT_SECONDS,
     IDLE_EVICT_UNLOAD_TIMEOUT,
-    LLAMA_PERMANENT,
     LLAMA_SWAPPABLE,
 )
 from arbiter import ArbiterClient
@@ -447,21 +444,6 @@ async def history_summary() -> list[dict]:
 async def proxy(path: str, request: Request) -> Response:
     body_bytes = await request.body()
     model = _extract_model(body_bytes)
-
-    # Fast path: autocomplete models bypass the lock entirely
-    if model in AUTOCOMPLETE_MODELS:
-        if not AUTOCOMPLETE_ENABLED:
-            logger.warning(f"Autocomplete model '{model}' requested but autocomplete is disabled")
-            return Response(
-                content=json.dumps({
-                    "error": "autocomplete_disabled",
-                    "message": "The autocomplete model is currently disabled. Enable it with 'make enable-autocomplete'."
-                }),
-                status_code=503,
-                media_type="application/json",
-            )
-        logger.debug(f"Fast path: {model} → permanent slot")
-        return await _forward(LLAMA_PERMANENT, request, model=model)
 
     # Swappable path: serialise via lock
     if model is not None:

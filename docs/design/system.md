@@ -33,14 +33,13 @@ The swappable slot runs `--models-max 1`: exactly one model resident at a time, 
 
 | Slot | Purpose | Model | Quant | VRAM |
 |---|---|---|---|---|
-| Permanent (`:11435`) | Autocomplete | `qwen2.5-coder-1.5b` | Q8_0 | ~1.65 GB |
 | Swappable (`:11434`) | Brain (coding) | Qwen3.6-35B-A3B | UD-IQ4_NL | ~18 GB |
 | Swappable (`:11434`) | Brain dense | Qwen3.6-27B | Q4_K_M | ~16.8 GB |
 | Swappable (`:11434`) | Lore agent | Qwen3.6-27B Heretic | Q4_K_M | ~16.9 GB |
 | Swappable (`:11434`) | Lore / Open WebUI chat | gemma-4-26B-A4B-it | UD-Q4_K_XL | ~17.6 GB |
 | Swappable (`:11434`) | Mimic personas (×6) | Qwen3.5-35B-A3B-Uncensored | IQ4_XS | ~18 GB (presets currently disabled) |
 
-The permanent slot is optional and sits behind the `autocomplete` compose profile. Disabling it (`make disable-autocomplete`) frees its footprint and returns `503` for the `autocomplete` alias; nothing else is affected.
+There used to be a second, permanent slot (`llama-permanent`, :11435) with an always-resident autocomplete model. It was removed on 2026-11-12: it went unused and held 2.2 GB around the clock. It can't return as a preset either, because with `--models-max 1` every completion would evict the chat model.
 
 **Why the headroom figure matters.** llama-server keeps a model resident once loaded — it does not release VRAM between requests. So "no request in flight" is not the same as "the card is free", and a background job that trusted an idle proxy would OOM against a still-resident 18 GB model. Two mechanisms address this: every grant is checked against a live NVML reading (§4b), and the proxy unloads the resident model after `IDLE_EVICT_SECONDS` of quiet (§6.2).
 
@@ -87,13 +86,13 @@ Two models serve this area, and the split is deliberate:
 │   │  serialises via lock │              │  reads NVML; starts       │  │
 │   │  idle-evicts         │              │  nothing                  │  │
 │   └──────────────────────┘              └───────────────────────────┘  │
-│        │              │                        ▲            ▲          │
-│        ▼              ▼                        │            │          │
-│  ┌─────────────┐  ┌──────────────────────┐     │            │          │
-│  │ llama       │  │ llama-swappable      │     │            │          │
-│  │ -permanent  │  │ :11434  router mode  │     │            │          │
-│  │ :11435      │  │ --models-max 1       │     │            │          │
-│  └─────────────┘  └──────────────────────┘     │            │          │
+│                       │                        ▲            ▲          │
+│                       ▼                        │            │          │
+│                   ┌──────────────────────┐     │            │          │
+│                   │ llama-swappable      │     │            │          │
+│                   │ :11434  router mode  │     │            │          │
+│                   │ --models-max 1       │     │            │          │
+│                   └──────────────────────┘     │            │          │
 │                                                 │            │          │
 │                               ┌─────────────────┘     ┌──────┴───────┐ │
 │                               │ video-processing      │ lora-trainer │ │
@@ -111,12 +110,11 @@ Two models serve this area, and the split is deliberate:
 
 ### 4a. Inference backend
 
-Two `llama-server` instances share `NVIDIA_VISIBLE_DEVICES=0`:
+One `llama-server` instance serves every model:
 
 | Instance | Port | Role | Config |
 |---|---|---|---|
-| `llama-permanent` | `:11435` | Autocomplete — loaded at startup, never evicted | `--model` flag in `docker-compose.yml`; `autocomplete` profile |
-| `llama-swappable` | `:11434` | Everything else — router mode | `--models-preset /models.ini --models-max 1` |
+| `llama-swappable` | `:11434` | Router mode, one model resident at a time | `--models-preset /models.ini --models-max 1` |
 
 The router loads a model on first request and evicts the previous one; there is no explicit load API to call. The proxy enforces that only one swappable request is in flight at a time via `asyncio.Lock`.
 
@@ -177,12 +175,11 @@ All swappable models are defined in [`models.ini`](models.ini). The proxy refere
 
 ### 5.1 Configuration is single-source, by slot
 
-Model identity lives in exactly two places, by slot: `models.ini` (swappable: alias → GGUF
-path + inference params) and the `llama-permanent` `command:` in `docker-compose.yml`
-(permanent/autocomplete). `scripts/download_models.py` derives its swappable download list
+Model identity lives in `models.ini` (alias → GGUF path + inference params).
+`scripts/download_models.py` derives its swappable download list
 from `models.ini` directly, so adding or removing a local model is a `models.ini` edit and
 nothing else. The proxy does not parse any model list of its own — it forwards any
-non-autocomplete model name to the swappable slot and lets llama-server decide.
+model name to the swappable slot and lets llama-server decide.
 
 Everywhere else that names an alias (`discord-bot/config.py`'s `AGENT_MODEL`,
 `history-service`'s `IMAGE_CAPTION_MODEL`) is a client's own choice of which alias to call,
@@ -204,9 +201,6 @@ The proxy is **model-aware** but **content-blind**. It knows which model is load
 
 ```python
 model = extract_model_from_body(request)
-
-if model in AUTOCOMPLETE_MODELS:          # fast path — no lock, no arbiter
-    return forward(LLAMA_PERMANENT)       # 503 if AUTOCOMPLETE_ENABLED is false
 
 if model is not None:                     # every other named model
     granted = arbiter.acquire()           # blocks until junior tenants are gone
@@ -243,7 +237,6 @@ See [`docker-compose.yml`](docker-compose.yml) for full definitions.
 | Service | Image / build | Port | Profile | Notes |
 |---|---|---|---|---|
 | `llama-swappable` | `ghcr.io/ggml-org/llama.cpp:server-cuda` | `:11434` | — | Router mode, `--models-max 1`, `--jinja` |
-| `llama-permanent` | `ghcr.io/ggml-org/llama.cpp:server-cuda` | `:11435` | `autocomplete` | Single model, `--parallel 3` |
 | `proxy` | `./proxy` | `:11436` | — | No GPU access at all |
 | `arbiter` | `./arbiter` | `127.0.0.1:11438` | — | NVML only (`utility`), no CUDA |
 | `history-service` | `./history-service` | `127.0.0.1:11437` | — | Background; APScheduler |

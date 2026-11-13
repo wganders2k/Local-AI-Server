@@ -1,7 +1,6 @@
 import os
 
-# llama-server instance URLs — injected by Docker Compose
-LLAMA_PERMANENT = os.environ.get("LLAMA_PERMANENT", "http://localhost:11435")
+# The llama-server router — injected by Docker Compose
 LLAMA_SWAPPABLE = os.environ.get("LLAMA_SWAPPABLE", "http://localhost:11434")
 
 # The GPU arbiter. The proxy asks it for the card and tells it when idle; it owns
@@ -14,11 +13,6 @@ ARBITER_URL = os.environ.get("ARBITER_URL", "http://arbiter:11438")
 # how the LLM ranks against the trainer is an edit to that file, not to this one.
 ARBITER_JOB_NAME = os.environ.get("ARBITER_JOB_NAME", "llm")
 
-# Autocomplete model toggle — set to "false" to disable the permanent autocomplete
-# model and free ~1.2 GB VRAM. When disabled, requests for the "autocomplete"
-# model will receive a 503 error. Controlled by AUTOCOMPLETE_ENABLED env var.
-AUTOCOMPLETE_ENABLED = os.environ.get("AUTOCOMPLETE_ENABLED", "true").lower() not in ("false", "0", "no")
-
 # Idle eviction — llama-server's router keeps a model resident once loaded, so
 # without this an external job would never get a VRAM window on a busy day.
 # After this many seconds with no LLM request, unload the resident model and let
@@ -30,14 +24,3 @@ IDLE_EVICT_SECONDS = float(os.environ.get("IDLE_EVICT_SECONDS", "600"))
 # actually take effect.
 IDLE_EVICT_POLL_SECONDS = float(os.environ.get("IDLE_EVICT_POLL_SECONDS", "30"))
 IDLE_EVICT_UNLOAD_TIMEOUT = float(os.environ.get("IDLE_EVICT_UNLOAD_TIMEOUT", "60"))
-
-
-# Models that always route to the permanent slot — never swapped, never locked.
-# The autocomplete model is loaded at llama-server startup and stays resident.
-# Using a stable alias ("autocomplete") decouples the proxy from the underlying
-# model — future model upgrades only require updating docker-compose.yml and
-# re-downloading the GGUF, not the proxy.
-AUTOCOMPLETE_MODELS: set[str] = {
-    "autocomplete",
-}
-

@@ -1,44 +1,10 @@
 services:
   # ──────────────────────────────────────────────────────────
-  # llama-server — Permanent slot (:11435)
-  # Hosts the autocomplete model (Qwen3.5-2B IQ4_NL) forever.
-  # Never swapped. Loaded at startup, stays resident.
-  # ──────────────────────────────────────────────────────────
-  llama-permanent:
-    image: ghcr.io/ggml-org/llama.cpp:server-cuda
-    restart: unless-stopped
-    profiles: ["autocomplete"]
-    runtime: nvidia
-    environment:
-      - NVIDIA_VISIBLE_DEVICES=0
-    ports:
-      - 11435:8080
-    volumes:
-      - ${MODELS_DIR:-/srv/models}:/models:ro
-    command: > #--model /models/unsloth/Qwen3.5-2B-GGUF/Qwen3.5-2B-IQ4_NL.gguf 
-      --model /models/ggml-org/Qwen2.5-Coder-1.5B-Q8_0-GGUF/qwen2.5-coder-1.5b-q8_0.gguf
-      --alias autocomplete --host 0.0.0.0 --port 8080 --n-gpu-layers -1 --ctx-size 4096
-      --n-predict 256 -fa on --cache-type-k q4_0 --cache-type-v q4_0 --parallel 3 --log-prefix
-      --temp 0.7 --top-p 0.9 --top-k 40 --repeat-penalty 1.1
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - capabilities:
-                - gpu
-    healthcheck:
-      test:
-        - CMD
-        - curl
-        - -f
-        - http://localhost:8080/health
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
-  # ──────────────────────────────────────────────────────────
   # llama-server — Swappable slot (:11434)
-  # Router mode: hosts all non-autocomplete models.
+  # Router mode: hosts every model. (There was also a permanent slot with an
+  # always-resident autocomplete model; removed 2026-11-12 — unused, and its
+  # 2.2 GB was resident around the clock. It cannot come back as a preset
+  # here either: --models-max 1 would evict the chat model on every keystroke.)
   # Loads a model on first request, evicts when a different
   # model is requested. The proxy serialises access via lock.
   # ──────────────────────────────────────────────────────────
@@ -197,7 +163,6 @@ services:
       arbiter:
         condition: service_healthy
     environment:
-      - LLAMA_PERMANENT=http://llama-permanent:8080
       - LLAMA_SWAPPABLE=http://llama-swappable:8080
       - ARBITER_URL=http://arbiter:11438
       # Which entry in arbiter/jobs.yaml this proxy is. It sends only this name;
@@ -205,7 +170,6 @@ services:
       # job in that file — an unknown name is granted the top rank as a fallback,
       # which keeps the LLM answering but means it is running on invented policy.
       - ARBITER_JOB_NAME=llm
-      - AUTOCOMPLETE_ENABLED=${AUTOCOMPLETE_ENABLED:-true}
       # Unload the resident model after this long idle, so the arbiter has real
       # headroom to offer a background job. Nothing else may unload llama-server's
       # models, which is why this stays here rather than moving to the arbiter.

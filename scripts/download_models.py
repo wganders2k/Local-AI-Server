@@ -12,10 +12,6 @@ script needs no matching edit. A section's HuggingFace repo id is assumed to be
 its on-disk <publisher>/<repo> path, with any exception listed in
 HF_REPO_OVERRIDES below.
 
-The permanent slot (autocomplete) is configured directly in docker-compose.yml
-(the `llama-permanent` command:), not models.ini, so its GGUFs are listed
-explicitly in PERMANENT_MODELS.
-
 Usage:
   python scripts/download_models.py [--models-dir /path/to/models] [--dry-run]
 
@@ -27,11 +23,9 @@ Environment variables:
   MODELS_DIR     — Override default model storage directory (default: /srv/models)
 
 To add or change a model:
-  1. Swappable: add/edit a [section] in models.ini.
-     Permanent: edit PERMANENT_MODELS below and the llama-permanent command:
-     in docker-compose.yml.
+  1. Add/edit a [section] in models.ini.
   2. Run: make models-download
-  3. Run: make restart-llama-swappable  (or restart-llama-permanent)
+  3. Run: make restart-llama-swappable
 """
 
 import argparse
@@ -51,30 +45,6 @@ except ImportError:
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MODELS_INI_PATH = REPO_ROOT / "models.ini"
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Permanent slot (:11435) — configured directly in docker-compose.yml's
-# llama-permanent command:, not derived. Kept as an explicit list here so
-# `make models-download` still fetches both candidate GGUFs even though only
-# one is loaded at a time; swap back by editing the command: line, no re-fetch
-# needed.
-# ──────────────────────────────────────────────────────────────────────────────
-PERMANENT_MODELS = [
-    {
-        "repo_id":   "unsloth/Qwen3.5-2B-GGUF",
-        "filename":  "Qwen3.5-2B-IQ4_NL.gguf",
-        "local_dir": "unsloth/Qwen3.5-2B-GGUF",
-        "slot":      "permanent",
-        "notes":     "Autocomplete model — ~1.21 GB VRAM",
-    },
-    {
-        "repo_id":   "ggml-org/Qwen2.5-Coder-1.5B-Q8_0-GGUF",
-        "filename":  "qwen2.5-coder-1.5b-q8_0.gguf",
-        "local_dir": "ggml-org/Qwen2.5-Coder-1.5B-Q8_0-GGUF",
-        "slot":      "permanent",
-        "notes":     "Autocomplete model — ~1.65 GB VRAM",
-    },
-]
 
 # Cases where a GGUF's on-disk <publisher>/<repo> path (as used in models.ini
 # and MODELS_DIR) doesn't match its actual HuggingFace repo id.
@@ -203,7 +173,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--slot",
-        choices=["permanent", "swappable", "all"],
+        choices=["swappable", "all"],
         default="all",
         help="Download only models for a specific slot (default: all)",
     )
@@ -224,7 +194,7 @@ def main() -> None:
     if args.slot != "all":
         print(f"  Slot filter: {args.slot} only")
 
-    all_models = PERMANENT_MODELS + load_swappable_models(models_ini_path)
+    all_models = load_swappable_models(models_ini_path)
 
     # Filter by slot if requested
     models_to_download = [

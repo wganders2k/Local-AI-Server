@@ -26,8 +26,8 @@
 * ~~`merge.py` doesn't exist~~: replaced by `export_adapter.py`, which writes a GGUF LoRA over a shared base rather than a merged model.
 * ~~Whether to train on per-member history at all~~: decided 2026-11-04, with the members' agreement.
 * ~~Consolidate all model config to one source of truth~~ — model identity now lives in
-  exactly two places: `models.ini` (swappable slot) and the `llama-permanent` command:
-  in `docker-compose.yml` (permanent slot). `proxy/config.py`'s `SWAPPABLE_MODELS` set is
+  `models.ini` (the permanent autocomplete slot was removed
+  2026-11-12). `proxy/config.py`'s `SWAPPABLE_MODELS` set is
   gone (it was advisory only); `scripts/download_models.py` derives its swappable download
   list from `models.ini` directly.
 * ~~`proxy/system_prompts.py` / `system_prompts.ini` are dead code~~ — both deleted; no

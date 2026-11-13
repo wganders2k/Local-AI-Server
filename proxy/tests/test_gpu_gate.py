@@ -154,18 +154,6 @@ async def test_the_arbiter_is_told_when_the_last_request_finishes(client, backen
     assert "release" in arbiter.calls
 
 
-async def test_autocomplete_never_touches_the_arbiter(client, backend, arbiter):
-    """
-    The permanent slot is always resident and never competes for the swappable
-    model's VRAM. Acquiring for it would stop a training run for nothing.
-    """
-    r = await client.post("/v1/chat/completions", json={"model": "autocomplete"})
-
-    assert r.status_code == 200
-    assert backend.calls == ["autocomplete"]
-    assert arbiter.calls == []
-
-
 # -- what goes on the wire --
 
 async def test_the_proxy_sends_its_name_and_nothing_else():

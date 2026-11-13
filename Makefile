@@ -22,7 +22,6 @@ endif
 	llama-ps llama-models \
 	check-gpu \
 	models-download \
-	enable-autocomplete disable-autocomplete status-autocomplete \
 	dce-export-full dce-export-channel dce-export-guild dce-help \
 	dce-evaluate history-refresh \
 	rag-ingest rag-status \
@@ -64,7 +63,7 @@ help:
 	@echo "  ── Status ─────────────────────────────────────────────"
 	@echo "  status              Show running containers and health"
 	@echo "  check-gpu           Verify GPU is visible inside llama-server containers"
-	@echo "  llama-ps            Show models currently loaded in both llama-server instances"
+	@echo "  llama-ps            Show models known to llama-server and which are loaded"
 	@echo "  llama-models        List all available models in both llama-server instances"
 	@echo ""
 	@echo "  ── Per-service restart ─────────────────────────────────"
@@ -82,21 +81,14 @@ help:
 	@echo "  models-download     Download all GGUF model files from HuggingFace"
 	@echo "                        Skips files already present. Run before first 'make up'."
 	@echo "                        Usage: make models-download"
-	@echo "                               make models-download SLOT=permanent"
 	@echo "                               make models-download SLOT=swappable"
 	@echo "                               make models-download DRY_RUN=1"
 	@echo "                        Set HF_TOKEN env var for private/gated repos."
 	@echo ""
-	@echo "  ── Autocomplete Model Toggle ──────────────────────────"
-	@echo "  enable-autocomplete   Enable the permanent autocomplete model (~1.2 GB VRAM)"
-	@echo "  disable-autocomplete  Disable the permanent autocomplete model (free ~1.2 GB VRAM)"
-	@echo "  status-autocomplete   Show whether autocomplete is enabled or disabled"
-	@echo ""
 	@echo "  To add or change a model:"
-	@echo "    1. Edit models.ini (swappable) or docker-compose.yml --model flag (permanent)"
-	@echo "    2. Add/update the entry in scripts/download_models.py"
-	@echo "    3. Run: make models-download"
-	@echo "    4. Run: make restart  (or restart-llama-swappable / restart-llama-permanent)"
+	@echo "    1. Edit models.ini"
+	@echo "    2. Run: make models-download"
+	@echo "    3. Run: make restart-llama-swappable"
 	@echo ""
 	@echo "  ── DiscordChatExporter ──────────────────────────────────"
 	@echo "  dce-help            Show DCE CLI help"
@@ -184,9 +176,9 @@ logs-proxy:
 logs-bot:
 	docker compose logs -f discord-bot
 
-## Tail both llama-server instance logs
+## Tail llama-server logs
 logs-llama:
-	docker compose logs -f llama-permanent llama-swappable
+	docker compose logs -f llama-swappable
 
 ## Tail Open WebUI logs only
 logs-openwebui:
@@ -206,21 +198,12 @@ logs-history:
 status:
 	docker compose ps
 
-## Verify the GPU is visible inside both llama-server containers
+## Verify the GPU is visible inside the llama-server container
 check-gpu:
-	@echo "=== llama-permanent GPU check ==="
-	docker compose exec llama-permanent nvidia-smi
-	@echo ""
-	@echo "=== llama-swappable GPU check ==="
 	docker compose exec llama-swappable nvidia-smi
 
-## Show models currently loaded (in VRAM) in both llama-server instances
-## Uses the OpenAI-compatible /v1/models endpoint
+## Show the models the router knows and which are loaded (in VRAM)
 llama-ps:
-	@echo "=== llama-permanent (:11435) — available models ==="
-	curl -s http://localhost:11435/v1/models | python3 -m json.tool 2>/dev/null || echo "(not running)"
-	@echo ""
-	@echo "=== llama-swappable (:11434) — available models ==="
 	curl -s http://localhost:11434/v1/models | python3 -m json.tool 2>/dev/null || echo "(not running)"
 
 ## Alias for llama-ps
@@ -247,10 +230,6 @@ restart-rag:
 ## Restart llama-swappable only (picks up models.ini changes)
 restart-llama-swappable:
 	docker compose restart llama-swappable
-
-## Restart llama-permanent only
-restart-llama-permanent:
-	docker compose restart llama-permanent
 
 # ── Shells ─────────────────────────────────────────────────
 
@@ -293,18 +272,16 @@ rag-status:
 ## A Python venv is automatically created in scripts/.venv/ on first run.
 ##
 ## Options:
-##   SLOT=permanent|swappable|all   Download only models for a specific slot (default: all)
+##   SLOT=swappable|all             Download only models for a specific slot (default: all)
 ##   DRY_RUN=1                      Print what would be downloaded without downloading
 ##   MODELS_DIR=/path/to/models     Override model storage directory (default: /srv/models)
 ##
 ## Set HF_TOKEN environment variable for private or gated HuggingFace repos.
 ##
 ## To add or change a model:
-##   1. Swappable slot: edit models.ini (the download list is derived from it).
-##      Permanent slot: edit PERMANENT_MODELS in scripts/download_models.py and
-##      the llama-permanent command: in docker-compose.yml.
+##   1. Edit models.ini (the download list is derived from it).
 ##   2. Run: make models-download
-##   3. Run: make restart-llama-swappable  (or restart-llama-permanent)
+##   3. Run: make restart-llama-swappable
 VENV := scripts/.venv
 PYTHON := $(VENV)/bin/python3
 PIP := $(VENV)/bin/pip
@@ -322,59 +299,6 @@ models-download:
 		$(if $(MODELS_DIR),--models-dir $(MODELS_DIR),) \
 		$(if $(SLOT),--slot $(SLOT),) \
 		$(if $(DRY_RUN),--dry-run,)
-
-# ── Autocomplete Model Toggle ────────────────────────────────
-# Enable or disable the permanent autocomplete model.
-# When disabled, llama-permanent is not started (saves ~1.2 GB VRAM).
-# The .env file is updated and the stack is restarted accordingly.
-
-## Enable the permanent autocomplete model (~1.2 GB VRAM)
-enable-autocomplete:
-	@echo "Enabling autocomplete model..."
-	@if [ -f .env ]; then \
-		if grep -q '^AUTOCOMPLETE_ENABLED=' .env; then \
-			sed -i 's/^AUTOCOMPLETE_ENABLED=.*/AUTOCOMPLETE_ENABLED=true/' .env; \
-		else \
-			echo 'AUTOCOMPLETE_ENABLED=true' >> .env; \
-		fi \
-	else \
-		echo "Warning: .env not found. Copy .env.example to .env first."; \
-	fi
-	@echo "Starting stack with autocomplete profile..."
-	docker compose --profile autocomplete up -d --build
-	@echo ""
-	@echo "✓ Autocomplete model enabled."
-	@echo "  Port :11435 is now active for the autocomplete model."
-
-## Disable the permanent autocomplete model (free ~1.2 GB VRAM)
-disable-autocomplete:
-	@echo "Disabling autocomplete model..."
-	@if [ -f .env ]; then \
-		if grep -q '^AUTOCOMPLETE_ENABLED=' .env; then \
-			sed -i 's/^AUTOCOMPLETE_ENABLED=.*/AUTOCOMPLETE_ENABLED=false/' .env; \
-		else \
-			echo 'AUTOCOMPLETE_ENABLED=false' >> .env; \
-		fi \
-	else \
-		echo "Warning: .env not found. Copy .env.example to .env first."; \
-	fi
-	@echo "Stopping llama-permanent and restarting proxy..."
-	docker compose stop llama-permanent 2>/dev/null || true
-	docker compose up -d --build
-	@echo ""
-	@echo "✓ Autocomplete model disabled."
-	@echo "  ~1.2 GB VRAM freed. Requests to 'autocomplete' will get 503."
-
-## Show whether autocomplete is enabled or disabled
-status-autocomplete:
-	@ENABLED=$$(grep -o 'AUTOCOMPLETE_ENABLED=[^ ]*' .env 2>/dev/null | cut -d= -f2); \
-	if [ -z "$$ENABLED" ]; then \
-		ENABLED="true (default)"; \
-	fi; \
-	echo "Autocomplete model: $$ENABLED"; \
-	echo ""; \
-	echo "llama-permanent container:"; \
-	docker compose ps llama-permanent 2>/dev/null || echo "  (not running)"
 
 # ── LoRA Training ──────────────────────────────────────────
 # A training run is submitted by a human and by nothing else. The arbiter used
@@ -565,7 +489,7 @@ test-venvs:
 
 ## Run every suite, even after one fails, so a single break doesn't hide others.
 ## `env -i` because this Makefile exports .env: the services read config at
-## import time, and the host's AUTOCOMPLETE_ENABLED=false failed a proxy test
+## import time, and a host .env setting once failed a proxy test
 ## that passes in CI, where no .env exists.
 test:
 	@failed=""; \
