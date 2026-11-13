@@ -50,7 +50,7 @@ MIMIC_LORA_DIR: str = os.environ.get("MIMIC_LORA_DIR", persona_roster.LORA_DIR)
 @dataclass(frozen=True)
 class Persona:
     key: str
-    display_name: str  # what its system prompt calls the member, and its public name
+    display_name: str  # its public name (from the roster); never part of a prompt
     user_ids: tuple[str, ...]  # every account the member posted from, old first
     adapter_id: int
     # How the live adapter's training prompts were shaped, so a served prompt is
@@ -205,4 +205,4 @@ class PersonaCatalog:
         """
         if persona.no_system:
             return None
-        return mimic_format.render_persona_prompt(persona.key, persona.display_name)
+        return mimic_format.render_persona_prompt(persona.key)

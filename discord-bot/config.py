@@ -161,6 +161,10 @@ LORE_CONTEXT_PATH: str = os.environ.get(
     "LORE_CONTEXT_PATH", "bot_context/lore/context.md"
 )
 
+# The title on /lore's answer embeds. Set in .env to name the server; the repo
+# names no server.
+LORE_EMBED_TITLE: str = os.environ.get("LORE_EMBED_TITLE", "\U0001f4da Lore")
+
 
 # ──────────────────────────────────────────────────────────────
 # Persona Configuration

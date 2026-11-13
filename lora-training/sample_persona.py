@@ -79,12 +79,12 @@ def manifest_name(spec: str, adapters: list[str]) -> str | None:
     return "candidate" if spec == "candidate" else spec if spec in adapters else None
 
 
-def system_for(spec: str, adapters: list[str], persona: str, display_name: str, no_system: list[str]) -> str | None:
+def system_for(spec: str, adapters: list[str], persona: str, no_system: list[str]) -> str | None:
     """The system prompt `spec` was trained with, by its manifest, or None (overridden by --no-system)."""
     owner = manifest_name(spec, adapters)
     if owner is None or spec in no_system or persona_roster.trained_format(owner, LORA_DIR).get("no_system"):
         return None
-    return mimic_format.render_persona_prompt(persona, display_name)
+    return mimic_format.render_persona_prompt(persona)
 
 
 def shaped(messages: list[dict], system: str | None) -> list[dict]:
@@ -137,7 +137,6 @@ def main() -> int:
         ap.error("no candidate exported yet — make train-export-latest PERSONA=<persona> CANDIDATE=1")
 
     eval_path = args.eval_path or os.path.join("/archive/training", args.persona, "eval.jsonl")
-    display_name = persona_roster.load_roster()[args.persona]["display_name"]
     prompts = pick_prompts(eval_path, args.k, args.seed)
 
     # One model at a time over every prompt, not alternating per prompt: the
@@ -149,7 +148,7 @@ def main() -> int:
         for spec in args.models:
             model, lora = resolve(spec, adapters)
             print(f"Generating {len(prompts)} replies from {spec} ({model})...", file=sys.stderr)
-            system = system_for(spec, adapters, args.persona, display_name, args.no_system)
+            system = system_for(spec, adapters, args.persona, args.no_system)
             print(f"  ...{'with' if system else 'without'} the system prompt", file=sys.stderr)
             outputs[spec] = [
                 generate(client, model, lora, shaped(p["prompt"], system), args.max_tokens) for p in prompts

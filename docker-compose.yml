@@ -278,6 +278,7 @@ services:
       - RAG_SERVICE_URL=http://rag-service:8001
       - RAG_ENABLED=${RAG_ENABLED:-true}
       - LORE_CONTEXT_PATH=${LORE_CONTEXT_PATH:-bot_context/lore/context.md}
+      - LORE_EMBED_TITLE=${LORE_EMBED_TITLE:-📚 Lore}
       # Live image captions for the mimic chat controller. Leave off until
       # [mimic-multi] has a vision projector (needs a newer llama.cpp; see models.ini).
       - VISION_MIMIC_ENABLED=${VISION_MIMIC_ENABLED:-false}

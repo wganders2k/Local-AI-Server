@@ -83,9 +83,10 @@ def test_a_broken_roster_means_no_personas_rather_than_a_crash(tmp_path):
     assert PersonaCatalog(training_dir=str(tmp_path / "missing"), adapters=["mimic_user1"]).all() == []
 
 
-def test_system_prompt_is_the_trained_one(catalog):
+def test_system_prompt_is_the_trained_one_and_names_no_one(catalog):
+    """Keyed by the persona alone: the member's name never enters a prompt, a dataset or an adapter."""
     prompt = catalog.system_prompt(catalog.get("mimic_user1"))
-    assert prompt.startswith("You are mimic_user1") and "mimics User1's Discord personality" in prompt
+    assert prompt.startswith("You are mimic_user1") and "User1" not in prompt
 
 
 def test_prompt_shape_comes_from_the_live_adapters_manifest(training, tmp_path):

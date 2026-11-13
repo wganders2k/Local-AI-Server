@@ -242,7 +242,6 @@ def run(args) -> int:
         probes = [json.loads(line) for line in fh]
     if args.limit:
         probes = probes[: args.limit * 2]
-    display_name = sp.persona_roster.load_roster()[args.persona]["display_name"]
 
     replies: dict[str, list[str]] = {}
     # Judge calls are batch traffic the proxy holds back while /mimic is busy: wait, never resend.
@@ -251,7 +250,7 @@ def run(args) -> int:
         # Every model's replies first, then all judging: one model swap per model, not per probe.
         for spec in args.models:
             model, lora = sp.resolve(spec, adapters)
-            system = sp.system_for(spec, adapters, args.persona, display_name, args.no_system)
+            system = sp.system_for(spec, adapters, args.persona, args.no_system)
             print(f"Generating {len(probes)} replies from {spec} "
                   f"({'with' if system else 'without'} the system prompt)...", file=sys.stderr)
             replies[spec] = [

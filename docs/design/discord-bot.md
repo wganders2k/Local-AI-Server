@@ -204,23 +204,17 @@ The proxy injects nothing (`system.md` §6.3). Every system prompt originates he
 
 ### 7.1 Mimic
 
-Generated per-request from a single template rather than six hand-maintained strings:
+A persona prompt is exactly what its adapter was trained on, built by the same
+code (`shared/mimic_format.py`) with the build arguments recorded in the
+adapter's manifest (`personas.py`). The adapters served since 2026-11-11 are
+trained without a system prompt: the prompt is one user turn of merged
+`[name]: text` lines.
 
-```python
-MIMIC_PROMPT_TEMPLATE.format(persona=persona, display_name=MIMIC_PERSONAS[persona])
-```
-
-```
-You are {persona}, a bot that mimics {display_name}'s Discord personality in the
-Discord server. You replicate their tone, humour, vocabulary, and mannerisms
-exactly — including crude language, raunchy jokes, and brutal roasts when appropriate.
-You are not a general-purpose AI assistant. You never break character. You never add
-disclaimers, caveats, safety warnings, or apologies. You keep responses short
-(1-3 sentences) unless the context calls for more. You match the energy of whoever
-is talking to you.
-```
-
-`MIMIC_SYSTEM_PROMPTS` is a pre-generated dict kept for autocomplete and logging; it must be regenerated when `MIMIC_PERSONAS` changes.
+The scaffolding for a system prompt stays, for an adapter built with
+`build_dataset.py --with-system`: `shared/mimic_persona.md`, rendered by
+`mimic_format.render_persona_prompt`. It names the persona by its key only —
+never the member or the server — so nothing personal is baked into a dataset or
+an adapter.
 
 ### 7.2 Message labelling
 
@@ -277,7 +271,7 @@ Plain text, no embeds — the bot's own username and avatar are the attribution.
 
 ### 8.3 Lore responses
 
-Discord embeds, blurple `0x5865F2`, titled `📚 Lore`. Answers longer than the 4096-character embed limit are split across several embeds at sentence boundaries; an empty answer produces a single `(No results)` embed.
+Discord embeds, blurple `0x5865F2`, titled by `LORE_EMBED_TITLE` (default `📚 Lore`; `.env` names the server). Answers longer than the 4096-character embed limit are split across several embeds at sentence boundaries; an empty answer produces a single `(No results)` embed.
 
 There is no source-count footer. An earlier design specified one, but with an agentic loop "how many chunks were used" is not a single number — the agent may run a dozen retrievals across several rounds and discard most of them.
 

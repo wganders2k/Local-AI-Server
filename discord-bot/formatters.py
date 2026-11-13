@@ -10,7 +10,7 @@ code block or list is not cut mid-line. One splitter serves every caller.
 import re
 from typing import TYPE_CHECKING
 
-from config import MAX_EMBED_DESCRIPTION_LENGTH, MAX_MESSAGE_LENGTH
+from config import LORE_EMBED_TITLE, MAX_EMBED_DESCRIPTION_LENGTH, MAX_MESSAGE_LENGTH
 
 # Applied to persona posts and /chat replies. Models occasionally append
 # baked-in disclaimers that break character. Anchored to the end of the
@@ -101,7 +101,7 @@ def split_message(text: str, max_length: int = MAX_MESSAGE_LENGTH) -> list[str]:
     return chunks
 
 
-_EMBED_TITLE = "\U0001f4da Lore"
+_EMBED_TITLE = LORE_EMBED_TITLE
 _EMBED_COLOUR = 0x5865F2
 
 

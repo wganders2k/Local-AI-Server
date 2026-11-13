@@ -319,8 +319,8 @@ def test_split_holds_out_the_newest_examples():
 
 def test_the_shared_persona_template_renders():
     """The template both sides render — a new placeholder in it would break this."""
-    rendered = mimic_format.render_persona_prompt("mimic_user1", "Alice")
-    assert "mimic_user1" in rendered and "Alice" in rendered
+    rendered = mimic_format.render_persona_prompt("mimic_user1")
+    assert "mimic_user1" in rendered
     assert not rendered.endswith("\n")
 
 

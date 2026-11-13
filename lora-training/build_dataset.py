@@ -360,7 +360,7 @@ def main() -> int:
         aliases=load_aliases(args.names),
     )
     logger.info(f"Aliases: {len(opts.aliases)} member(s) renamed from {args.names}")
-    system_prompt = None if args.no_system else render_persona_prompt(args.persona, args.display_name)
+    system_prompt = None if args.no_system else render_persona_prompt(args.persona)
 
     examples, stats = build_examples(load_archive(args.archive), system_prompt, opts)
     if not examples:

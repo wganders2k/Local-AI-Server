@@ -90,14 +90,20 @@ MERGE_SECONDS = 600.0
 PERSONA_PROMPT_PATH = Path(__file__).with_name("mimic_persona.md")
 
 
-def render_persona_prompt(persona: str, display_name: str) -> str:
+def render_persona_prompt(persona: str) -> str:
     """
-    The system prompt a persona is trained on and served with. str.format, and
-    the file's trailing newline stripped — the rendering every adapter so far
-    was trained on, so changing either (or the file) retrains every persona.
+    The system prompt a persona is trained on and served with, for an adapter
+    built with --with-system. str.format, and the file's trailing newline
+    stripped; changing either (or the file) means retraining any adapter that
+    uses it.
+
+    It names the persona by its key only — never the member or the server — so
+    nothing personal is baked into a prompt, a dataset or an adapter. The
+    adapters served since 2026-11-11 are trained without a system prompt; this
+    stays so one can be brought back.
     """
     template = PERSONA_PROMPT_PATH.read_text(encoding="utf-8").rstrip("\n")
-    return template.format(persona=persona, display_name=display_name)
+    return template.format(persona=persona)
 
 
 # -- text --

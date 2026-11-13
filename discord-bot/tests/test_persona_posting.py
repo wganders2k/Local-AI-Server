@@ -110,7 +110,7 @@ def test_prompt_merges_turns_and_keeps_the_trained_window(catalog):
 
     out = prompt(catalog, msgs)
 
-    assert out[0]["role"] == "system" and "mimics Alice's" in out[0]["content"]
+    assert out[0]["role"] == "system" and "Alice" not in out[0]["content"]
     # context_n=3 from the build: the last three turns, oldest first.
     assert out[1] == {"role": "user", "content": "[bobby]: two\ntwo again\n[erin]: three\n[bobby]: four"}
 
@@ -118,7 +118,7 @@ def test_prompt_merges_turns_and_keeps_the_trained_window(catalog):
 def test_prompt_is_never_wider_than_training(catalog):
     r = reader(catalog)
     # Eight turns in the last eight minutes: a busy chat still shows only the trained three.
-    msgs = [r.to_line(message(WILL if i % 2 else BOB, str(i), minute=i)).msg for i in range(8)]
+    msgs = [r.to_line(message(ERIN if i % 2 else BOB, str(i), minute=i)).msg for i in range(8)]
 
     assert prompt(catalog, msgs)[1]["content"] == "[erin]: 5\n[bobby]: 6\n[erin]: 7"
 
