@@ -72,6 +72,13 @@ def arbiter(monkeypatch):
     return a
 
 
+@pytest.fixture(autouse=True)
+def batch_arbiter(monkeypatch):
+    a = FakeArbiter()
+    monkeypatch.setattr(main, "batch_arbiter", a)
+    return a
+
+
 @pytest.fixture
 def backend(monkeypatch):
     b = Backend()
@@ -85,6 +92,8 @@ def clean_state():
     main.state.last_request_at = None
     while main.state.llm_inflight:
         main.state.llm_request_finished()
+    main.state._interactive_active = 0
+    main.state.last_interactive_at = None
     yield
 
 
@@ -179,3 +188,39 @@ async def test_the_proxy_sends_its_name_and_nothing_else():
     await c.aclose()
 
     assert seen == [("/gpu/acquire", {"name": "llm"}), ("/gpu/release", {"name": "llm"})]
+
+
+# -- batch traffic --
+
+async def test_a_batch_model_asks_under_its_own_lower_ranked_name(client, backend, arbiter, batch_arbiter):
+    r = await client.post("/v1/chat/completions", json={"model": "judge"})
+
+    assert r.status_code == 200 and backend.calls == ["judge"]
+    assert batch_arbiter.calls[0] == "acquire"
+    assert "acquire" not in arbiter.calls
+
+
+async def test_a_batch_request_waits_out_interactive_traffic(client, backend, arbiter, monkeypatch):
+    """A person waits for at most the batch call already running, never for a queue of them."""
+    monkeypatch.setattr(main, "BATCH_YIELD_SECONDS", 0.3)
+    arbiter.block()
+    chat = asyncio.create_task(client.post("/v1/chat/completions", json={"model": "mimic-multi"}))
+    await asyncio.sleep(0.05)
+    judge = asyncio.create_task(client.post("/v1/chat/completions", json={"model": "judge"}))
+    await asyncio.sleep(0.2)
+    assert backend.calls == [], "the batch request jumped an interactive one"
+
+    arbiter.unblock()
+    await chat
+    await asyncio.sleep(0.1)
+    assert backend.calls == ["mimic-multi"], "the batch request did not wait out the quiet period"
+
+    await judge
+    assert backend.calls == ["mimic-multi", "judge"]
+
+
+async def test_both_leases_are_released_when_idle(client, backend, arbiter, batch_arbiter):
+    await client.post("/v1/chat/completions", json={"model": "judge"})
+    await asyncio.sleep(0)
+
+    assert "release" in batch_arbiter.calls and "release" in arbiter.calls

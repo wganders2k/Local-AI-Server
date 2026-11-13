@@ -125,7 +125,7 @@ def test_the_deployed_config_parses():
     jobs = load_jobs(os.path.join(here, "jobs.yaml"))
 
     by_name = {j.name: j for j in jobs}
-    assert set(by_name) == {"llm", "video-processing", "lora-trainer", "profile-segment"}
+    assert set(by_name) == {"llm", "llm-batch", "video-processing", "lora-trainer", "profile-segment"}
 
     # The ordering the whole design assumes, and the only place it is expressed:
     # interactive answers beat video work, which beats background training.
@@ -136,6 +136,11 @@ def test_the_deployed_config_parses():
     # means — but must never be the reason an interactive request waits.
     assert by_name["llm"].priority > by_name["profile-segment"].priority
     assert by_name["profile-segment"].priority > by_name["video-processing"].priority
+
+    # Batch LLM work (dataset labelling) yields to a person and to a deliberate
+    # benchmark, but still gets ahead of the video queue rather than waiting it out.
+    assert by_name["llm"].priority > by_name["profile-segment"].priority > by_name["llm-batch"].priority
+    assert by_name["llm-batch"].priority > by_name["video-processing"].priority
 
     # Nothing may share the LLM's rank: an equal priority does not preempt, so a
     # tie would silently make the LLM unable to take the card back.

@@ -18,8 +18,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 from config import (
+    ARBITER_BATCH_JOB_NAME,
     ARBITER_JOB_NAME,
     ARBITER_URL,
+    BATCH_MODELS,
+    BATCH_YIELD_SECONDS,
     IDLE_EVICT_ENABLED,
     IDLE_EVICT_POLL_SECONDS,
     IDLE_EVICT_SECONDS,
@@ -30,6 +33,8 @@ from arbiter import ArbiterClient
 from state import state
 
 arbiter = ArbiterClient(ARBITER_URL, ARBITER_JOB_NAME)
+# Batch models' requests ask under their own, lower-ranked name (config.BATCH_MODELS).
+batch_arbiter = ArbiterClient(ARBITER_URL, ARBITER_BATCH_JOB_NAME)
 
 # HTTP client — shared across all requests, reuses connections
 _http_client: httpx.AsyncClient | None = None
@@ -75,6 +80,7 @@ async def lifespan(app: FastAPI):
             pass
     await _http_client.aclose()
     await arbiter.aclose()
+    await batch_arbiter.aclose()
     logger.info("HTTP client closed")
 
 
@@ -181,6 +187,7 @@ async def _idle_evictor() -> None:
                 # unload lands would invite it to start a job under a resident
                 # model, which is the OOM this whole arrangement exists to avoid.
                 await arbiter.release()
+                await batch_arbiter.release()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -437,6 +444,30 @@ async def history_summary() -> list[dict]:
     return []
 
 
+def _finisher(batch: bool):
+    """
+    Drops a request's in-flight count exactly once, and tells the arbiter
+    when nothing is in flight. Returned per request, for every exit path.
+    """
+    released = False
+
+    def finish():
+        nonlocal released
+        if released:
+            return
+        released = True
+        state.llm_request_finished()
+        if not batch:
+            state.interactive_finished()
+        if state.llm_inflight == 0 and state.queue_depth == 0:
+            # Both names: an interactive acquire drops a batch lease, so
+            # either may be the one held; releasing an unheld one is a no-op.
+            asyncio.create_task(arbiter.release())
+            asyncio.create_task(batch_arbiter.release())
+
+    return finish
+
+
 @app.api_route(
     "/{path:path}",
     methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
@@ -447,20 +478,18 @@ async def proxy(path: str, request: Request) -> Response:
 
     # Swappable path: serialise via lock
     if model is not None:
+        batch = model in BATCH_MODELS
+        if batch:
+            # Before queueing, so a waiting batch request neither keeps the LLM's
+            # lease alive nor delays the idle release that lets other jobs run.
+            while not state.batch_may_run(BATCH_YIELD_SECONDS):
+                await asyncio.sleep(1.0)
+        else:
+            state.interactive_started()
         state.increment_queue()
         state.record_request()
         state.llm_request_started()
-        released = False
-
-        def _finish():
-            """Drop the refcount; tell the arbiter once nothing is in flight."""
-            nonlocal released
-            if released:
-                return
-            released = True
-            state.llm_request_finished()
-            if state.llm_inflight == 0 and state.queue_depth == 0:
-                asyncio.create_task(arbiter.release())
+        _finish = _finisher(batch)
 
         try:
             # Clear the GPU before touching it. The router auto-loads on first
@@ -469,7 +498,7 @@ async def proxy(path: str, request: Request) -> Response:
             # One call: the arbiter stops whatever is running, waits for the
             # driver to give the memory back, and answers. The proxy no longer
             # knows what a job is, how many there are, or how one is stopped.
-            granted, detail = await arbiter.acquire()
+            granted, detail = await (batch_arbiter if batch else arbiter).acquire()
             if not granted:
                 logger.error(f"Arbiter would not hand over the GPU: {detail}")
                 state.decrement_queue()

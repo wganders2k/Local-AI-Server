@@ -23,6 +23,22 @@ jobs:
     kind: none
     priority: 100
 
+  # The proxy's batch traffic: requests for the models in its BATCH_MODELS
+  # (the [judge] preset, which labels persona datasets for hours at a time and
+  # judges evals). Nobody is waiting on any one of these answers, so they rank
+  # below the LLM and below the hand-run profiler — a person or a deliberate
+  # measurement always goes first — and above the video job, so a labelling run
+  # makes progress rather than waiting out every video in the queue.
+  #
+  # kind: none for the same reason as the LLM: it is the same proxy and the same
+  # llama-server. That an LLM acquire can drop this lease without stopping
+  # anything is safe only because the proxy owns both names and serves one
+  # request at a time; it also holds batch requests back until interactive
+  # traffic has been quiet for a while (proxy BATCH_YIELD_SECONDS).
+  - name: llm-batch
+    kind: none
+    priority: 25
+
   # LongSafeVision's pipeline profiler, run by hand
   # (`python profile_segment.py --segment ...`). Below the LLM, because a
   # benchmark must never be the reason an interactive request waits; above the

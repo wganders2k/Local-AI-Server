@@ -36,6 +36,11 @@ class OrchestratorState:
         # Reaching zero is what lets jobs have the GPU back, so an over-release
         # here would hand it away mid-generation.
         self._llm_inflight: int = 0
+        # Interactive (non-batch) requests queued or in flight, and when the last
+        # one finished. Batch requests wait until there are none and the last is
+        # far enough back (batch_may_run).
+        self._interactive_active: int = 0
+        self.last_interactive_at: float | None = None
 
     @property
     def queue_depth(self) -> int:
@@ -56,6 +61,19 @@ class OrchestratorState:
     @property
     def llm_inflight(self) -> int:
         return self._llm_inflight
+
+    def interactive_started(self) -> None:
+        self._interactive_active += 1
+
+    def interactive_finished(self) -> None:
+        self._interactive_active = max(0, self._interactive_active - 1)
+        self.last_interactive_at = time.monotonic()
+
+    def batch_may_run(self, quiet_seconds: float) -> bool:
+        """No interactive request queued or running, and none finished in the last `quiet_seconds`."""
+        if self._interactive_active:
+            return False
+        return self.last_interactive_at is None or time.monotonic() - self.last_interactive_at >= quiet_seconds
 
     def record_swap(self, new_model: str) -> None:
         """Record a model switch and update the swap timestamp."""

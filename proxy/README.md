@@ -58,6 +58,7 @@ GPU metrics are the arbiter's — it is the only component that reads the card.
 | `IDLE_EVICT_SECONDS` | `600` | Idle time before unloading |
 | `IDLE_EVICT_POLL_SECONDS` | `30` | How often the evictor checks |
 | `IDLE_EVICT_UNLOAD_TIMEOUT` | `60` | How long to wait for an unload to take effect |
+| `BATCH_MODELS` | `judge` | Models ranked as batch work (`llm-batch`) |
 
 Changing how the LLM ranks against the trainer is an edit to [`arbiter/jobs.yaml`](../arbiter/jobs.yaml), not to anything here.
 
