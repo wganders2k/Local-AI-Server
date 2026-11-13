@@ -252,6 +252,41 @@ class TestRefreshFields:
         assert len(stale) == 1
 
 
+class TestUpdateNeverDropsWhatItCannotRead:
+    """
+    update_records writes the whole file back, and the media and caption jobs
+    call it every minute or two: a line it skipped on reading would be deleted.
+    """
+
+    def _mark(self, records):
+        for r in records:
+            r["seen"] = True
+        return True
+
+    def test_an_unreadable_line_is_written_back_where_it_was(self, temp_archive_dir):
+        path = _user_file_path("u1")
+        with open(path, "w") as f:
+            f.write('{"message_id": "1"}\n{"message_id": "2", trunc\n[1, 2]\n{"message_id": "3"}\n')
+
+        assert update_records("u1", self._mark)
+
+        lines = open(path).read().splitlines()
+        assert lines[1] == '{"message_id": "2", trunc'
+        assert lines[2] == "[1, 2]"
+        assert [json.loads(lines[i])["seen"] for i in (0, 3)] == [True, True]
+
+    def test_a_file_that_cannot_be_read_in_full_is_not_rewritten(self, temp_archive_dir, monkeypatch):
+        append_messages("u1", [{"message_id": "1"}, {"message_id": "2"}])
+        before = open(_user_file_path("u1")).read()
+
+        def failing_read(path):
+            raise OSError("I/O error")
+        monkeypatch.setattr("jsonl_store._read_entries", failing_read)
+
+        assert update_records("u1", self._mark) is False
+        assert open(_user_file_path("u1")).read() == before
+
+
 class TestRewriteKeepsPermissions:
     def test_rewrite_keeps_the_existing_mode(self, temp_archive_dir):
         append_messages("u1", [{"message_id": "1"}])

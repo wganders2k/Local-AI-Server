@@ -12,7 +12,7 @@ import logging
 import os
 import tempfile
 import threading
-from typing import Callable, Dict, Iterable, List, Set
+from typing import Callable, Dict, Iterable, List, Set, Union
 
 from config import ARCHIVE_DIR
 
@@ -231,6 +231,27 @@ def load_all_records(user_id: str) -> List[dict]:
     return records
 
 
+def _read_entries(path: str) -> List[Union[dict, str]]:
+    """
+    Every non-blank line of an archive file, in order: the record it holds, or
+    the line itself where it is not a JSON object. For a rewrite, which must put
+    back what it cannot read rather than drop it. Raises OSError: a file read in
+    part is no basis for writing the whole of it back.
+    """
+    entries: List[Union[dict, str]] = []
+    with open(path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                record = None
+            entries.append(record if isinstance(record, dict) else line)
+    return entries
+
+
 def rewrite_archive(user_id: str, records: List[dict]) -> None:
     """
     Rewrite a user's entire archive file atomically using write-then-rename.
@@ -248,7 +269,8 @@ def rewrite_archive(user_id: str, records: List[dict]) -> None:
         _write_atomically(path, user_id, records)
 
 
-def _write_atomically(path: str, user_id: str, records: List[dict]) -> None:
+def _write_atomically(path: str, user_id: str, records: List[Union[dict, str]]) -> None:
+    """`records` may hold raw lines (str), written back exactly as they were."""
     try:
         # Write to temp file in same directory (ensures same filesystem for atomic rename)
         dir_name = os.path.dirname(path)
@@ -256,7 +278,8 @@ def _write_atomically(path: str, user_id: str, records: List[dict]) -> None:
         try:
             with os.fdopen(fd, "w") as f:
                 for record in records:
-                    f.write(json.dumps(record, ensure_ascii=False) + "\n")
+                    line = record if isinstance(record, str) else json.dumps(record, ensure_ascii=False)
+                    f.write(line + "\n")
             # mkstemp creates 0600, and the rename would hand that to the
             # archive, locking out every other reader (rag, the trainer, the
             # host). Keep the file's existing mode; a new file gets 0644.
@@ -288,12 +311,27 @@ def update_records(user_id: str, apply: Callable[[List[dict]], bool]) -> bool:
     changed anything; the file is rewritten only if it did. Load inside the
     lock, never earlier: a copy held across slow work (a caption batch takes
     minutes) is stale by the time it is written back.
+
+    Stricter than load_all_records, because the whole file is written back: a
+    line that is not a JSON object is kept exactly where it was, never dropped,
+    and a file that cannot be read in full is not rewritten at all.
     """
+    path = _user_file_path(user_id)
     with _archive_lock:
-        records = load_all_records(user_id)
+        if not os.path.exists(path):
+            return False
+        try:
+            entries = _read_entries(path)
+        except OSError as e:
+            logger.error(f"Not updating archive for user {user_id}: could not read it in full: {e}")
+            return False
+        records = [e for e in entries if isinstance(e, dict)]
         if not records or not apply(records):
             return False
-        rewrite_archive(user_id, records)
+        unreadable = len(entries) - len(records)
+        if unreadable:
+            logger.warning(f"Archive for user {user_id} has {unreadable} unreadable line(s); kept as they were")
+        _write_atomically(path, user_id, entries)
         return True
 
 
