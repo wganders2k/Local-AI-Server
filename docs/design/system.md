@@ -248,7 +248,7 @@ See [`docker-compose.yml`](docker-compose.yml) for full definitions.
 | `lora-trainer` | `./lora-training` | — | `managed` | Never auto-starts |
 | `discord-chat-exporter` | `tyrrrz/discordchatexporter` | — | `manual` | One-shot CLI |
 
-**Profiles are load-bearing, not organisational.** `lora-trainer` sits behind `managed` specifically so a plain `docker compose up` skips it — otherwise it would take 16 GB behind the arbiter's back on every restart. `discord-chat-exporter` is behind `manual` because it is a one-shot CLI, not a service. `llama-permanent` is behind `autocomplete` so the toggle can start and stop it independently.
+**Profiles are load-bearing, not organisational.** `lora-trainer` sits behind `managed` specifically so a plain `docker compose up` skips it — otherwise it would take 16 GB behind the arbiter's back on every restart. `discord-chat-exporter` is behind `manual` because it is a one-shot CLI, not a service.
 
 **Model files** live on the host at `MODELS_DIR` (default `/srv/models`) and are bind-mounted read-only into both llama-server containers. They are not in named volumes, so `make nuke` does not delete downloaded weights.
 

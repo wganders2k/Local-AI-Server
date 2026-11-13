@@ -326,8 +326,6 @@ CI only checks; deploying is still a deliberate `make pull` on the box. `rag` ha
 
 ## Known gaps
 
-Things the docs describe accurately but that are broken, inert, or unfinished in the code — tracked in full in [`docs/TODO.md`](docs/TODO.md):
-
-- **`/mimic` has no backing preset yet.** Each `mimic_user*` section waits on its trained adapter, while the bot already offers all six via autocomplete.
+Things the docs describe accurately but that are broken, inert, or unfinished in the code are tracked in [`docs/TODO.md`](docs/TODO.md).
 
 The documents in [`docs/plans/`](docs/plans/) are point-in-time design records, not current-state docs, and are left as written.
