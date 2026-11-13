@@ -55,7 +55,7 @@ def clean_request(body: object, sizes: set[str], max_prompt_chars: int, default_
     if len(prompt) > max_prompt_chars:
         raise RequestError(f"'prompt' is longer than {max_prompt_chars} characters")
     size = body.get("size") or default_size
-    if size not in sizes:
+    if not isinstance(size, str) or size not in sizes:
         raise RequestError(f"'size' must be one of {sorted(sizes)}")
     if body.get("n", 1) != 1:
         raise RequestError("only n=1 is supported")

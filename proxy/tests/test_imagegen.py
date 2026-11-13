@@ -30,6 +30,8 @@ def test_only_prompt_and_size_survive():
     ({"prompt": "   "}, "prompt"),
     ({"prompt": "x" * 101}, "longer"),
     ({"prompt": "x", "size": "4096x4096"}, "size"),
+    ({"prompt": "x", "size": ["768x768"]}, "size"),  # unhashable: a 400, not a TypeError
+    ({"prompt": "x", "size": 768}, "size"),
     ({"prompt": "x", "n": 4}, "n=1"),
     ([], "object"),
 ])
