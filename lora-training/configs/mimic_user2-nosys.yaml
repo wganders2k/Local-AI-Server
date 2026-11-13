@@ -1,0 +1,14 @@
+# Experiment (2026-11-10): does the persona system prompt help? mimic_user2's
+# recipe and data exactly, with the system message removed from every example
+# (examples and the time split are identical, so eval_loss compares directly
+# with mimic_user2-20261106-2236's 3.403). Judge with:
+#   make train-export-latest PERSONA=mimic_user2 RUN=/home/peacow/lora-outputs/<this run> CANDIDATE=1
+#   make train-sample PERSONA=mimic_user2 MODELS="mimic_user2 candidate" ARGS="--blind --no-system candidate"
+# Never export it live as-is: the bot still sends every persona the system prompt.
+extends: mimic_user2.yaml
+
+dataset:
+  path: /archive/training/mimic_user2-nosys/train.jsonl
+  eval_path: /archive/training/mimic_user2-nosys/eval.jsonl
+
+output_dir: /home/peacow/lora-outputs/mimic_user2-nosys

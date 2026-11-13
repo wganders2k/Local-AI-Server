@@ -27,7 +27,7 @@ endif
 	rag-ingest rag-status \
 	train-submit train-cancel train-status train-logs \
 	train-fetch train-datasets train-queue train-queue-status train-queue-stop \
-	train-export-latest train-sample \
+	train-export-latest train-sample train-topic-probes train-topic-eval train-cut train-cut-queue \
 	gpu-status \
 	test-venvs test lint \
 	nuke
@@ -127,6 +127,10 @@ help:
 	@echo "  train-export-latest  Newest finished runs -> live adapters (PERSONA=, RUN=, CANDIDATE=1, DRY_RUN=1)"
 	@echo "  train-sample      Held-out outputs side by side; ARGS=--blind for a recorded A/B"
 	@echo "                        Usage: make train-sample PERSONA=mimic_user1 MODELS=\"base mimic_user1\""
+	@echo "  train-topic-probes  Build a persona's topic-switch / chaos probe set (once)"
+	@echo "  train-topic-eval  Judge adapters on those probes: PERSONA= MODELS= TAG= [ARGS=]"
+	@echo "  train-cut         Cut a persona's contexts with [judge] -> <persona>-cut/ (background, systemd)"
+	@echo "  train-cut-queue   Cut all, train on the cuts, topic-eval each vs live — nothing exported [PERSONAS=] [JOB=]"
 	@echo ""
 	@echo "  ── GPU ────────────────────────────────────────────────"
 	@echo "  gpu-status        Who holds the card, why, and how much is free"
@@ -367,6 +371,8 @@ train-logs:
 # `run`, not `up`: they share the image and mounts, never the lora-trainer name,
 # so they can run while a submitted run waits or trains.
 TRAINER_RUN = docker compose --profile managed run --rm --no-deps --build lora-trainer
+# The same with no TTY, for steps that run under systemd-run.
+TRAINER_RUN_BG = docker compose --profile managed run --rm --no-deps --build -T lora-trainer
 
 ## Download a base model into the HF cache before submitting a run on it, so a
 ## multi-GB fetch never happens while the worker holds the GPU lease.
@@ -466,6 +472,52 @@ train-sample:
 	@[ -n "$(PERSONA)" ] && [ -n "$(MODELS)" ] || { \
 		echo "Usage: make train-sample PERSONA=mimic_user1 MODELS=\"base mimic_user1\" [ARGS=--blind]"; exit 1; }
 	$(TRAINER_RUN) python sample_persona.py --persona "$(PERSONA)" --models $(MODELS) $(ARGS)
+
+## Topic-switch and chaos probes for one persona (lora-training/topic_eval.py).
+## Built once; later runs judge every adapter on the same probes.
+## Usage: make train-topic-probes PERSONA=mimic_user2
+train-topic-probes:
+	@[ -n "$(PERSONA)" ] || { echo "Usage: make train-topic-probes PERSONA=mimic_user2"; exit 1; }
+	$(TRAINER_RUN) python topic_eval.py build --persona "$(PERSONA)" $(ARGS)
+
+## Does an adapter take up a new subject, and pass over a non-sequitur?
+## Usage: make train-topic-eval PERSONA=mimic_user2 MODELS="mimic_user2 candidate" TAG=llmcut [ARGS="--no-system candidate"]
+train-topic-eval:
+	@[ -n "$(PERSONA)" ] && [ -n "$(MODELS)" ] && [ -n "$(TAG)" ] || { \
+		echo "Usage: make train-topic-eval PERSONA=mimic_user2 MODELS=\"mimic_user2 candidate\" TAG=<name>"; exit 1; }
+	$(TRAINER_RUN) python topic_eval.py run --persona "$(PERSONA)" --models $(MODELS) --tag "$(TAG)" $(ARGS)
+
+## Cut each example's context to what its reply responds to, with [judge]
+## (lora-training/cut_context.py). Hours for a big persona, so it runs as the
+## systemd user unit train-cut; log in ~/.local/share/train-queue/cut-<persona>.log.
+## Usage: make train-cut PERSONA=mimic_user2 [ARGS="--uncut-share 0.2"]
+train-cut:
+	@[ -n "$(PERSONA)" ] || { echo "Usage: make train-cut PERSONA=mimic_user2 [ARGS=...]"; exit 1; }
+	@if systemctl --user is-active -q train-cut; then echo "Error: a cut is already running (systemctl --user status train-cut)"; exit 1; fi
+	@systemctl --user reset-failed train-cut 2>/dev/null || true
+	@mkdir -p $$HOME/.local/share/train-queue
+	@systemd-run --user --unit=train-cut --description="Context cut $(PERSONA)" --working-directory=$(CURDIR) \
+		bash -c '$(TRAINER_RUN_BG) python cut_context.py --persona "$(PERSONA)" $(ARGS) > $$HOME/.local/share/train-queue/cut-$(PERSONA).log 2>&1' >/dev/null
+	@echo "✓ Cutting $(PERSONA) (systemd user unit train-cut). Log: ~/.local/share/train-queue/cut-$(PERSONA).log"
+
+## The whole cut pipeline, unattended: cut every persona with [judge], then
+## train-queue on the cut datasets, then topic-eval each new adapter (as the
+## candidate) against the live one. Nothing goes live. Runs as the systemd user
+## unit train-queue, so train-queue-status / train-queue-stop work on it.
+## Usage: make train-cut-queue [PERSONAS="mimic_user2 mimic_user5"] [JOB=<id>]
+train-cut-queue:
+	@if systemctl --user is-active -q train-queue; then \
+		echo "Error: a queue is already running. 'make train-queue-status' / 'make train-queue-stop'."; exit 1; \
+	fi
+	@if [ -n "$$(docker ps -q -f name=^lora-trainer$$)" ]; then \
+		echo "Error: a run is already in progress. 'make train-cancel' first."; exit 1; \
+	fi
+	@systemctl --user reset-failed train-queue 2>/dev/null || true
+	@job=$${JOB:-$$(date -u +%Y%m%d-%H%M)}; \
+	systemd-run --user --unit=train-queue --description="LoRA cut pipeline $$job" \
+		$(CURDIR)/lora-training/cut_queue.sh "$$job" $(PERSONAS) >/dev/null || exit 1; \
+	echo "✓ Cut pipeline $$job started (systemd user unit train-queue)."; \
+	echo "  Log: ~/.local/share/train-queue/cut-queue-$$job.log (training: queue-$$job.log)"
 
 # ── GPU ────────────────────────────────────────────────────
 

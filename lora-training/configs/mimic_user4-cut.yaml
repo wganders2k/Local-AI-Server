@@ -1,0 +1,11 @@
+# Mimic persona mimic_user4 on its judge-cut dataset (cut_context.py: each example's
+# context cut to what the reply connects to, never below 4 turns). The persona's
+# own recipe — epochs, eval cadence — unchanged; only the training data differs.
+# eval.jsonl is the uncut held-out slice, so eval_loss compares with mimic_user4's runs.
+extends: mimic_user4.yaml
+
+dataset:
+  path: /archive/training/mimic_user4-cut/train.jsonl
+  eval_path: /archive/training/mimic_user4-cut/eval.jsonl
+
+output_dir: /home/peacow/lora-outputs/mimic_user4-cut
