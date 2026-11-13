@@ -268,13 +268,16 @@ def test_a_reset_prefix_is_stripped_and_recorded(catalog):
     r = reader(catalog)
 
     two = r.to_line(message(ERIN, ">> new topic"))
-    three = r.to_line(message(ERIN, ">>>new topic"))
+    four = r.to_line(message(ERIN, ">>>>new topic"))
 
     assert (two.msg.text, two.reset) == ("new topic", 4)
-    assert (three.msg.text, three.reset) == ("new topic", 1)
+    assert (four.msg.text, four.reset) == ("new topic", 1)
+    # Discord's multi-line quote: as typed, and no reset.
+    quote = r.to_line(message(ERIN, ">>> someone said this"))
+    assert (quote.msg.text, quote.reset) == (">>> someone said this", None)
     assert r.to_line(message(ERIN, "a > b >> c")).reset is None
     # Nothing left to say once the prefix is gone: dropped like any empty message.
-    assert r.to_line(message(ERIN, ">>>")) is None
+    assert r.to_line(message(ERIN, ">>>>")) is None
 
 
 def test_a_personas_prefix_is_just_text(catalog):
@@ -298,7 +301,7 @@ def test_double_prefix_keeps_the_last_four_turns_then_everything_after(catalog):
 
 def test_triple_prefix_keeps_only_that_message_then_everything_after(catalog):
     r = reader(catalog)
-    lines = chat(r, (BOB, "tech support"), (ERIN, "still on this"), (ERIN, ">>> pizza?"), (BOB, "yes"))
+    lines = chat(r, (BOB, "tech support"), (ERIN, "still on this"), (ERIN, ">>>> pizza?"), (BOB, "yes"))
 
     # "still on this" would merge into the same turn; a full reset leaves it out.
     assert shown(r, lines) == "[erin]: pizza?\n[bobby]: yes"
@@ -306,7 +309,7 @@ def test_triple_prefix_keeps_only_that_message_then_everything_after(catalog):
 
 def test_the_latest_reset_wins_and_fewer_turns_than_asked_keeps_them_all(catalog):
     r = reader(catalog)
-    lines = chat(r, (BOB, "old"), (ERIN, ">>> first"), (BOB, "x"), (ERIN, ">> second"))
+    lines = chat(r, (BOB, "old"), (ERIN, ">>>> first"), (BOB, "x"), (ERIN, ">> second"))
 
     assert shown(r, lines) == "[bobby]: old\n[erin]: first\n[bobby]: x\n[erin]: second"
     assert shown(r, lines[:3]) == "[erin]: first\n[bobby]: x"
@@ -314,6 +317,6 @@ def test_the_latest_reset_wins_and_fewer_turns_than_asked_keeps_them_all(catalog
 
 def test_a_reset_is_not_undone_by_the_minimum_turns(catalog):
     r = reader(catalog)
-    lines = chat(r, (BOB, "a"), (CAROL, "b"), (BOB, "c"), (ERIN, ">>> d"))
+    lines = chat(r, (BOB, "a"), (CAROL, "b"), (BOB, "c"), (ERIN, ">>>> d"))
 
     assert shown(r, lines) == "[erin]: d"

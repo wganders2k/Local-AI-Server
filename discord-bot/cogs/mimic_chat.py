@@ -18,6 +18,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+import mimic_format
+
 from cogs.common import admit, handle_resolver, persona_autocomplete
 from config import (
     MIMIC_CHAT_DEBOUNCE_SECONDS,
@@ -27,6 +29,7 @@ from config import (
 )
 from mimic.engine import run_burst, seed_line
 from mimic.state import MimicChatState
+from mimic.transcript import strip_reset
 from personas import member_name
 from proxy_client import ProxyError
 from threads import MIMIC_CHAT
@@ -34,6 +37,21 @@ from threads import MIMIC_CHAT
 logger = logging.getLogger("mimic-bot.cogs.mimic_chat")
 
 _THREAD_NAME_MAX = 100  # Discord's limit
+RESET_REACTION = "✂️"
+
+
+def reads_as_reset(message: discord.Message) -> bool:
+    """
+    Whether persona_posting reads `message` as a reset: a human's prefix with
+    something left after it. Mirrors HistoryReader.to_line, so the ✂️ never
+    promises a reset the personas will not get.
+    """
+    if message.webhook_id is not None:
+        return False
+    content, reset = strip_reset(message.content or "")
+    return reset is not None and not mimic_format.drop_reason(
+        content, message.author.bot, str(message.type.value), bool(message.attachments)
+    )
 
 
 class MimicChatCog(commands.Cog):
@@ -120,7 +138,9 @@ class MimicChatCog(commands.Cog):
             # Mentioning the starter adds them to the thread, so it is in their list.
             await thread.send(
                 f"🎭 **{', '.join(names)}** are here. {user.mention}, say something to get the conversation going.\n"
-                "Anyone can join in. The personas pause at natural breaks; send a message to keep it going.",
+                "Anyone can join in. The personas pause at natural breaks; send a message to keep it going.\n"
+                "-# Bots stuck on a topic? Start a message with `>>` to have them focus on the last few messages, "
+                "or `>>>>` to make them forget everything before it. A ✂️ means it worked.",
                 allowed_mentions=discord.AllowedMentions(users=[user]),
             )
             await interaction.followup.send(f"✅ Mimic chat started: {thread.mention}", ephemeral=True)
@@ -191,6 +211,12 @@ class MimicChatCog(commands.Cog):
         if threads.kind_of(message.channel.id) != MIMIC_CHAT:
             return
         state = threads.mimic_chats[message.channel.id]
+        if reads_as_reset(message):
+            try:
+                await message.add_reaction(RESET_REACTION)
+            except discord.HTTPException as e:
+                # Missing Add Reactions only loses the confirmation; the reset still happens.
+                logger.info("Could not react to a reset in mimic chat %d: %s", message.channel.id, e)
         # No rate limit: a message only restarts the debounce, and a burst
         # already running finishes its current line and stops.
         state.interrupted = True

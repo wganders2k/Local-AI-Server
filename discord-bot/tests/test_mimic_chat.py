@@ -5,6 +5,7 @@ and that a bad controller answer never stalls the chat.
 
 import json
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -354,3 +355,22 @@ def test_controller_mentions_a_premise_only_when_there_is_one():
     assert "Premise" not in without[0]["content"]
     assert "{premise}" not in without[0]["content"]
     assert "Premise of the chat: pizza?\n\nActions:" in with_one[0]["content"]
+
+
+def _discord_message(content, bot=False, webhook_id=None, type_value=0, attachments=()):
+    return SimpleNamespace(
+        content=content, webhook_id=webhook_id, author=SimpleNamespace(bot=bot),
+        type=SimpleNamespace(value=type_value), attachments=list(attachments),
+    )
+
+
+def test_the_scissors_mark_exactly_the_messages_read_as_resets():
+    from cogs.mimic_chat import reads_as_reset
+
+    assert reads_as_reset(_discord_message(">> new topic"))
+    assert reads_as_reset(_discord_message(">>>>new topic"))
+    assert not reads_as_reset(_discord_message(">>> a quoted passage"))  # Discord's quote syntax
+    assert not reads_as_reset(_discord_message("just chatting"))
+    assert not reads_as_reset(_discord_message(">>>>"))  # nothing left: dropped, resets nothing
+    assert not reads_as_reset(_discord_message(">> lol", webhook_id=1))  # a persona's post
+    assert not reads_as_reset(_discord_message(">> hi", bot=True))

@@ -42,7 +42,7 @@ def strip_reset(content: str) -> tuple[str, Optional[int]]:
     """A human message's text without its reset prefix, and the turns that prefix keeps (None: no prefix)."""
     for prefix, keep in MIMIC_RESET_PREFIXES:
         if content.startswith(prefix):
-            return content[len(prefix):].lstrip(), keep
+            return (content, None) if keep is None else (content[len(prefix):].lstrip(), keep)
     return content, None
 
 
@@ -82,7 +82,7 @@ def since_reset(lines: list[Line], merge_seconds: float) -> list[Line]:
     """
     `lines` from the latest reset on: the reset line and the reset-1 turns
     before it, then everything after. The reset line starts a turn of its own,
-    so ">>>" keeps nothing its sender said before it.
+    so ">>>>" keeps nothing its sender said before it.
     """
     at = next((i for i in range(len(lines) - 1, -1, -1) if lines[i].reset is not None), None)
     if at is None:

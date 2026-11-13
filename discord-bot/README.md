@@ -64,9 +64,9 @@ A person can cut what the personas see by starting a message with a prefix (`MIM
 | Prefix | Persona windows from then on |
 |---|---|
 | `>>` | that message and the 3 turns before it, then everything after |
-| `>>>` | that message alone, then everything after |
+| `>>>>` | that message alone, then everything after |
 
-The prefix is stripped before anything reads the message, and the latest one wins. It works in `/mimic-chat` threads and for `/mimic`. Only the persona prompts are cut: the chat controller still reads the whole transcript, so it knows who has been talking. A persona's `>>` is just text, and a message that is nothing but a prefix is dropped as empty and resets nothing.
+The prefix is stripped before anything reads the message, and the latest one wins. `>>>` does nothing, because it is Discord's multi-line quote: quoting a passage must not reset the chat. In a `/mimic-chat` thread the bot reacts ✂️ to a message it read as a reset (needs **Add Reactions**), and the thread's opening message explains both prefixes. It works in `/mimic-chat` threads and for `/mimic`. Only the persona prompts are cut: the chat controller still reads the whole transcript, so it knows who has been talking. A persona's `>>` is just text, and a message that is nothing but a prefix is dropped as empty and resets nothing.
 
 ## Images
 

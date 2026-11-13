@@ -7,6 +7,7 @@ code that applies them (formatters.py).
 """
 
 import os
+from typing import Optional
 from dotenv import load_dotenv
 
 from persona_roster import DEFAULT_ADAPTER_SCALE
@@ -195,8 +196,10 @@ MIMIC_SELF_LABEL: str = "member"
 # A human message starting with one of these resets what the personas see:
 # from then on their windows reach back no further than that many turns,
 # counting the message itself. The prefix is stripped before anything reads
-# the message. Longest first, so ">>>" is not read as ">>" plus ">".
-MIMIC_RESET_PREFIXES: tuple[tuple[str, int], ...] = ((">>>", 1), (">>", 4))
+# the message. Longest first, so ">>>>" is not read as ">>" plus ">>".
+# ">>>" is Discord's multi-line quote, so it resets nothing (None) and stays
+# as typed: quoting a passage must not wipe the personas' context.
+MIMIC_RESET_PREFIXES: tuple[tuple[str, Optional[int]], ...] = ((">>>>", 1), (">>>", None), (">>", 4))
 
 # One webhook per channel posts every persona's lines under its own name. The
 # bot needs manage_webhooks in any channel /mimic or /mimic-chat is used in.
