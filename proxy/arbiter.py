@@ -1,8 +1,10 @@
 """
-The proxy's whole relationship with the GPU: two calls, and a name.
+The proxy's whole relationship with the GPU: two calls, and a name — plus,
+for the `llm-batch` name, the cooperative job's third call.
 
-    acquire()   take the card, or refuse
-    release()   done with it
+    acquire()         take the card, or refuse
+    release()         done with it
+    reclaim_notice()  block until the card is wanted back (cooperative jobs)
 
 The name is the only thing the proxy says about itself. It does not claim a
 priority, state how much VRAM it needs, or name what should be stopped for it —
@@ -29,6 +31,9 @@ logger = logging.getLogger(__name__)
 # its grace period. If this fires first, we lose the arbiter's reason for failing,
 # which is the thing worth reading in the log.
 _TIMEOUT = 240.0
+# Longer than the arbiter's NOTICE_TIMEOUT (30 s), so its own "nothing wanted"
+# answer arrives before ours fires.
+_NOTICE_TIMEOUT = 45.0
 
 
 class ArbiterClient:
@@ -75,6 +80,27 @@ class ArbiterClient:
             )
         except httpx.HTTPError as exc:
             logger.warning(f"Could not tell the arbiter we are idle ({exc}) — it will catch up")
+
+    async def reclaim_notice(self) -> bool | None:
+        """
+        Block until the arbiter wants the card back from this job.
+
+        True: give it up. False: the wait expired with nothing wanted — ask
+        again. None: the arbiter could not be asked; the caller retries
+        shortly. Holding this call open is also what keeps a cooperative lease
+        alive: the arbiter reaps one whose holder stops asking.
+        """
+        try:
+            resp = await self._client.get(
+                f"{self.base_url}/gpu/reclaim-notice",
+                params={"name": self.job_name},
+                timeout=httpx.Timeout(_NOTICE_TIMEOUT, connect=5.0),
+            )
+            resp.raise_for_status()
+            return bool(resp.json().get("reclaim"))
+        except (httpx.HTTPError, ValueError) as exc:
+            logger.warning(f"Reclaim notice for {self.job_name} failed ({exc}) — asking again")
+            return None
 
     async def status(self) -> dict:
         try:

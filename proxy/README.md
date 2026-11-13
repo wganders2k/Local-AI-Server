@@ -1,14 +1,15 @@
 # Proxy — FastAPI Orchestration Middleware
 
-FastAPI service on `:11436`. It routes AI requests to the correct llama-server instance, serialises access to the swappable slot, and is the LLM's representative to the [GPU arbiter](../arbiter/README.md).
+FastAPI service on `:11436`. It routes AI requests to the correct llama-server instance, schedules them one at a time with people ahead of batch work, and is the LLM's representative to the [GPU arbiter](../arbiter/README.md).
 
 It has no GPU access. Giving it any would be a second answer to a question the arbiter already owns.
 
 ## What it does
 
-- **Serialises every model request** through an `asyncio.Lock`, one at a time.
-- **Acquires the GPU lease before touching the backend.** The router auto-loads on first request, so the card has to be clear before anything is forwarded. One call to the arbiter stops whatever is running, waits for the driver, and answers. A refusal becomes a `503` with `Retry-After: 30`.
-- **Releases the lease only when idle** — when in-flight count and queue depth both hit zero, not after each request, so a burst of Discord traffic does not hand the card away mid-conversation.
+- **Schedules every model request** (`dispatcher.py`): one on the backend at a time, interactive requests first in arrival order. A batch request (`BATCH_MODELS`) runs only when no interactive request is waiting or running and none has finished in the last `BATCH_YIELD_SECONDS`, so a person waits for at most the one batch call already running. A request whose client has gone away is dropped while it waits.
+- **Is one arbiter tenant with one lease**, named for the most important work it has: `llm` while any interactive request is queued or running, `llm-batch` while it has only batch work. The lease is acquired before the backend is touched, because the router auto-loads on first request. An interactive refusal becomes a `503` with `Retry-After: 30`; a refused batch request stays queued and asks again after `BATCH_RETRY_SECONDS`, since its client is a background job.
+- **Gives the batch lease back cooperatively.** `llm-batch` is a `cooperative` arbiter job: while holding it the proxy waits on the arbiter's reclaim notice, and when something ranked above batch work wants the card it stops dispatching batch requests, lets the running call finish, unloads its models and the image server, and releases. Moving up to `llm` when a person arrives is the same notice, answered at once with nothing unloaded.
+- **Releases the lease only when idle** — when nothing is running and nothing is ready to run, not after each request, so a burst of Discord traffic does not hand the card away mid-conversation.
 - **Evicts the resident model after an idle period** so background jobs get a real VRAM window (see below).
 - **Exposes Prometheus metrics**, health, and proxy state.
 
@@ -72,6 +73,8 @@ GPU metrics are the arbiter's — it is the only component that reads the card.
 | `IDLE_EVICT_POLL_SECONDS` | `30` | How often the evictor checks |
 | `IDLE_EVICT_UNLOAD_TIMEOUT` | `60` | How long to wait for an unload to take effect |
 | `BATCH_MODELS` | `judge,caption` | Models ranked as batch work (`llm-batch`) |
+| `BATCH_YIELD_SECONDS` | `30` | Quiet time after the last interactive request before batch work runs |
+| `BATCH_RETRY_SECONDS` | `5` | How long a refused batch request waits before asking again |
 | `IMAGEGEN_ENABLED` | `false` | Serve `/v1/images/generations` |
 | `IMAGEGEN_URL` | `http://imagegen:8080` | The image server |
 | `IMAGEGEN_CONTAINER` | `imagegen` | Container started/stopped; must match `container_name` in compose |
@@ -88,11 +91,13 @@ proxy/
 ├── requirements.txt
 ├── main.py            # FastAPI app, routing, idle evictor, metrics, forwarding
 ├── config.py          # URLs, arbiter identity, eviction tuning
-├── state.py           # OrchestratorState — lock, queue depth, in-flight, current model
-├── arbiter.py         # ArbiterClient — acquire / release
+├── dispatcher.py      # which request runs next, and the one arbiter lease it runs under
+├── state.py           # current model, swap and idle clocks
+├── arbiter.py         # ArbiterClient — acquire / release / reclaim notice
 ├── imagegen.py        # image server lifecycle + the text-only request filter
 └── tests/
-    ├── test_gpu_gate.py      # the lease is acquired before forwarding, released only when idle
+    ├── fakes.py              # a fake arbiter with the real admission rules, a stub backend
+    ├── test_gpu_gate.py      # the lease before the backend; people before batch; handovers and reclaims
     ├── test_idle_evictor.py  # unload is verified, not assumed
     └── test_imagegen.py      # text only, same gate as chat, never shares the card with a big model
 ```

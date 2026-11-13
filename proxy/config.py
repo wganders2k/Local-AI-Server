@@ -14,9 +14,10 @@ ARBITER_URL = os.environ.get("ARBITER_URL", "http://arbiter:11438")
 ARBITER_JOB_NAME = os.environ.get("ARBITER_JOB_NAME", "llm")
 
 # Batch traffic: models whose requests are bulk work — labelling a dataset,
-# judging an eval — with nobody waiting on any one answer. They go to the arbiter
-# under their own name, ranked below the LLM in jobs.yaml, and the proxy holds
-# each one back until no interactive request has been queued or in flight for
+# judging an eval — with nobody waiting on any one answer (dispatcher.py). While
+# the proxy has only batch work it holds the arbiter lease under its own name,
+# ranked below the LLM in jobs.yaml, and the dispatcher runs a batch request only
+# once no interactive request has been queued or running for
 # BATCH_YIELD_SECONDS. So a person on /mimic waits for at most the one batch call
 # already running, and the slot is not swapped back and forth between the two
 # models on every message of a busy chat.
@@ -25,6 +26,9 @@ ARBITER_JOB_NAME = os.environ.get("ARBITER_JOB_NAME", "llm")
 BATCH_MODELS: set[str] = {m.strip() for m in os.environ.get("BATCH_MODELS", "judge,caption").split(",") if m.strip()}
 ARBITER_BATCH_JOB_NAME = os.environ.get("ARBITER_BATCH_JOB_NAME", "llm-batch")
 BATCH_YIELD_SECONDS = float(os.environ.get("BATCH_YIELD_SECONDS", "30"))
+# How long a batch request refused by the arbiter waits before asking again. It
+# stays queued meanwhile: its client is a background job, not a person.
+BATCH_RETRY_SECONDS = float(os.environ.get("BATCH_RETRY_SECONDS", "5"))
 
 # Idle eviction — llama-server's router keeps a model resident once loaded, so
 # without this an external job would never get a VRAM window on a busy day.

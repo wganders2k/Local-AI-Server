@@ -22,6 +22,7 @@ from config import (
     ARBITER_JOB_NAME,
     ARBITER_URL,
     BATCH_MODELS,
+    BATCH_RETRY_SECONDS,
     BATCH_YIELD_SECONDS,
     IDLE_EVICT_ENABLED,
     IDLE_EVICT_POLL_SECONDS,
@@ -40,14 +41,33 @@ from config import (
     LLAMA_SWAPPABLE,
 )
 from arbiter import ArbiterClient
+from dispatcher import BATCH, INTERACTIVE, Abandoned, Dispatcher, Lease, Refused
 from imagegen import ImageServer, RequestError, clean_request
 from state import state
 
-arbiter = ArbiterClient(ARBITER_URL, ARBITER_JOB_NAME)
-# Batch models' requests ask under their own, lower-ranked name (config.BATCH_MODELS).
-batch_arbiter = ArbiterClient(ARBITER_URL, ARBITER_BATCH_JOB_NAME)
 image_server = ImageServer(
     IMAGEGEN_URL, DOCKER_URL, IMAGEGEN_CONTAINER, IMAGEGEN_START_TIMEOUT, IMAGEGEN_REQUEST_TIMEOUT
+)
+
+
+def build_dispatcher(llm_arbiter, batch_arbiter) -> Dispatcher:
+    """
+    The proxy is one arbiter tenant: `llm` while it has interactive work,
+    `llm-batch` (cooperative) while it has only batch work. See dispatcher.py.
+    """
+    return Dispatcher(
+        Lease(llm_arbiter, batch_arbiter),
+        BATCH_YIELD_SECONDS,
+        batch_retry_seconds=BATCH_RETRY_SECONDS,
+        # Looked up at call time: defined further down, and tests replace it.
+        free_gpu=lambda: _free_gpu(),
+    )
+
+
+dispatcher = build_dispatcher(
+    ArbiterClient(ARBITER_URL, ARBITER_JOB_NAME),
+    # Asked under its own, lower-ranked name while only batch work is queued.
+    ArbiterClient(ARBITER_URL, ARBITER_BATCH_JOB_NAME),
 )
 
 # HTTP client — shared across all requests, reuses connections
@@ -60,7 +80,8 @@ _RESPONSE_PREVIEW_BYTES = 120
 PROXY_REQUESTS = Counter("proxy_requests_total", "Total LLM requests", ["model", "status"])
 PROXY_ACTIVE_REQUESTS = Gauge("proxy_active_requests", "Currently processing requests", ["model"])
 PROXY_TOKENS = Counter("proxy_tokens_total", "Total tokens processed", ["model", "token_type"])
-PROXY_QUEUE_DEPTH = Gauge("proxy_queue_depth", "Current requests waiting for a model swap")
+PROXY_QUEUE_DEPTH = Gauge("proxy_queue_depth", "Interactive requests waiting for their turn")
+PROXY_BATCH_QUEUE_DEPTH = Gauge("proxy_batch_queue_depth", "Batch requests waiting for their turn")
 PROXY_REQUEST_DURATION = Histogram("proxy_request_duration_seconds", "Total request time", ["model"])
 PROXY_CURRENT_MODEL_INFO = Gauge(
     "proxy_current_model_info",
@@ -81,6 +102,9 @@ async def lifespan(app: FastAPI):
     global _http_client
     _http_client = httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0))
     logger.info(f"HTTP client initialised — arbiter at {ARBITER_URL}, asking as {ARBITER_JOB_NAME!r}")
+    # A lease from before a restart would outrank every job forever (`llm` is
+    # kind: none and never reaped); this process holds nothing yet.
+    await dispatcher.release_lease_if_idle()
     if IMAGEGEN_ENABLED:
         # `compose up` may have started it; the proxy cannot know what it holds.
         image_server.running = True
@@ -96,9 +120,10 @@ async def lifespan(app: FastAPI):
             await t
         except asyncio.CancelledError:
             pass
+    await dispatcher.lease.aclose()
     await _http_client.aclose()
-    await arbiter.aclose()
-    await batch_arbiter.aclose()
+    await dispatcher.lease.llm.aclose()
+    await dispatcher.lease.batch.aclose()
     logger.info("HTTP client closed")
 
 
@@ -169,9 +194,27 @@ async def _unload_resident_models(resident: list[str] | None = None) -> bool:
     return False
 
 
+async def _free_gpu() -> bool:
+    """
+    Unload every resident model and stop the image server, verified. True once
+    the card really holds nothing of the proxy's. Used by the idle evictor and
+    when the arbiter reclaims the batch lease.
+    """
+    resident = await _resident_models()
+    if resident:
+        logger.info(f"Unloading {resident}")
+        if not await _unload_resident_models(resident):
+            return False
+    if image_server.running:
+        logger.info("Stopping the image server")
+        if not await image_server.stop(_http_client):
+            return False
+    return True
+
+
 async def _idle_evictor() -> None:
     """
-    Unload the swappable slot once the LLMs have been idle long enough.
+    Unload the swappable slot once the backend has been idle long enough.
 
     The router keeps a model resident indefinitely once loaded, so without this
     a background job would be permanently starved on any day with LLM traffic —
@@ -182,33 +225,30 @@ async def _idle_evictor() -> None:
     arbiter is told afterwards, and decides for itself whether the freed memory
     is enough for whatever is waiting.
 
-    Deliberately unconditional on whether a job is waiting. The proxy no longer
-    knows what jobs exist, and evicting an idle model is the right thing anyway —
-    the cost is one cold load on the next request after ten quiet minutes.
+    It runs as a turn of its own (dispatcher.maintenance): nothing can start on
+    the backend while it is unloading, so it can never stop the image server or
+    release the lease under a request that began meanwhile.
     """
     logger.info(f"Idle evictor active: unload after {IDLE_EVICT_SECONDS:.0f}s idle")
     while True:
         await asyncio.sleep(IDLE_EVICT_POLL_SECONDS)
         try:
-            if state.llm_inflight > 0 or state.queue_depth > 0:
-                continue
             idle = state.idle_seconds
-            if idle is None or idle < IDLE_EVICT_SECONDS:
+            if not dispatcher.idle or idle is None or idle < IDLE_EVICT_SECONDS:
                 continue
-
-            resident = await _resident_models()
-            if resident or image_server.running:
-                logger.info(f"LLMs idle {idle:.0f}s — unloading {resident}"
-                            + (" and the image server" if image_server.running else ""))
-                if resident and not await _unload_resident_models(resident):
+            async with dispatcher.maintenance() as ok:
+                if not ok:
                     continue
-                if image_server.running and not await image_server.stop(_http_client):
+                resident = await _resident_models()
+                if not resident and not image_server.running:
+                    continue
+                logger.info(f"Backend idle {idle:.0f}s — freeing the GPU")
+                if not await _free_gpu():
                     continue
                 # Only now is there really room. Telling the arbiter before the
                 # unload lands would invite it to start a job under a resident
                 # model, which is the OOM this whole arrangement exists to avoid.
-                await arbiter.release()
-                await batch_arbiter.release()
+                await dispatcher.release_lease_if_idle()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -256,15 +296,13 @@ async def _forward(
     target_base_url: str,
     request: Request,
     model: str | None = None,
-    lock: asyncio.Lock | None = None,
     on_complete=None,
 ) -> Response:
     """
     Transparently forward the raw request to the target_base_url.
 
     ``on_complete`` runs once the response stream is fully consumed (or the
-    client disconnects), alongside the lock release — used to drop the
-    in-flight LLM refcount that gates external-job yielding.
+    client disconnects) — it hands the request's turn back to the dispatcher.
     """
     try:
         body = await request.body()
@@ -309,8 +347,6 @@ async def _forward(
             raise
         
     except BaseException:
-        if lock:
-            lock.release()
         if on_complete:
             on_complete()
         raise
@@ -384,8 +420,6 @@ async def _forward(
                 PROXY_REQUEST_DURATION.labels(model=label).observe(time.monotonic() - t_start)
                 PROXY_ACTIVE_REQUESTS.labels(model=label).dec()
 
-            if lock:
-                lock.release()
             if on_complete:
                 on_complete()
             await response.aclose()
@@ -412,10 +446,16 @@ async def status() -> dict:
     asking two services the same question is how they end up disagreeing.
     """
     age = state.time_since_swap
+    running = dispatcher.running
     return {
         "current_model": state.current_model,
-        "queue_depth": state.queue_depth,
-        "llm_inflight": state.llm_inflight,
+        # Interactive requests waiting; the bot refuses commands past its
+        # MAX_QUEUE_DEPTH on this, so batch work is counted separately.
+        "queue_depth": dispatcher.queue_depth,
+        "batch_queue_depth": dispatcher.batch_waiting,
+        "llm_inflight": 1 if running is not None else 0,
+        "running": running.klass if running is not None else None,
+        "lease": dispatcher.lease.held,
         "model_loaded_seconds_ago": round(age, 1) if age is not None else None,
     }
 
@@ -423,8 +463,9 @@ async def status() -> dict:
 @app.get("/metrics")
 async def metrics() -> Response:
     """Expose Prometheus metrics for scraping."""
-    PROXY_QUEUE_DEPTH.set(state.queue_depth)
-    PROXY_LLM_INFLIGHT.set(state.llm_inflight)
+    PROXY_QUEUE_DEPTH.set(dispatcher.queue_depth)
+    PROXY_BATCH_QUEUE_DEPTH.set(dispatcher.batch_waiting)
+    PROXY_LLM_INFLIGHT.set(1 if dispatcher.running is not None else 0)
 
     PROXY_CURRENT_MODEL_INFO.clear()
     if state.current_model:
@@ -468,8 +509,8 @@ async def history_summary() -> list[dict]:
 @app.post("/v1/images/generations")
 async def images_generations(request: Request) -> Response:
     """
-    Text-to-image. Interactive work under the `llm` lease and the swappable
-    lock, like a chat message — see imagegen.py for why it is not a tenant.
+    Text-to-image. Interactive work: a turn on the dispatcher and the `llm`
+    lease, like a chat message — see imagegen.py for why it is not a tenant.
     """
     if not IMAGEGEN_ENABLED:
         return _json_error(503, "imagegen_disabled", "Image generation is not enabled on this server.")
@@ -478,40 +519,27 @@ async def images_generations(request: Request) -> Response:
     except (RequestError, ValueError) as exc:
         return _json_error(400, "invalid_request", str(exc))
 
-    state.interactive_started()
-    state.increment_queue()
-    state.record_request()
-    state.llm_request_started()
-    finish = _finisher(batch=False)
+    ticket, refusal = await _take_turn(INTERACTIVE, request, "imagegen")
+    if refusal is not None:
+        return refusal
     try:
-        granted, detail = await arbiter.acquire()
-        if not granted:
-            state.decrement_queue()
-            return _json_error(503, "vram_unavailable", "The GPU could not be freed for this request. Retry shortly.")
-        try:
-            await state.lock.acquire()
-        finally:
-            state.decrement_queue()
-        try:
-            resident = await _resident_models()
-            if any(m not in IMAGEGEN_COEXIST_MODELS for m in resident):
-                logger.info(f"Image request: unloading {resident} to make room")
-                if not await _unload_resident_models(resident):
-                    return _json_error(503, "vram_unavailable", "Could not unload the chat model. Retry shortly.")
-            t0 = time.monotonic()
-            resp = await image_server.generate(_http_client, body)
-            logger.info(f"[imagegen] HTTP {resp.status_code} in {time.monotonic() - t0:.1f}s ({body['size']})")
-            PROXY_REQUESTS.labels(model="imagegen", status=str(resp.status_code)).inc()
-            PROXY_REQUEST_DURATION.labels(model="imagegen").observe(time.monotonic() - t0)
-            return Response(content=resp.content, status_code=resp.status_code, media_type="application/json")
-        except Exception as exc:
-            logger.error(f"[imagegen] failed: {exc}")
-            PROXY_REQUESTS.labels(model="imagegen", status="error").inc()
-            return _json_error(502, "imagegen_failed", "Image generation failed.")
-        finally:
-            state.lock.release()
+        resident = await _resident_models()
+        if any(m not in IMAGEGEN_COEXIST_MODELS for m in resident):
+            logger.info(f"Image request: unloading {resident} to make room")
+            if not await _unload_resident_models(resident):
+                return _json_error(503, "vram_unavailable", "Could not unload the chat model. Retry shortly.")
+        t0 = time.monotonic()
+        resp = await image_server.generate(_http_client, body)
+        logger.info(f"[imagegen] HTTP {resp.status_code} in {time.monotonic() - t0:.1f}s ({body['size']})")
+        PROXY_REQUESTS.labels(model="imagegen", status=str(resp.status_code)).inc()
+        PROXY_REQUEST_DURATION.labels(model="imagegen").observe(time.monotonic() - t0)
+        return Response(content=resp.content, status_code=resp.status_code, media_type="application/json")
+    except Exception as exc:
+        logger.error(f"[imagegen] failed: {exc}")
+        PROXY_REQUESTS.labels(model="imagegen", status="error").inc()
+        return _json_error(502, "imagegen_failed", "Image generation failed.")
     finally:
-        finish()
+        _finisher(ticket)()
 
 
 @app.api_route("/v1/images/{rest:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
@@ -523,35 +551,43 @@ async def images_other(rest: str) -> Response:
     return _json_error(403, "text_prompts_only", "Only text-to-image (/v1/images/generations) is available.")
 
 
-def _json_error(status: int, code: str, message: str) -> Response:
+def _json_error(status: int, code: str, message: str, detail: str | None = None) -> Response:
+    body = {"error": code, "message": message}
+    if detail is not None:
+        body["detail"] = detail
     return Response(
-        content=json.dumps({"error": code, "message": message}),
+        content=json.dumps(body),
         status_code=status,
         headers={"Retry-After": "30"} if status == 503 else None,
         media_type="application/json",
     )
 
 
-def _finisher(batch: bool):
-    """
-    Drops a request's in-flight count exactly once, and tells the arbiter
-    when nothing is in flight. Returned per request, for every exit path.
-    """
-    released = False
+async def _take_turn(klass: str, request: Request, label: str):
+    """(ticket, None) once it is this request's turn, or (None, the response to send instead)."""
+    state.record_request()
+    try:
+        return await dispatcher.turn(klass, request, label), None
+    except Refused as exc:
+        return None, _json_error(
+            503, "vram_unavailable", "The GPU could not be freed for this request. Retry shortly.", exc.detail
+        )
+    except Abandoned:
+        # The client is gone; nobody reads this. 499 is nginx's "client closed request".
+        return None, Response(status_code=499)
+
+
+def _finisher(ticket):
+    """Hands a request's turn back exactly once, from whichever exit path gets there first."""
+    done = False
 
     def finish():
-        nonlocal released
-        if released:
+        nonlocal done
+        if done:
             return
-        released = True
-        state.llm_request_finished()
-        if not batch:
-            state.interactive_finished()
-        if state.llm_inflight == 0 and state.queue_depth == 0:
-            # Both names: an interactive acquire drops a batch lease, so
-            # either may be the one held; releasing an unheld one is a no-op.
-            asyncio.create_task(arbiter.release())
-            asyncio.create_task(batch_arbiter.release())
+        done = True
+        state.record_request()
+        dispatcher.finish(ticket)
 
     return finish
 
@@ -564,76 +600,26 @@ async def proxy(path: str, request: Request) -> Response:
     body_bytes = await request.body()
     model = _extract_model(body_bytes)
 
-    # Swappable path: serialise via lock
     if model is not None:
-        batch = model in BATCH_MODELS
-        if batch:
-            # Before queueing, so a waiting batch request neither keeps the LLM's
-            # lease alive nor delays the idle release that lets other jobs run.
-            while not state.batch_may_run(BATCH_YIELD_SECONDS):
-                await asyncio.sleep(1.0)
-        else:
-            state.interactive_started()
-        state.increment_queue()
-        state.record_request()
-        state.llm_request_started()
-        _finish = _finisher(batch)
-
+        klass = BATCH if model in BATCH_MODELS else INTERACTIVE
+        ticket, refusal = await _take_turn(klass, request, model)
+        if refusal is not None:
+            return refusal
+        finish = _finisher(ticket)
         try:
-            # Clear the GPU before touching it. The router auto-loads on first
-            # request, so this must complete before we forward anything.
-            #
-            # One call: the arbiter stops whatever is running, waits for the
-            # driver to give the memory back, and answers. The proxy no longer
-            # knows what a job is, how many there are, or how one is stopped.
-            granted, detail = await (batch_arbiter if batch else arbiter).acquire()
-            if not granted:
-                logger.error(f"Arbiter would not hand over the GPU: {detail}")
-                state.decrement_queue()
-                _finish()
-                return Response(
-                    content=json.dumps({
-                        "error": "vram_unavailable",
-                        "message": "The GPU could not be freed for this request. Retry shortly.",
-                        "detail": detail,
-                    }),
-                    status_code=503,
-                    headers={"Retry-After": "30"},
-                    media_type="application/json",
-                )
-
-            try:
-                await state.lock.acquire()
-            except BaseException:
-                state.decrement_queue()
-                raise
-
-            state.decrement_queue()
-
-            try:
-                if image_server.running and model not in IMAGEGEN_COEXIST_MODELS:
-                    # Too big to share the card with it: stop it before the
-                    # router loads anything, or the load OOMs.
-                    if not await image_server.stop(_http_client):
-                        raise RuntimeError("the image server could not be stopped to make room")
-                if model:
-                    if state.current_model != model:
-                        logger.info(
-                            f"Model switch: {state.current_model} → {model} "
-                            f"(swappable slot evict + load)"
-                        )
-                        state.record_swap(model)
-            except BaseException:
-                state.lock.release()
-                raise
-
-            return await _forward(
-                LLAMA_SWAPPABLE, request, model=model, lock=state.lock, on_complete=_finish
-            )
+            if image_server.running and model not in IMAGEGEN_COEXIST_MODELS:
+                # Too big to share the card with it: stop it before the
+                # router loads anything, or the load OOMs.
+                if not await image_server.stop(_http_client):
+                    raise RuntimeError("the image server could not be stopped to make room")
+            if state.current_model != model:
+                logger.info(f"Model switch: {state.current_model} → {model} (swappable slot evict + load)")
+                state.record_swap(model)
+            return await _forward(LLAMA_SWAPPABLE, request, model=model, on_complete=finish)
         except BaseException:
-            _finish()
+            finish()
             raise
 
-    # Fallback: no model in body
+    # No model in the body (GET /v1/models and the like): nothing is loaded, so no turn.
     logger.debug(f"No model in request body, forwarding to swappable: /{path}")
     return await _forward(LLAMA_SWAPPABLE, request)

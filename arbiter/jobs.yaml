@@ -23,20 +23,24 @@ jobs:
     kind: none
     priority: 100
 
-  # The proxy's batch traffic: requests for the models in its BATCH_MODELS
-  # (the [judge] preset, which labels persona datasets for hours at a time and
-  # judges evals). Nobody is waiting on any one of these answers, so they rank
-  # below the LLM and below the hand-run profiler — a person or a deliberate
-  # measurement always goes first — and above the video job, so a labelling run
-  # makes progress rather than waiting out every video in the queue.
+  # The same proxy as `llm`, while it has only batch work: requests for the
+  # models in its BATCH_MODELS (the [judge] preset, which labels persona
+  # datasets for hours at a time, and the archive captioner). The proxy holds
+  # one lease at a time, named for the most important work it has
+  # (proxy/dispatcher.py). Nobody is waiting on any one of these answers, so
+  # it ranks below the LLM and below the hand-run profiler — a person or a
+  # deliberate measurement always goes first — and above the video job, so a
+  # labelling run makes progress rather than waiting out every video.
   #
-  # kind: none for the same reason as the LLM: it is the same proxy and the same
-  # llama-server. That an LLM acquire can drop this lease without stopping
-  # anything is safe only because the proxy owns both names and serves one
-  # request at a time; it also holds batch requests back until interactive
-  # traffic has been quiet for a while (proxy BATCH_YIELD_SECONDS).
+  # cooperative, not none, because it is outranked: a profiler acquire must get
+  # a card that is really free, and only the proxy can free it. While holding
+  # this lease the proxy waits on /gpu/reclaim-notice; when told, it stops
+  # dispatching batch work, lets the running call finish, unloads its models
+  # and releases. When the proxy itself moves up to `llm` (a person arrived),
+  # the same notice reaches it and it lets go at once with nothing unloaded —
+  # it is the same process, serving one request at a time.
   - name: llm-batch
-    kind: none
+    kind: cooperative
     priority: 25
 
   # LongSafeVision's pipeline profiler, run by hand

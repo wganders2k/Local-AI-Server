@@ -147,6 +147,11 @@ def test_the_deployed_config_parses():
     # headroom check stops it loading on top of a resident model.
     assert by_name["profile-segment"].required_mb > 0
 
+    # Outranked, so its reclaim must actually free the card: the proxy is told
+    # through the reclaim notice and unloads (proxy/dispatcher.py). As kind: none
+    # a reclaim was bookkeeping only, with a 27B model still generating.
+    assert by_name["llm-batch"].kind == "cooperative"
+
     # Nothing may share the LLM's rank: an equal priority does not preempt, so a
     # tie would silently make the LLM unable to take the card back.
     assert [j.priority for j in jobs].count(by_name["llm"].priority) == 1

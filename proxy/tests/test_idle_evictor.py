@@ -14,6 +14,8 @@ import pytest
 import httpx
 
 import main
+from dispatcher import Ticket
+from tests.fakes import install_dispatcher
 
 
 def _models_payload(*resident):
@@ -69,37 +71,22 @@ class FakeRouter:
                               request=httpx.Request("POST", url))
 
 
-class FakeArbiter:
-    """The evictor's only job besides unloading: say when there is really room."""
-
-    def __init__(self):
-        self.calls = []
-
-    async def release(self):
-        self.calls.append("release")
-
-    async def acquire(self):
-        self.calls.append("acquire")
-        return True, "cleared"
-
-    async def aclose(self):
-        pass
-
-
 @pytest.fixture
 def arbiter(monkeypatch):
-    a = FakeArbiter()
-    monkeypatch.setattr(main, "arbiter", a)
-    return a
+    """The evictor's only job besides unloading: say when there is really room."""
+    service, d = install_dispatcher(monkeypatch)
+    # As after a chat: the lease is still held and the model resident.
+    service.holder = "llm"
+    d.lease.held = "interactive"
+    return service
 
 
 @pytest.fixture(autouse=True)
 def clean_state(monkeypatch):
     main.state.current_model = None
     main.state.last_request_at = None
-    while main.state.llm_inflight:
-        main.state.llm_request_finished()
     monkeypatch.setattr(main, "IDLE_EVICT_UNLOAD_TIMEOUT", 1.0)
+    monkeypatch.setattr(main.image_server, "running", False)
     yield
 
 
@@ -183,7 +170,7 @@ async def test_arbiter_is_told_only_after_the_unload_lands(monkeypatch, arbiter)
     task.cancel()
 
     assert router.unload_calls, "should have attempted the unload"
-    assert arbiter.calls == [], "must not report room while the model is still resident"
+    assert arbiter.names("release") == [], "must not report room while the model is still resident"
 
 
 @pytest.mark.asyncio
@@ -198,7 +185,7 @@ async def test_arbiter_is_told_once_the_slot_is_free(monkeypatch, arbiter):
     await asyncio.sleep(0.3)
     task.cancel()
 
-    assert "release" in arbiter.calls
+    assert arbiter.names("release") == ["llm"]
 
 
 @pytest.mark.asyncio
@@ -208,24 +195,57 @@ async def test_nothing_is_evicted_while_a_request_is_in_flight(monkeypatch, arbi
     monkeypatch.setattr(main, "IDLE_EVICT_POLL_SECONDS", 0.01)
     monkeypatch.setattr(main, "IDLE_EVICT_SECONDS", 0.0)
     main.state.record_request()
-    main.state.llm_request_started()
+    main.dispatcher.running = Ticket("interactive")
 
     task = asyncio.create_task(main._idle_evictor())
     await asyncio.sleep(0.2)
     task.cancel()
 
     assert router.unload_calls == []
-    assert arbiter.calls == []
+    assert arbiter.names("release") == []
 
 
-# -- the in-flight refcount that gates all of the above --
+@pytest.mark.asyncio
+async def test_a_request_arriving_during_eviction_waits_for_it(monkeypatch, arbiter):
+    """
+    The race this closes: the evictor used to unload and poll for up to a
+    minute without holding anything, so a request that started meanwhile could
+    have the image server stopped and the lease released under it.
+    """
+    router = FakeRouter(resident=["brain"])
+    monkeypatch.setattr(main, "_http_client", router)
+    slow = asyncio.Event()
+    real_unload = main._unload_resident_models
 
-def test_llm_refcount():
-    main.state.llm_request_started()
-    main.state.llm_request_started()
-    assert main.state.llm_inflight == 2
-    main.state.llm_request_finished()
-    assert main.state.llm_inflight == 1
-    main.state.llm_request_finished()
-    main.state.llm_request_finished()  # over-release must not go negative
-    assert main.state.llm_inflight == 0
+    async def unload(resident=None):
+        await slow.wait()
+        return await real_unload(resident)
+    monkeypatch.setattr(main, "_unload_resident_models", unload)
+
+    async with main.dispatcher.maintenance() as ok:
+        assert ok
+        turn = asyncio.create_task(main.dispatcher.turn("interactive", label="brain"))
+        await asyncio.sleep(0.05)
+        assert not turn.done(), "a request started while the evictor held the backend"
+    ticket = await turn
+    main.dispatcher.finish(ticket)
+
+
+@pytest.mark.asyncio
+async def test_maintenance_is_refused_while_anything_waits(arbiter):
+    main.dispatcher.running = Ticket("interactive")
+    async with main.dispatcher.maintenance() as ok:
+        assert not ok
+
+
+@pytest.mark.asyncio
+async def test_a_stale_lease_from_before_a_restart_is_cleared(arbiter):
+    """
+    The proxy restarted mid-request: the arbiter still holds `llm` for it, which
+    is kind: none and never reaped. Holding nothing, the proxy releases both
+    names so the stale lease cannot outrank every job forever.
+    """
+    main.dispatcher.lease.held = None
+    arbiter.holder = "llm"
+    await main.dispatcher.release_lease_if_idle()
+    assert arbiter.holder is None

@@ -83,7 +83,7 @@ Two models serve this area, and the split is deliberate:
 │   ┌──────────────────────┐              ┌───────────────────────────┐  │
 │   │  Proxy :11436        │─── acquire ─▶│  Arbiter :11438           │  │
 │   │  routes by alias     │◀── granted ──│  leases the card;         │  │
-│   │  serialises via lock │              │  reads NVML; starts       │  │
+│   │  schedules requests  │              │  reads NVML; starts       │  │
 │   │  idle-evicts         │              │  nothing                  │  │
 │   └──────────────────────┘              └───────────────────────────┘  │
 │        │              │                        ▲            ▲          │
@@ -116,7 +116,7 @@ One `llama-server` instance serves every model:
 |---|---|---|---|
 | `llama-swappable` | `:11434` | Router mode, one model resident at a time | `--models-preset /models.ini --models-max 1` |
 
-The router loads a model on first request and evicts the previous one; there is no explicit load API to call. The proxy enforces that only one swappable request is in flight at a time via `asyncio.Lock`.
+The router loads a model on first request and evicts the previous one; there is no explicit load API to call. The proxy runs one request at a time, people ahead of batch work (`proxy/dispatcher.py`).
 
 ### 4b. GPU arbitration
 
@@ -204,11 +204,12 @@ The proxy is **model-aware** but **content-blind**. It knows which model is load
 model = extract_model_from_body(request)
 
 if model is not None:                     # every other named model
-    granted = arbiter.acquire()           # blocks until junior tenants are gone
-    if not granted:
+    klass = BATCH if model in BATCH_MODELS else INTERACTIVE
+    turn = dispatcher.turn(klass)         # one at a time; people first; holds the
+                                          # lease for klass (llm / llm-batch)
+    if refused:                           # interactive only; batch waits and retries
         return 503, Retry-After: 30
-    async with state.lock:                # one swappable request at a time
-        return forward(LLAMA_SWAPPABLE, on_complete=release_if_idle)
+    return forward(LLAMA_SWAPPABLE, on_complete=dispatcher.finish)
 
 return forward(LLAMA_SWAPPABLE)           # bodyless requests, e.g. GET /v1/models
 ```
@@ -400,7 +401,7 @@ Two history-service jobs (details in [`history-service/README.md`](../../history
 - `media_store.py` keeps a local copy of every image attachment under `/archive/media`. Before downloading, it re-signs expired CDN links through Discord's `attachments/refresh-urls`.
 - `image_captioner.py` sends each stored image to the proxy's `caption` preset (Qwen3.6-27B heretic plus vision projector).
 
-`caption` is in the proxy's `BATCH_MODELS`, so the backfill runs as arbiter job `llm-batch`: below any person, above video, and also above the LoRA trainer.
+`caption` is in the proxy's `BATCH_MODELS`, so the backfill runs as arbiter job `llm-batch`: below any person and the profiler, above video, and also above the LoRA trainer. `llm-batch` is cooperative, so the profiler gets a card the proxy has really freed.
 
 Every caption carries `caption_excluded_from_training: true`. The distinction it encodes: a caption is **read-only context**. RAG ingestion appends it to the message's effective text so image content is searchable; a future training exporter must never treat it as training data, because a synthetic description is not the user's voice.
 

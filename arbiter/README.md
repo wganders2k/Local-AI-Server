@@ -109,12 +109,20 @@ run. It says one thing only: **how the card is taken back from it.**
 
 | kind | reclaim | used by |
 |---|---|---|
-| `none` | drop the lease; nothing to tear down | `llm` |
-| `cooperative` | tell the job; it stops its own GPU process | `video-processing`, `lora-trainer` |
+| `none` | drop the lease; nothing to tear down | `llm`, `profile-segment` |
+| `cooperative` | tell the job; it stops its own GPU process | `llm-batch`, `video-processing`, `lora-trainer` |
 | `container` | `docker kill` — cgroup teardown | nothing, currently |
 
-`none` is correct only because nothing outranks the job that uses it, so its
-unenforceable reclaim is never actually exercised.
+`none` is correct only where its unenforceable reclaim does no harm: nothing
+outranks `llm`, and `profile-segment` is outranked only by `llm`. Anything a
+`none` job outranks or follows may still be resident, which is why
+`profile-segment` states a `required_mb`: the headroom check, not the reclaim,
+keeps it off a card that is still full.
+
+`llm-batch` is the proxy while it has only batch work (see
+[`proxy/dispatcher.py`](../proxy/dispatcher.py)). It is outranked by the
+profiler, so it is `cooperative`: told through the reclaim notice, the proxy
+finishes the running call, unloads and releases.
 
 `cooperative` is what both real tenants ended up as, for the same reason in each
 case: **the process holding the CUDA context is not the process the arbiter can

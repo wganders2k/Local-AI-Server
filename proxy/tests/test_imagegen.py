@@ -11,7 +11,7 @@ from httpx import ASGITransport
 
 import imagegen
 import main
-from tests.test_gpu_gate import Backend, FakeArbiter
+from tests.fakes import Backend, install_dispatcher, settle
 
 SIZES = {"1024x1024", "768x768"}
 
@@ -76,9 +76,7 @@ class Router:
 
 @pytest.fixture
 def setup(monkeypatch):
-    arb = FakeArbiter()
-    monkeypatch.setattr(main, "arbiter", arb)
-    monkeypatch.setattr(main, "batch_arbiter", FakeArbiter())
+    arb, _ = install_dispatcher(monkeypatch)
     server = FakeImageServer()
     monkeypatch.setattr(main, "image_server", server)
     monkeypatch.setattr(main, "IMAGEGEN_ENABLED", True)
@@ -89,9 +87,6 @@ def setup(monkeypatch):
     backend = Backend()
     monkeypatch.setattr(main, "_forward", backend.forward)
     main.state.current_model = None
-    while main.state.llm_inflight:
-        main.state.llm_request_finished()
-    main.state._interactive_active = 0
     return arb, server, router, backend
 
 
@@ -112,18 +107,18 @@ async def test_generation_is_gated_and_sends_only_the_clean_body(client, setup):
     r = await client.post("/v1/images/generations", json={"prompt": "goose", "image": "data:x"})
     assert r.status_code == 200 and r.json()["data"][0]["b64_json"] == "AAAA"
     assert server.bodies == [{"prompt": "goose", "size": "1024x1024", "n": 1, "response_format": "b64_json"}]
-    assert arb.calls[0] == "acquire"
-    await asyncio.sleep(0)
-    assert "release" in arb.calls
-    assert main.state.llm_inflight == 0 and not main.state.lock.locked()
+    assert arb.calls[0] == ("acquire", "llm")
+    await settle()
+    assert ("release", "llm") in arb.calls
+    assert main.dispatcher.running is None
 
 
 async def test_refused_gpu_never_reaches_the_image_server(client, setup):
     arb, server, _, _ = setup
-    arb.granted = False
+    arb.refusals["llm"] = "no"
     r = await client.post("/v1/images/generations", json={"prompt": "goose"})
     assert r.status_code == 503 and server.bodies == []
-    assert main.state.queue_depth == 0
+    assert main.dispatcher.queue_depth == 0 and main.dispatcher.running is None
 
 
 @pytest.mark.parametrize("path", ["/v1/images/edits", "/v1/images/variations"])
@@ -156,7 +151,7 @@ async def test_a_failed_stop_never_loads_the_big_model(client, setup):
     server.running, server.stop_ok = True, False
     with pytest.raises(RuntimeError):
         await client.post("/v1/chat/completions", json={"model": "brain-dense-heretic"})
-    assert backend.calls == [] and not main.state.lock.locked()
+    assert backend.calls == [] and main.dispatcher.running is None
 
 
 # ---- ImageServer against a fake Docker API ---------------------------------
@@ -197,10 +192,11 @@ async def test_idle_evictor_stops_the_image_server_before_reporting_room(setup, 
     server.running, server.stop_ok = True, stop_ok
     monkeypatch.setattr(main, "IDLE_EVICT_POLL_SECONDS", 0.01)
     monkeypatch.setattr(main, "IDLE_EVICT_SECONDS", 0.0)
+    arb.holder, main.dispatcher.lease.held = "llm", "interactive"
     main.state.record_request()
     task = asyncio.create_task(main._idle_evictor())
     await asyncio.sleep(0.2)
     task.cancel()
     assert "stop" in server.events
     # No room is reported while the image server may still hold its 11 GB.
-    assert ("release" in arb.calls) is stop_ok
+    assert (("release", "llm") in arb.calls) is stop_ok
