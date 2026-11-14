@@ -13,7 +13,9 @@ its on-disk <publisher>/<repo> path, with any exception listed in
 HF_REPO_OVERRIDES below.
 
 The image server's files are named in docker-compose.yml (the `imagegen`
-command:), not models.ini, so they are listed explicitly in IMAGEGEN_MODELS.
+command:), not models.ini. IMAGEGEN_MODELS lists the defaults; any of them set
+in .env (IMAGEGEN_DIFFUSION_MODEL, IMAGEGEN_TEXT_ENCODER, IMAGEGEN_VAE) is
+downloaded instead.
 
 Usage:
   python scripts/download_models.py [--models-dir /path/to/models] [--dry-run]
@@ -26,8 +28,8 @@ Environment variables:
   MODELS_DIR     — Override default model storage directory (default: /srv/models)
 
 To add or change a model:
-  1. Add/edit a [section] in models.ini (image server: IMAGEGEN_MODELS below
-     and the imagegen command: in docker-compose.yml).
+  1. Add/edit a [section] in models.ini (image server: the IMAGEGEN_* paths
+     in .env).
   2. Run: make models-download
   3. Run: make restart-llama-swappable
 """
@@ -50,8 +52,8 @@ except ImportError:
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MODELS_INI_PATH = REPO_ROOT / "models.ini"
 
-# Image generation (compose service `imagegen`, sd-server) — its files are
-# named in docker-compose.yml's imagegen command:, not models.ini.
+# Image generation (compose service `imagegen`, sd-server) — the defaults of
+# docker-compose.yml's imagegen command:, not models.ini.
 IMAGEGEN_MODELS = [
     {
         "repo_id":   "leejet/Z-Image-Turbo-GGUF",
@@ -77,6 +79,47 @@ IMAGEGEN_MODELS = [
         "target":    "ae.safetensors",
     },
 ]
+
+# The .env keys that override IMAGEGEN_MODELS, in the same order.
+IMAGEGEN_ENV_KEYS = ["IMAGEGEN_DIFFUSION_MODEL", "IMAGEGEN_TEXT_ENCODER", "IMAGEGEN_VAE"]
+
+
+def read_env_file(path: Path) -> dict[str, str]:
+    """KEY=VALUE lines of a compose .env file; comments and blanks skipped."""
+    if not path.exists():
+        return {}
+    env = {}
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, value = line.split("=", 1)
+            env[key.strip()] = value.strip().strip("'\"")
+    return env
+
+
+def imagegen_models(env: dict[str, str]) -> list[dict]:
+    """
+    IMAGEGEN_MODELS with any .env override applied. An override is a path
+    under MODELS_DIR of the form <publisher>/<repo>/<file in repo>, so it is
+    also the download spec: hf_hub_download keeps the file's subdirectories
+    under local_dir, which lands it exactly where compose looks.
+    """
+    models = []
+    for key, default in zip(IMAGEGEN_ENV_KEYS, IMAGEGEN_MODELS):
+        path = env.get(key)
+        if not path:
+            models.append(default)
+            continue
+        publisher, repo, filename = path.split("/", 2)
+        models.append({
+            "repo_id":   f"{publisher}/{repo}",
+            "filename":  filename,
+            "local_dir": f"{publisher}/{repo}",
+            "slot":      "imagegen",
+            "notes":     f"{key} (set in .env)",
+        })
+    return models
+
 
 # Cases where a GGUF's on-disk <publisher>/<repo> path (as used in models.ini
 # and MODELS_DIR) doesn't match its actual HuggingFace repo id.
@@ -226,7 +269,8 @@ def main() -> None:
     if args.slot != "all":
         print(f"  Slot filter: {args.slot} only")
 
-    all_models = load_swappable_models(models_ini_path) + IMAGEGEN_MODELS
+    env = {**read_env_file(REPO_ROOT / ".env"), **os.environ}
+    all_models = load_swappable_models(models_ini_path) + imagegen_models(env)
 
     # Filter by slot if requested
     models_to_download = [

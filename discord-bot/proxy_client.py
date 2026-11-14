@@ -271,9 +271,10 @@ class ProxyClient:
         _check_status(response.status_code, response.text, "Proxy /status")
         return response.json().get("queue_depth", 0)
 
-    async def generate_image(self, prompt: str, size: str) -> bytes:
+    async def generate_image(self, prompt: str, size: str, n: int = 1) -> list[bytes]:
         """
-        One image from a text prompt, as the image file's bytes (PNG).
+        n images from one text prompt, each as the image file's bytes (PNG).
+        The image server gives each its own seed, so they differ.
 
         Text only: the proxy builds its own request from the prompt and size
         and refuses image inputs (proxy/imagegen.py).
@@ -284,12 +285,15 @@ class ProxyClient:
         """
         client = await self._get_client()
         with _transport_errors("Image generation timed out. The GPU may be busy."):
-            response = await client.post("/v1/images/generations", json={"prompt": prompt, "size": size})
+            response = await client.post("/v1/images/generations", json={"prompt": prompt, "size": size, "n": n})
         _check_status(response.status_code, response.text, "Image generation")
         try:
-            return base64.b64decode(response.json()["data"][0]["b64_json"])
-        except (KeyError, IndexError, ValueError, TypeError) as exc:
+            images = [base64.b64decode(item["b64_json"]) for item in response.json()["data"]]
+        except (KeyError, ValueError, TypeError) as exc:
             raise ProxyError(f"Image generation returned no image ({exc})") from exc
+        if not images:
+            raise ProxyError("Image generation returned no image")
+        return images
 
     async def models_payload(self) -> list[dict]:
         """

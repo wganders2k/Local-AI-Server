@@ -33,6 +33,7 @@ from config import (
     IMAGEGEN_COEXIST_MODELS,
     IMAGEGEN_DEFAULT_SIZE,
     IMAGEGEN_ENABLED,
+    IMAGEGEN_MAX_IMAGES,
     IMAGEGEN_MAX_PROMPT_CHARS,
     IMAGEGEN_REQUEST_TIMEOUT,
     IMAGEGEN_SIZES,
@@ -515,7 +516,8 @@ async def images_generations(request: Request) -> Response:
     if not IMAGEGEN_ENABLED:
         return _json_error(503, "imagegen_disabled", "Image generation is not enabled on this server.")
     try:
-        body = clean_request(await request.json(), IMAGEGEN_SIZES, IMAGEGEN_MAX_PROMPT_CHARS, IMAGEGEN_DEFAULT_SIZE)
+        body = clean_request(await request.json(), IMAGEGEN_SIZES, IMAGEGEN_MAX_PROMPT_CHARS, IMAGEGEN_DEFAULT_SIZE,
+                             IMAGEGEN_MAX_IMAGES)
     except (RequestError, ValueError) as exc:
         return _json_error(400, "invalid_request", str(exc))
 
@@ -530,7 +532,7 @@ async def images_generations(request: Request) -> Response:
                 return _json_error(503, "vram_unavailable", "Could not unload the chat model. Retry shortly.")
         t0 = time.monotonic()
         resp = await image_server.generate(_http_client, body)
-        logger.info(f"[imagegen] HTTP {resp.status_code} in {time.monotonic() - t0:.1f}s ({body['size']})")
+        logger.info(f"[imagegen] HTTP {resp.status_code} in {time.monotonic() - t0:.1f}s ({body['n']}× {body['size']})")
         PROXY_REQUESTS.labels(model="imagegen", status=str(resp.status_code)).inc()
         PROXY_REQUEST_DURATION.labels(model="imagegen").observe(time.monotonic() - t0)
         return Response(content=resp.content, status_code=resp.status_code, media_type="application/json")

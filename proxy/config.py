@@ -50,17 +50,27 @@ IMAGEGEN_URL = os.environ.get("IMAGEGEN_URL", "http://imagegen:8080")
 # docker-compose.yml. Reached through docker-socket-proxy, never the real socket.
 IMAGEGEN_CONTAINER = os.environ.get("IMAGEGEN_CONTAINER", "imagegen")
 DOCKER_URL = os.environ.get("DOCKER_URL", "http://docker-socket-proxy:2375")
-# Start to listening measured at 8 s; the rest is headroom for a cold disk.
+# Start to listening measured at 1–8 s; the rest is headroom for a cold disk.
 IMAGEGEN_START_TIMEOUT = float(os.environ.get("IMAGEGEN_START_TIMEOUT", "90"))
-# A warm 1024² image took 10.9 s, the first one 15.5 s with its weight load.
+# A warm 1024² image takes 6–7 s on the sm_86 build, the first ~14 s with its
+# weight load.
 IMAGEGEN_REQUEST_TIMEOUT = float(os.environ.get("IMAGEGEN_REQUEST_TIMEOUT", "300"))
-# Z-Image-Turbo works in multiples of 64; these are ~1 megapixel each, so all
-# cost about the same 11 s. Anything else is refused rather than guessed at.
+# The supported image models work in multiples of 64; these are ~1 megapixel
+# each, so all cost about the same. Anything else is refused rather than
+# guessed at.
 IMAGEGEN_SIZES: set[str] = {"1024x1024", "832x1216", "1216x832", "768x768"}
 IMAGEGEN_DEFAULT_SIZE = "1024x1024"
 IMAGEGEN_MAX_PROMPT_CHARS = 2000
-# Chat models small enough to stay loaded beside the image server: ~11.2 GB +
-# the 12B mimic base's ~9.3 GB ≈ 20.5 GB of 24. Anything
-# else (the 27B lore agent alone holds 21.25 GB) is unloaded first, and the
-# image server is stopped before any other model loads.
-IMAGEGEN_COEXIST_MODELS: set[str] = {"mimic-multi", "mimic-base", "mimic-candidate"}
+# Images per request. sd-server makes them one after another, each with its own
+# seed, encoding the prompt once; ~7 s each warm.
+IMAGEGEN_MAX_IMAGES = 3
+# Chat models small enough to stay loaded beside the image server. Z-Image-Turbo
+# (~14 GB) leaves room for the 12B mimic base (~9.3 GB), the default; a 12B
+# image model (~20 GB) leaves room for nothing, so .env sets this empty.
+# Anything not listed is unloaded first, and the image server is stopped
+# before any other model loads.
+IMAGEGEN_COEXIST_MODELS: set[str] = {
+    m.strip()
+    for m in os.environ.get("IMAGEGEN_COEXIST_MODELS", "mimic-multi,mimic-base,mimic-candidate").split(",")
+    if m.strip()
+}

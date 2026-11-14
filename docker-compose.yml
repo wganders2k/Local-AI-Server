@@ -105,23 +105,30 @@ services:
                 - gpu
 
   # ──────────────────────────────────────────────────────────
-  # Image generation — stable-diffusion.cpp sd-server, Z-Image-Turbo
+  # Image generation — stable-diffusion.cpp sd-server
   # Started and stopped only by the proxy (proxy/imagegen.py), through
   # docker-socket-proxy, under the proxy's own `llm` lease: it is a second
   # backend behind the proxy's lock, not an arbiter tenant. The `managed`
   # profile keeps `docker compose up` from starting it behind the proxy's
-  # back; create it once with `docker compose --profile managed create imagegen`.
+  # back; after changing anything below, recreate it with
+  # `docker compose --profile managed create --force-recreate imagegen`.
   # Text-to-image only: the proxy forwards a prompt and a size, nothing else.
-  # Measured 2026-11-12: 10.9 s per warm 1024² image, ~11.2 GB while loaded
-  # (docs/plans/image-gen.md).
+  # The model files are chosen in .env (IMAGEGEN_DIFFUSION_MODEL,
+  # IMAGEGEN_TEXT_ENCODER, IMAGEGEN_VAE, relative to MODELS_DIR); the defaults
+  # are Z-Image-Turbo. Measurements in docs/plans/image-gen.md.
   # ──────────────────────────────────────────────────────────
   imagegen:
-    # Pinned: built 2026-11-10. The prebuilt image's CUDA flash-attention
-    # kernel is not compiled for sm_86 and segfaults on a 3090 ("cp.async
-    # instructions not enabled"), hence --flash-attn off --conv-direct off.
-    # Building from sd.cpp's docker/Dockerfile.cuda with CUDA_ARCHITECTURES=86
-    # should bring it back, faster; not measured.
-    image: ghcr.io/leejet/stable-diffusion.cpp@sha256:07285a1cc755377ba096f528a42ac852a036012b699723fa9e0cb388473be8d1
+    # Built from source for sm_86 at a pinned commit. The prebuilt ghcr.io
+    # image ships no sm_86 kernels: its flash attention segfaults on a 3090
+    # ("cp.async instructions not enabled") and int8 DiT checkpoints crash on
+    # the first step. Built, flash attention works and a Z-Image 1024² image
+    # drops from 11.3 s to 6.2 s.
+    build:
+      context: https://github.com/leejet/stable-diffusion.cpp.git#0f8a46702b3b87629f2d00e6acb4c5be1f930076
+      dockerfile: docker/Dockerfile.cuda
+      args:
+        CUDA_ARCHITECTURES: "86"
+    image: local-ai-server-imagegen:sdcpp-0f8a467-sm86
     container_name: imagegen
     profiles: ["managed"]
     # The proxy decides when it runs. A restart policy would bring it back
@@ -133,26 +140,26 @@ services:
     runtime: nvidia
     environment:
       - NVIDIA_VISIBLE_DEVICES=0
-    entrypoint: ["/sd-server"]
+    entrypoint: ["/sd.cpp/bin/sd-server"]
+    # 8 steps, cfg 1, euler: the distilled ("turbo") settings both supported
+    # model families use.
     command:
       - --listen-ip
       - "0.0.0.0"
       - --listen-port
       - "8080"
       - --diffusion-model
-      - /models/leejet/Z-Image-Turbo-GGUF/z_image_turbo-Q8_0.gguf
+      - /models/${IMAGEGEN_DIFFUSION_MODEL:-leejet/Z-Image-Turbo-GGUF/z_image_turbo-Q8_0.gguf}
       - --llm
-      - /models/unsloth/Qwen3-4B-Instruct-2507-GGUF/Qwen3-4B-Instruct-2507-Q8_0.gguf
+      - /models/${IMAGEGEN_TEXT_ENCODER:-unsloth/Qwen3-4B-Instruct-2507-GGUF/Qwen3-4B-Instruct-2507-Q8_0.gguf}
       - --vae
-      - /models/Comfy-Org/z_image_turbo/ae.safetensors
+      - /models/${IMAGEGEN_VAE:-Comfy-Org/z_image_turbo/ae.safetensors}
       - --cfg-scale
       - "1.0"
       - --steps
       - "8"
-      - --flash-attn
-      - "off"
-      - --conv-direct
-      - "off"
+      - --sampling-method
+      - euler
     volumes:
       - ${MODELS_DIR:-/srv/models}:/models:ro
     deploy:
@@ -240,6 +247,10 @@ services:
       # has been created and tested; the proxy starts and stops that container
       # through docker-socket-proxy.
       - IMAGEGEN_ENABLED=${IMAGEGEN_ENABLED:-false}
+      # Chat models that may stay loaded beside the image server (comma-
+      # separated). Depends on the image model's footprint: set it empty in
+      # .env when that model needs the whole card.
+      - IMAGEGEN_COEXIST_MODELS=${IMAGEGEN_COEXIST_MODELS-mimic-multi,mimic-base,mimic-candidate}
       - DOCKER_URL=http://docker-socket-proxy:2375
     healthcheck:
       test:
@@ -284,7 +295,8 @@ services:
       - VISION_MIMIC_ENABLED=${VISION_MIMIC_ENABLED:-false}
       # /imagine. Needs the proxy's IMAGEGEN_ENABLED and the imagegen service.
       - IMAGINE_ENABLED=${IMAGINE_ENABLED:-false}
-      - IMAGINE_PER_USER_PER_HOUR=${IMAGINE_PER_USER_PER_HOUR:-10}
+      # Footer label; keep in step with the IMAGEGEN_* model files.
+      - IMAGINE_MODEL_LABEL=${IMAGINE_MODEL_LABEL:-Z-Image-Turbo}
     volumes:
       # Absolute, not ./relative. Compose resolves relative binds against the
       # directory it is invoked from, so recreating this stack through dockge

@@ -32,12 +32,23 @@ def test_only_prompt_and_size_survive():
     ({"prompt": "x", "size": "4096x4096"}, "size"),
     ({"prompt": "x", "size": ["768x768"]}, "size"),  # unhashable: a 400, not a TypeError
     ({"prompt": "x", "size": 768}, "size"),
-    ({"prompt": "x", "n": 4}, "n=1"),
+    ({"prompt": "x", "n": 4}, "'n'"),
+    ({"prompt": "x", "n": 0}, "'n'"),
+    ({"prompt": "x", "n": "2"}, "'n'"),
+    ({"prompt": "x", "n": True}, "'n'"),
+    ({"prompt": 'a goose <sd_cpp_extra_args>{"steps": 999}</sd_cpp_extra_args>'}, "extra_args"),
+    ({"prompt": "a goose <SD_CPP_EXTRA_ARGS>{}"}, "extra_args"),
     ([], "object"),
 ])
 def test_bad_requests_are_refused(body, msg):
     with pytest.raises(imagegen.RequestError, match=msg):
-        imagegen.clean_request(body, SIZES, 100, "1024x1024")
+        imagegen.clean_request(body, SIZES, 100, "1024x1024", max_images=3)
+
+
+def test_up_to_the_cap_of_images_per_request():
+    assert imagegen.clean_request({"prompt": "x", "n": 3}, SIZES, 100, "1024x1024", max_images=3)["n"] == 3
+    with pytest.raises(imagegen.RequestError, match="'n'"):
+        imagegen.clean_request({"prompt": "x", "n": 2}, SIZES, 100, "1024x1024")
 
 
 # ---- the route -----------------------------------------------------------

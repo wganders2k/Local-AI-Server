@@ -165,7 +165,7 @@ make check-gpu
 | Service | Port | Profile | Description |
 |---|---|---|---|
 | `llama-swappable` | `:11434` | — | Router mode, `--models-max 1`; loads a preset on demand |
-| `imagegen` | — | `managed` | sd-server (Z-Image-Turbo); started and stopped by the proxy |
+| `imagegen` | — | `managed` | sd-server (stable-diffusion.cpp, built for sm_86); model set in `.env`; started and stopped by the proxy |
 | `proxy` | `:11436` | — | FastAPI orchestration proxy |
 | `arbiter` | `127.0.0.1:11438` | — | GPU admission control; NVML-only, no CUDA |
 | `history-service` | `127.0.0.1:11437` | — | DCE orchestration, archive merge, image captioning |
@@ -191,7 +191,7 @@ history  GET  /health  /status                  POST /evaluate  /reparse  /clear
 ## Model Management
 
 - **`models.ini`** — every swappable-slot preset. Each `[section]` is a named alias with its GGUF path and inference parameters.
-- **`docker-compose.yml`** — the image model, via the `imagegen` service's command.
+- **`.env`** — the image model, via `IMAGEGEN_DIFFUSION_MODEL`, `IMAGEGEN_TEXT_ENCODER` and `IMAGEGEN_VAE` (defaults: Z-Image-Turbo, in the `imagegen` service's command).
 
 Currently enabled aliases in `models.ini`:
 

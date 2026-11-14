@@ -10,8 +10,8 @@ proxy already holds whenever anyone is chatting.
 
 The container is stopped whenever it is not needed, so it holds no VRAM at
 all — not even the ~300 MB of an idle CUDA context, which matters next to a
-21 GB lore agent on a 24 GB card. It is started on the first request (~8 s
-to listening, then ~5 s of weights on the first image) and stopped:
+21 GB lore agent on a 24 GB card. It is started on the first request (1–8 s
+to listening, then several seconds of weights on the first image) and stopped:
 - before a chat model that does not fit beside it is loaded;
 - by the idle evictor, with everything else;
 - when the proxy starts, so a container `compose up` started is not left
@@ -25,8 +25,9 @@ happen. `clean_request` builds a fresh body from the prompt and a size from an
 allowlist; nothing else the caller sends reaches the server. The edit and
 variation endpoints are refused outright by main.py.
 
-Measured 2026-11-12 (Z-Image-Turbo Q8, docs/plans/image-gen.md): 10.9 s per
-warm 1024² image, ~11.2 GB resident.
+Measured 2026-11-13 on the sm_86 build (docs/plans/image-gen.md): 6–7 s per
+warm 1024² image. Peak memory depends on the model .env selects: ~14 GB for
+Z-Image-Turbo Q8, ~20 GB for a 12B int8 DiT.
 """
 
 import asyncio
@@ -42,9 +43,16 @@ class RequestError(ValueError):
     """The caller's request cannot be served as asked; the message says why."""
 
 
-def clean_request(body: object, sizes: set[str], max_prompt_chars: int, default_size: str) -> dict:
+# sd-server lifts `<sd_cpp_extra_args>{json}</sd_cpp_extra_args>` out of the
+# prompt and applies it as generation parameters, reference images included.
+# Allowing it would bypass both the size allowlist and the text-only rule.
+_EXTRA_ARGS_TAG = "<sd_cpp_extra_args"
+
+
+def clean_request(body: object, sizes: set[str], max_prompt_chars: int, default_size: str,
+                  max_images: int = 1) -> dict:
     """
-    The only body ever sent to the image server: prompt, size, one image,
+    The only body ever sent to the image server: prompt, size, how many images,
     base64. Raises RequestError for anything the caller must fix.
     """
     if not isinstance(body, dict):
@@ -54,12 +62,15 @@ def clean_request(body: object, sizes: set[str], max_prompt_chars: int, default_
         raise RequestError("'prompt' is required")
     if len(prompt) > max_prompt_chars:
         raise RequestError(f"'prompt' is longer than {max_prompt_chars} characters")
+    if _EXTRA_ARGS_TAG in prompt.lower():
+        raise RequestError("'prompt' may not carry sd_cpp_extra_args")
     size = body.get("size") or default_size
     if not isinstance(size, str) or size not in sizes:
         raise RequestError(f"'size' must be one of {sorted(sizes)}")
-    if body.get("n", 1) != 1:
-        raise RequestError("only n=1 is supported")
-    return {"prompt": prompt.strip(), "size": size, "n": 1, "response_format": "b64_json"}
+    n = body.get("n", 1)
+    if isinstance(n, bool) or not isinstance(n, int) or not 1 <= n <= max_images:
+        raise RequestError(f"'n' must be an integer from 1 to {max_images}")
+    return {"prompt": prompt.strip(), "size": size, "n": n, "response_format": "b64_json"}
 
 
 class ImageServer:
