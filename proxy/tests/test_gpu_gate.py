@@ -37,7 +37,8 @@ def backend(monkeypatch):
 def clean_state(monkeypatch):
     main.state.current_model = None
     main.state.last_request_at = None
-    monkeypatch.setattr(main.image_server, "running", False)
+    for server in main.image_servers.values():
+        monkeypatch.setattr(server, "running", False)
     yield
 
 

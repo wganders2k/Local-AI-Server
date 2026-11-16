@@ -45,10 +45,17 @@ IDLE_EVICT_UNLOAD_TIMEOUT = float(os.environ.get("IDLE_EVICT_UNLOAD_TIMEOUT", "6
 
 # Image generation (imagegen.py) — off until the imagegen service is deployed.
 IMAGEGEN_ENABLED = os.environ.get("IMAGEGEN_ENABLED", "false").lower() not in ("false", "0", "no")
-IMAGEGEN_URL = os.environ.get("IMAGEGEN_URL", "http://imagegen:8080")
-# The container the proxy starts and stops; must match container_name in
-# docker-compose.yml. Reached through docker-socket-proxy, never the real socket.
-IMAGEGEN_CONTAINER = os.environ.get("IMAGEGEN_CONTAINER", "imagegen")
+# The image servers a request may name, each as (URL, container). The
+# container is the one the proxy starts and stops; it must match container_name
+# in docker-compose.yml. Reached through docker-socket-proxy, never the real
+# socket. `alt` is a second model for side-by-side testing (imagegen-alt in
+# docker-compose.yml); the two never run at once.
+IMAGEGEN_SERVERS: dict[str, tuple[str, str]] = {
+    "default": (os.environ.get("IMAGEGEN_URL", "http://imagegen:8080"),
+                os.environ.get("IMAGEGEN_CONTAINER", "imagegen")),
+}
+if os.environ.get("IMAGEGEN_ALT_ENABLED", "false").lower() not in ("false", "0", "no"):
+    IMAGEGEN_SERVERS["alt"] = ("http://imagegen-alt:8080", "imagegen-alt")
 DOCKER_URL = os.environ.get("DOCKER_URL", "http://docker-socket-proxy:2375")
 # Start to listening measured at 1–8 s; the rest is headroom for a cold disk.
 IMAGEGEN_START_TIMEOUT = float(os.environ.get("IMAGEGEN_START_TIMEOUT", "90"))
@@ -64,6 +71,22 @@ IMAGEGEN_MAX_PROMPT_CHARS = 2000
 # Images per request. sd-server makes them one after another, each with its own
 # seed, encoding the prompt once; ~7 s each warm.
 IMAGEGEN_MAX_IMAGES = 3
+# Sampling steps a request may ask for; the first is the default and the
+# image server's own (--steps in docker-compose.yml). The turbo models are
+# distilled for 8; 16 roughly doubles the time per image.
+IMAGEGEN_STEPS: tuple[int, ...] = (8, 16)
+# Image-to-image inputs. The file as sent (Discord's own upload cap is in this
+# range), and its pixel count before decoding — a small file can declare a
+# huge canvas. `strength` is how far from the input the result may move: 1.0
+# ignores it entirely, so the top of the range stays short of that.
+IMAGEGEN_MAX_INPUT_BYTES = 15 * 1024 * 1024
+IMAGEGEN_MAX_INPUT_PIXELS = 50_000_000
+IMAGEGEN_STRENGTH_RANGE: tuple[float, float] = (0.1, 0.95)
+# Classifier-free guidance a request may set. The turbo models are distilled
+# for 1 (guidance off, the image server's --cfg-scale); above 1 each step also
+# runs the empty prompt, so it takes ~2x as long, and distilled models tend to
+# oversaturate as it rises. The cap leaves room to see that happen.
+IMAGEGEN_CFG_RANGE: tuple[float, float] = (1.0, 7.0)
 # Chat models small enough to stay loaded beside the image server. Z-Image-Turbo
 # (~14 GB) leaves room for the 12B mimic base (~9.3 GB), the default; a 12B
 # image model (~20 GB) leaves room for nothing, so .env sets this empty.

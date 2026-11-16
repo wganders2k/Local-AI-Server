@@ -112,12 +112,13 @@ services:
   # profile keeps `docker compose up` from starting it behind the proxy's
   # back; after changing anything below, recreate it with
   # `docker compose --profile managed create --force-recreate imagegen`.
-  # Text-to-image only: the proxy forwards a prompt and a size, nothing else.
+  # The proxy forwards only allowlisted fields, and any starting image only
+  # after re-encoding it itself.
   # The model files are chosen in .env (IMAGEGEN_DIFFUSION_MODEL,
   # IMAGEGEN_TEXT_ENCODER, IMAGEGEN_VAE, relative to MODELS_DIR); the defaults
   # are Z-Image-Turbo. Measurements in docs/plans/image-gen.md.
   # ──────────────────────────────────────────────────────────
-  imagegen:
+  imagegen: &imagegen
     # Built from source for sm_86 at a pinned commit. The prebuilt ghcr.io
     # image ships no sm_86 kernels: its flash attention segfaults on a 3090
     # ("cp.async instructions not enabled") and int8 DiT checkpoints crash on
@@ -138,28 +139,23 @@ services:
     # Nothing in it is worth flushing.
     stop_signal: SIGKILL
     runtime: nvidia
+    # Model files come from the container's environment, so imagegen-alt
+    # differs only there; the shell expands them ($$ escapes compose's own
+    # interpolation) and execs sd-server in its place.
     environment:
-      - NVIDIA_VISIBLE_DEVICES=0
-    entrypoint: ["/sd.cpp/bin/sd-server"]
-    # 8 steps, cfg 1, euler: the distilled ("turbo") settings both supported
-    # model families use.
+      NVIDIA_VISIBLE_DEVICES: "0"
+      DIFFUSION_MODEL: ${IMAGEGEN_DIFFUSION_MODEL:-leejet/Z-Image-Turbo-GGUF/z_image_turbo-Q8_0.gguf}
+      TEXT_ENCODER: ${IMAGEGEN_TEXT_ENCODER:-unsloth/Qwen3-4B-Instruct-2507-GGUF/Qwen3-4B-Instruct-2507-Q8_0.gguf}
+      VAE: ${IMAGEGEN_VAE:-Comfy-Org/z_image_turbo/ae.safetensors}
+    # cfg 1 and euler: the distilled ("turbo") settings both supported model
+    # families use. --steps is the default; the proxy sends each request's
+    # own step count (its `steps`).
+    entrypoint: ["/bin/sh", "-c"]
     command:
-      - --listen-ip
-      - "0.0.0.0"
-      - --listen-port
-      - "8080"
-      - --diffusion-model
-      - /models/${IMAGEGEN_DIFFUSION_MODEL:-leejet/Z-Image-Turbo-GGUF/z_image_turbo-Q8_0.gguf}
-      - --llm
-      - /models/${IMAGEGEN_TEXT_ENCODER:-unsloth/Qwen3-4B-Instruct-2507-GGUF/Qwen3-4B-Instruct-2507-Q8_0.gguf}
-      - --vae
-      - /models/${IMAGEGEN_VAE:-Comfy-Org/z_image_turbo/ae.safetensors}
-      - --cfg-scale
-      - "1.0"
-      - --steps
-      - "8"
-      - --sampling-method
-      - euler
+      - >-
+        exec /sd.cpp/bin/sd-server --listen-ip 0.0.0.0 --listen-port 8080
+        --diffusion-model "/models/$$DIFFUSION_MODEL" --llm "/models/$$TEXT_ENCODER" --vae "/models/$$VAE"
+        --cfg-scale 1.0 --steps 8 --sampling-method euler
     volumes:
       - ${MODELS_DIR:-/srv/models}:/models:ro
     deploy:
@@ -168,6 +164,20 @@ services:
           devices:
             - capabilities:
                 - gpu
+
+  # A second image model for testing beside the first: the same image and
+  # settings with its own model files (IMAGEGEN_ALT_*, each falling back to the
+  # imagegen value). The proxy serves it to requests that name `alt` once
+  # IMAGEGEN_ALT_ENABLED is set, and never runs it beside imagegen. Create it
+  # with `docker compose --profile managed create --force-recreate imagegen-alt`.
+  imagegen-alt:
+    <<: *imagegen
+    container_name: imagegen-alt
+    environment:
+      NVIDIA_VISIBLE_DEVICES: "0"
+      DIFFUSION_MODEL: ${IMAGEGEN_ALT_DIFFUSION_MODEL:-${IMAGEGEN_DIFFUSION_MODEL:-leejet/Z-Image-Turbo-GGUF/z_image_turbo-Q8_0.gguf}}
+      TEXT_ENCODER: ${IMAGEGEN_ALT_TEXT_ENCODER:-${IMAGEGEN_TEXT_ENCODER:-unsloth/Qwen3-4B-Instruct-2507-GGUF/Qwen3-4B-Instruct-2507-Q8_0.gguf}}
+      VAE: ${IMAGEGEN_ALT_VAE:-${IMAGEGEN_VAE:-Comfy-Org/z_image_turbo/ae.safetensors}}
 
   # ──────────────────────────────────────────────────────────
   # GPU arbiter
@@ -247,6 +257,8 @@ services:
       # has been created and tested; the proxy starts and stops that container
       # through docker-socket-proxy.
       - IMAGEGEN_ENABLED=${IMAGEGEN_ENABLED:-false}
+      # Also serve the imagegen-alt model to requests that name `alt`.
+      - IMAGEGEN_ALT_ENABLED=${IMAGEGEN_ALT_ENABLED:-false}
       # Chat models that may stay loaded beside the image server (comma-
       # separated). Depends on the image model's footprint: set it empty in
       # .env when that model needs the whole card.
@@ -299,6 +311,10 @@ services:
       - IMAGINE_ENABLED=${IMAGINE_ENABLED:-false}
       # Footer label; keep in step with the IMAGEGEN_* model files.
       - IMAGINE_MODEL_LABEL=${IMAGINE_MODEL_LABEL:-Z-Image-Turbo}
+      # Servers that use the imagegen-alt model instead, as guild_id=alt pairs
+      # (comma-separated), and that model's footer label.
+      - IMAGINE_GUILD_MODELS=${IMAGINE_GUILD_MODELS:-}
+      - IMAGINE_ALT_MODEL_LABEL=${IMAGINE_ALT_MODEL_LABEL:-}
     volumes:
       # Absolute, not ./relative. Compose resolves relative binds against the
       # directory it is invoked from, so recreating this stack through dockge

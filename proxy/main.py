@@ -29,16 +29,20 @@ from config import (
     IDLE_EVICT_SECONDS,
     IDLE_EVICT_UNLOAD_TIMEOUT,
     DOCKER_URL,
-    IMAGEGEN_CONTAINER,
+    IMAGEGEN_CFG_RANGE,
     IMAGEGEN_COEXIST_MODELS,
     IMAGEGEN_DEFAULT_SIZE,
     IMAGEGEN_ENABLED,
     IMAGEGEN_MAX_IMAGES,
+    IMAGEGEN_MAX_INPUT_BYTES,
+    IMAGEGEN_MAX_INPUT_PIXELS,
     IMAGEGEN_MAX_PROMPT_CHARS,
     IMAGEGEN_REQUEST_TIMEOUT,
+    IMAGEGEN_SERVERS,
     IMAGEGEN_SIZES,
     IMAGEGEN_START_TIMEOUT,
-    IMAGEGEN_URL,
+    IMAGEGEN_STEPS,
+    IMAGEGEN_STRENGTH_RANGE,
     LLAMA_SWAPPABLE,
 )
 from arbiter import ArbiterClient
@@ -46,9 +50,10 @@ from dispatcher import BATCH, INTERACTIVE, Abandoned, Dispatcher, Lease, Refused
 from imagegen import ImageServer, RequestError, clean_request
 from state import state
 
-image_server = ImageServer(
-    IMAGEGEN_URL, DOCKER_URL, IMAGEGEN_CONTAINER, IMAGEGEN_START_TIMEOUT, IMAGEGEN_REQUEST_TIMEOUT
-)
+image_servers = {
+    name: ImageServer(url, DOCKER_URL, container, IMAGEGEN_START_TIMEOUT, IMAGEGEN_REQUEST_TIMEOUT)
+    for name, (url, container) in IMAGEGEN_SERVERS.items()
+}
 
 
 def build_dispatcher(llm_arbiter, batch_arbiter) -> Dispatcher:
@@ -107,9 +112,10 @@ async def lifespan(app: FastAPI):
     # kind: none and never reaped); this process holds nothing yet.
     await dispatcher.release_lease_if_idle()
     if IMAGEGEN_ENABLED:
-        # `compose up` may have started it; the proxy cannot know what it holds.
-        image_server.running = True
-        await image_server.stop(_http_client)
+        # `compose up` may have started one; the proxy cannot know what it holds.
+        for server in image_servers.values():
+            server.running = True
+        await _stop_image_servers()
     tasks = []
     if IDLE_EVICT_ENABLED:
         tasks.append(asyncio.create_task(_idle_evictor()))
@@ -206,11 +212,17 @@ async def _free_gpu() -> bool:
         logger.info(f"Unloading {resident}")
         if not await _unload_resident_models(resident):
             return False
-    if image_server.running:
-        logger.info("Stopping the image server")
-        if not await image_server.stop(_http_client):
-            return False
-    return True
+    return await _stop_image_servers()
+
+
+async def _stop_image_servers(keep: str | None = None) -> bool:
+    """Stop every running image server but `keep`. True once all are confirmed stopped."""
+    stopped = True
+    for name, server in image_servers.items():
+        if name != keep and server.running:
+            logger.info(f"Stopping the {name} image server")
+            stopped = await server.stop(_http_client) and stopped
+    return stopped
 
 
 async def _idle_evictor() -> None:
@@ -241,7 +253,7 @@ async def _idle_evictor() -> None:
                 if not ok:
                     continue
                 resident = await _resident_models()
-                if not resident and not image_server.running:
+                if not resident and not any(s.running for s in image_servers.values()):
                     continue
                 logger.info(f"Backend idle {idle:.0f}s — freeing the GPU")
                 if not await _free_gpu():
@@ -510,16 +522,22 @@ async def history_summary() -> list[dict]:
 @app.post("/v1/images/generations")
 async def images_generations(request: Request) -> Response:
     """
-    Text-to-image. Interactive work: a turn on the dispatcher and the `llm`
-    lease, like a chat message — see imagegen.py for why it is not a tenant.
+    Text-to-image, or image-to-image with an `image`. Interactive work: a turn
+    on the dispatcher and the `llm` lease, like a chat message — see
+    imagegen.py for why it is not a tenant.
     """
     if not IMAGEGEN_ENABLED:
         return _json_error(503, "imagegen_disabled", "Image generation is not enabled on this server.")
     try:
-        body = clean_request(await request.json(), IMAGEGEN_SIZES, IMAGEGEN_MAX_PROMPT_CHARS, IMAGEGEN_DEFAULT_SIZE,
-                             IMAGEGEN_MAX_IMAGES)
+        raw = await request.json()
+        body = clean_request(raw, IMAGEGEN_SIZES, IMAGEGEN_MAX_PROMPT_CHARS, IMAGEGEN_DEFAULT_SIZE,
+                             IMAGEGEN_MAX_IMAGES, IMAGEGEN_STEPS, IMAGEGEN_MAX_INPUT_BYTES,
+                             IMAGEGEN_MAX_INPUT_PIXELS, IMAGEGEN_STRENGTH_RANGE, IMAGEGEN_CFG_RANGE)
     except (RequestError, ValueError) as exc:
         return _json_error(400, "invalid_request", str(exc))
+    # OpenAI clients always send some `model`; one that names no image server
+    # here gets the default rather than a refusal.
+    name = raw.get("model") if raw.get("model") in image_servers else "default"
 
     ticket, refusal = await _take_turn(INTERACTIVE, request, "imagegen")
     if refusal is not None:
@@ -530,9 +548,18 @@ async def images_generations(request: Request) -> Response:
             logger.info(f"Image request: unloading {resident} to make room")
             if not await _unload_resident_models(resident):
                 return _json_error(503, "vram_unavailable", "Could not unload the chat model. Retry shortly.")
+        # Each image model needs most of the card: only one server runs at a time.
+        if not await _stop_image_servers(keep=name):
+            return _json_error(503, "vram_unavailable", "Could not stop the other image server. Retry shortly.")
         t0 = time.monotonic()
-        resp = await image_server.generate(_http_client, body)
-        logger.info(f"[imagegen] HTTP {resp.status_code} in {time.monotonic() - t0:.1f}s ({body['n']}× {body['size']})")
+        resp = await image_servers[name].generate(_http_client, body)
+        if "init_image" in body:
+            what = f"{body['batch_count']}× {body['width']}x{body['height']} from an image, strength {body['strength']}"
+        else:
+            what = f"{body['n']}× {body['size']}"
+        if raw.get("cfg") is not None:  # checked by clean_request
+            what += f", cfg {raw['cfg']}"
+        logger.info(f"[imagegen] {name}: HTTP {resp.status_code} in {time.monotonic() - t0:.1f}s ({what})")
         PROXY_REQUESTS.labels(model="imagegen", status=str(resp.status_code)).inc()
         PROXY_REQUEST_DURATION.labels(model="imagegen").observe(time.monotonic() - t0)
         return Response(content=resp.content, status_code=resp.status_code, media_type="application/json")
@@ -547,10 +574,11 @@ async def images_generations(request: Request) -> Response:
 @app.api_route("/v1/images/{rest:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
 async def images_other(rest: str) -> Response:
     """
-    Edits and variations take a source image, which is exactly what this
-    server does not accept (imagegen.py) — refused, never forwarded.
+    Edits (reference images) and variations are not offered; image-to-image
+    goes through /v1/images/generations with an `image`. Refused, never forwarded.
     """
-    return _json_error(403, "text_prompts_only", "Only text-to-image (/v1/images/generations) is available.")
+    return _json_error(403, "not_available",
+                       "Only /v1/images/generations is available; send an `image` there for image-to-image.")
 
 
 def _json_error(status: int, code: str, message: str, detail: str | None = None) -> Response:
@@ -609,10 +637,10 @@ async def proxy(path: str, request: Request) -> Response:
             return refusal
         finish = _finisher(ticket)
         try:
-            if image_server.running and model not in IMAGEGEN_COEXIST_MODELS:
+            if model not in IMAGEGEN_COEXIST_MODELS:
                 # Too big to share the card with it: stop it before the
                 # router loads anything, or the load OOMs.
-                if not await image_server.stop(_http_client):
+                if not await _stop_image_servers():
                     raise RuntimeError("the image server could not be stopped to make room")
             if state.current_model != model:
                 logger.info(f"Model switch: {state.current_model} → {model} (swappable slot evict + load)")

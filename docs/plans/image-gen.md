@@ -2,8 +2,9 @@
 
 Status: **live since 2026-11-12; runtime rebuilt and model made configurable
 2026-11-13** (see [Runtime and model update](#runtime-and-model-update-2026-11-13)).
-The user said go, with one condition: text prompts only, no seed images (their
-concern is server members being depicted negatively). Implementation:
+It launched text-to-image only. Image-to-image (a starting picture plus
+`strength`) was added 2026-11-15; reference-image editing is not offered.
+Implementation:
 `proxy/imagegen.py`, `discord-bot/cogs/imagine.py`, the `imagegen` service in
 docker-compose.yml.
 

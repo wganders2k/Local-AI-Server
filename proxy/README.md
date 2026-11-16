@@ -36,7 +36,7 @@ Two details worth knowing:
 
 `POST /v1/images/generations` serves text-to-image from the `imagegen` compose service (stable-diffusion.cpp `sd-server`, Z-Image-Turbo). It is a **second backend behind the proxy's own lock and `llm` lease, not an arbiter tenant**. An image is interactive work a person waits on, the same as a chat message. See `imagegen.py` and [`docs/plans/image-gen.md`](../docs/plans/image-gen.md).
 
-- **Text prompts only** (user decision, 2026-11-12: no seed images that could be used to depict server members). The proxy builds a fresh body from `prompt` and a `size` from an allowlist, with `n=1`; nothing else the caller sends is forwarded. `/v1/images/edits`, `/variations` and anything else under `/v1/images/` get a 403.
+- **Allowlisted requests only.** The proxy builds a fresh body from `prompt`, plus a `size`, an `n` (up to 3), a `steps` (8 or 16) and an optional `cfg` (guidance, 1–7; unset is the server's 1), each from an allowlist. An optional `image` (base64 or a data: URL, up to 15 MB and 50 MP) makes it image-to-image, with `strength` (0.1–0.95, default 0.65): the proxy decodes the picture, crops it to `size` and re-encodes it as a fresh PNG, then runs it as a job on sd-server's native API. An optional `model` picks the image server (`alt`; anything else gets the default). Nothing else the caller sends is forwarded. `/v1/images/edits`, `/variations` and anything else under `/v1/images/` get a 403.
 - **No VRAM held while idle.** The container is started on the first request (~8 s, then ~5 s to load weights) and stopped through `docker-socket-proxy` (`DOCKER_URL`):
   - by the idle evictor, together with the chat model;
   - before any chat model outside `IMAGEGEN_COEXIST_MODELS` loads;
@@ -52,7 +52,7 @@ Two details worth knowing:
 | `GET` | `/metrics` | Prometheus |
 | `GET` | `/history`, `/history/summary` | **Stubs returning `[]`.** Kept for Homepage compatibility; the data moved to Prometheus |
 | `POST` | `/v1/images/generations` | Text-to-image (see Image generation). 503 while `IMAGEGEN_ENABLED` is off |
-| `*` | `/v1/images/{rest}` | 403: image inputs are not accepted |
+| `*` | `/v1/images/{rest}` | 403: edits and variations are not offered (image-to-image goes through `/generations`) |
 | `*` | `/{path:path}` | Everything else, forwarded to the appropriate llama-server |
 
 ## Metrics
@@ -78,6 +78,7 @@ GPU metrics are the arbiter's — it is the only component that reads the card.
 | `IMAGEGEN_ENABLED` | `false` | Serve `/v1/images/generations` |
 | `IMAGEGEN_URL` | `http://imagegen:8080` | The image server |
 | `IMAGEGEN_CONTAINER` | `imagegen` | Container started/stopped; must match `container_name` in compose |
+| `IMAGEGEN_ALT_ENABLED` | `false` | Also serve the `imagegen-alt` container to requests with `"model": "alt"`; only one image server runs at a time |
 | `DOCKER_URL` | `http://docker-socket-proxy:2375` | Restricted Docker API used for that |
 | `IMAGEGEN_START_TIMEOUT` / `IMAGEGEN_REQUEST_TIMEOUT` | `90` / `300` | Seconds |
 
@@ -94,12 +95,12 @@ proxy/
 ├── dispatcher.py      # which request runs next, and the one arbiter lease it runs under
 ├── state.py           # current model, swap and idle clocks
 ├── arbiter.py         # ArbiterClient — acquire / release / reclaim notice
-├── imagegen.py        # image server lifecycle + the text-only request filter
+├── imagegen.py        # image server lifecycle + the request filter and image-to-image input
 └── tests/
     ├── fakes.py              # a fake arbiter with the real admission rules, a stub backend
     ├── test_gpu_gate.py      # the lease before the backend; people before batch; handovers and reclaims
     ├── test_idle_evictor.py  # unload is verified, not assumed
-    └── test_imagegen.py      # text only, same gate as chat, never shares the card with a big model
+    └── test_imagegen.py      # allowlisted requests, same gate as chat, never shares the card with a big model
 ```
 
 `arbiter.py` is a deliberate copy of the two calls in `lora-training/arbiter.py` rather than a shared library. The previous design vendored a client into three repos and every protocol change became a three-repo change.

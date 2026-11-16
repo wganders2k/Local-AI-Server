@@ -294,6 +294,20 @@ IMAGINE_ENABLED: bool = os.environ.get("IMAGINE_ENABLED", "false").lower() == "t
 # The model named in each image's footer. The proxy does not report which model
 # the image server runs, so this follows the IMAGEGEN_* choice in .env by hand.
 IMAGINE_MODEL_LABEL: str = os.environ.get("IMAGINE_MODEL_LABEL", "Z-Image-Turbo")
+# Servers that draw with the proxy's second image model (IMAGEGEN_ALT_* in
+# .env) instead, for comparing models: "guild_id=alt,..." Any other server
+# gets the default.
+IMAGINE_GUILD_MODELS: dict[int, str] = {
+    int(guild): model.strip()
+    for guild, model in (
+        pair.split("=", 1) for pair in os.environ.get("IMAGINE_GUILD_MODELS", "").split(",") if pair.strip()
+    )
+}
+# The footer label for each model the proxy can be asked for.
+IMAGINE_MODEL_LABELS: dict[str, str] = {
+    "default": IMAGINE_MODEL_LABEL,
+    "alt": os.environ.get("IMAGINE_ALT_MODEL_LABEL") or "alt",
+}
 # Shapes offered, as the proxy's allowed sizes (proxy/config.py IMAGEGEN_SIZES).
 # All ~1 megapixel, so all cost about the same.
 IMAGINE_SHAPES: dict[str, str] = {
@@ -309,6 +323,20 @@ IMAGINE_MAX_DETAIL_CHARS: int = 200
 # /imagine's `count`: images from one prompt in one request, each with its own
 # seed. ~7 s each warm. Must not exceed the proxy's IMAGEGEN_MAX_IMAGES.
 IMAGINE_MAX_IMAGES: int = 3
+# /imagine's `effort`: sampling steps per choice, the first the default. Must
+# be steps the proxy allows (proxy/config.py IMAGEGEN_STEPS).
+IMAGINE_EFFORTS: dict[str, int] = {"Low": 8, "High": 16}
+# /imagine's `image` (image-to-image): the largest attachment taken, the
+# proxy's own cap (IMAGEGEN_MAX_INPUT_BYTES), and the `strength` choices — how
+# far the result may move from the picture, inside the proxy's
+# IMAGEGEN_STRENGTH_RANGE. Medium is the default.
+IMAGINE_MAX_INPUT_BYTES: int = 15 * 1024 * 1024
+IMAGINE_STRENGTHS: dict[str, float] = {"Light": 0.45, "Medium": 0.65, "Heavy": 0.85}
+IMAGINE_DEFAULT_STRENGTH: str = "Medium"
+# /imagine's `cfg`: the guidance range offered, the proxy's IMAGEGEN_CFG_RANGE.
+# Unset means the image server's own (1, guidance off).
+IMAGINE_CFG_MIN: float = 1.0
+IMAGINE_CFG_MAX: float = 7.0
 # /imagine's `rewrite` option (required, so users choose each time): the mimic base, no adapter,
 # expands the prompt into a long concrete description
 # (prompts/imagine_rewrite.md). The current image model needs the whole card,

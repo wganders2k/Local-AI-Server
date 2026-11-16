@@ -2,6 +2,8 @@ fastapi==0.115.6
 uvicorn[standard]==0.34.0
 httpx==0.28.1
 prometheus-client==0.21.1
+# Decodes, crops and re-encodes image-to-image inputs (imagegen.py).
+pillow==13.0.0
 
 # httpx requires these at runtime; pin them for reproducible builds
 anyio>=4.4.0

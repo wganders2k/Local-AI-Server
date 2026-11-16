@@ -271,13 +271,20 @@ class ProxyClient:
         _check_status(response.status_code, response.text, "Proxy /status")
         return response.json().get("queue_depth", 0)
 
-    async def generate_image(self, prompt: str, size: str, n: int = 1) -> list[bytes]:
+    async def generate_image(self, prompt: str, size: str, n: int = 1, model: str = "default",
+                             steps: int | None = None, image: bytes | None = None,
+                             strength: float | None = None, cfg: float | None = None) -> list[bytes]:
         """
         n images from one text prompt, each as the image file's bytes (PNG).
-        The image server gives each its own seed, so they differ.
+        The image server gives each its own seed, so they differ. `model`
+        names which of the proxy's image servers draws them; `steps`, when
+        given, is one of the proxy's allowed step counts. With `image` (the
+        file's bytes) they start from that picture instead of noise, moving
+        from it by `strength`; the proxy crops it to `size`. `cfg`, when
+        given, sets the guidance.
 
-        Text only: the proxy builds its own request from the prompt and size
-        and refuses image inputs (proxy/imagegen.py).
+        The proxy builds its own request from these and refuses anything else
+        (proxy/imagegen.py).
 
         Raises:
             ProxyError: When the proxy is unreachable, refuses, or the image
@@ -285,7 +292,16 @@ class ProxyClient:
         """
         client = await self._get_client()
         with _transport_errors("Image generation timed out. The GPU may be busy."):
-            response = await client.post("/v1/images/generations", json={"prompt": prompt, "size": size, "n": n})
+            body = {"prompt": prompt, "size": size, "n": n, "model": model}
+            if steps is not None:
+                body["steps"] = steps
+            if cfg is not None:
+                body["cfg"] = cfg
+            if image is not None:
+                body["image"] = base64.b64encode(image).decode()
+                if strength is not None:
+                    body["strength"] = strength
+            response = await client.post("/v1/images/generations", json=body)
         _check_status(response.status_code, response.text, "Image generation")
         try:
             images = [base64.b64decode(item["b64_json"]) for item in response.json()["data"]]

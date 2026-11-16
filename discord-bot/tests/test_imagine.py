@@ -1,4 +1,4 @@
-"""/imagine: text only, rate capped, and failures reported in the channel."""
+"""/imagine: text or image-to-image, rate capped, and failures reported in the channel."""
 
 import base64
 import json
@@ -30,9 +30,9 @@ class FakeFollowup:
         self.sent.append((content, kw))
 
 
-def interaction(uid=1):
+def interaction(uid=1, guild_id=None):
     return SimpleNamespace(
-        user=SimpleNamespace(id=uid, name="erin", display_name="Erin"),
+        user=SimpleNamespace(id=uid, name="erin", display_name="Erin"), guild_id=guild_id,
         response=FakeResponse(), followup=FakeFollowup(),
     )
 
@@ -41,7 +41,8 @@ class FakeProxy:
     """`rewrite` is what the rewriter answers; None makes its request fail, so the original is drawn."""
 
     def __init__(self, fail=False, rewrite=None):
-        self.calls, self.counts, self.fail = [], [], fail
+        self.calls, self.counts, self.models, self.steps, self.fail = [], [], [], [], fail
+        self.images, self.cfgs = [], []
         self.rewrite, self.chats = rewrite, []
 
     async def chat(self, model, messages, **kw):
@@ -50,8 +51,13 @@ class FakeProxy:
             raise ProxyError("mimic-multi returned error 503: busy")
         return self.rewrite
 
-    async def generate_image(self, prompt, size, n=1):
+    async def generate_image(self, prompt, size, n=1, model="default", steps=None, image=None, strength=None,
+                             cfg=None):
+        self.cfgs.append(cfg)
         self.calls.append((prompt, size))
+        self.images.append((image, strength))
+        self.models.append(model)
+        self.steps.append(steps)
         self.counts.append(n)
         if self.fail:
             raise ProxyError("Image generation returned error 503: busy")
@@ -75,9 +81,79 @@ def cog(proxy, lora=lambda key: BASE):
     return imagine.ImagineCog(SimpleNamespace(services=services))
 
 
-async def test_the_command_takes_text_only():
+async def test_the_command_options():
     params = {p.name for p in imagine.ImagineCog.imagine.parameters}
-    assert params == {"prompt", "rewrite", "count", "style", "mood", "framing", "shape"}
+    assert params == {"prompt", "rewrite", "count", "style", "mood", "framing", "shape", "effort", "image", "strength",
+                      "cfg"}
+
+
+def attachment(content_type="image/png", size=1000, width=1600, height=900, data=b"\x89PNG..."):
+    async def read():
+        return data
+    return SimpleNamespace(content_type=content_type, filename="pic.png", size=size, width=width, height=height,
+                           url="https://cdn.example/pic.png", read=read)
+
+
+def test_an_image_gets_the_shape_nearest_its_own():
+    assert imagine.nearest_size(1600, 900) == "1216x832"
+    assert imagine.nearest_size(900, 1600) == "832x1216"
+    assert imagine.nearest_size(1000, 1050) == "1024x1024"
+    assert imagine.nearest_size(None, None) == "1024x1024"
+
+
+async def test_an_image_is_sent_with_the_default_strength_and_its_own_shape():
+    proxy = FakeProxy()
+    i = interaction()
+
+    await imagine.ImagineCog.imagine.callback(cog(proxy), i, "as a watercolor", rewrite=False, image=attachment())
+
+    assert proxy.images == [(b"\x89PNG...", imagine.IMAGINE_STRENGTHS["Medium"])]
+    assert proxy.calls == [("as a watercolor", "1216x832")]
+    embed = i.followup.sent[0][1]["embed"]
+    assert embed.thumbnail.url == "https://cdn.example/pic.png"
+    assert embed.footer.text.split(" · ")[3] == "from image, medium"
+
+
+async def test_a_chosen_shape_and_strength_win():
+    proxy = FakeProxy()
+    heavy = next(c for c in imagine._STRENGTH_CHOICES if c.name == "Heavy")
+    portrait = next(c for c in imagine._SHAPE_CHOICES if c.name == "Portrait")
+
+    await imagine.ImagineCog.imagine.callback(cog(proxy), interaction(), "x", rewrite=False, image=attachment(),
+                                              strength=heavy, shape=portrait)
+
+    assert proxy.images == [(b"\x89PNG...", 0.85)] and proxy.calls[0][1] == "832x1216"
+
+
+async def test_cfg_is_passed_on_and_shown_only_when_set():
+    proxy = FakeProxy()
+    plain, guided = interaction(), interaction()
+    await imagine.ImagineCog.imagine.callback(cog(proxy), plain, "x", rewrite=False)
+    await imagine.ImagineCog.imagine.callback(cog(proxy), guided, "x", rewrite=False, cfg=2.5)
+    assert proxy.cfgs == [None, 2.5]
+    assert "cfg" not in plain.followup.sent[0][1]["embed"].footer.text
+    assert " · cfg 2.5 · " in guided.followup.sent[0][1]["embed"].footer.text
+
+
+def test_the_cfg_option_offers_the_proxys_range():
+    cfg = next(p for p in imagine.ImagineCog.imagine.parameters if p.name == "cfg")
+    assert (cfg.min_value, cfg.max_value) == (1.0, 7.0) and not cfg.required
+
+
+async def test_without_an_image_strength_is_ignored():
+    proxy = FakeProxy()
+    heavy = next(c for c in imagine._STRENGTH_CHOICES if c.name == "Heavy")
+    i = interaction()
+    await imagine.ImagineCog.imagine.callback(cog(proxy), i, "x", rewrite=False, strength=heavy)
+    assert proxy.images == [(None, None)] and "from image" not in i.followup.sent[0][1]["embed"].footer.text
+
+
+@pytest.mark.parametrize("bad", [attachment(content_type="text/plain"), attachment(size=16 * 1024 * 1024)])
+async def test_a_bad_attachment_is_refused_before_anything_runs(bad):
+    proxy = FakeProxy()
+    i = interaction()
+    await imagine.ImagineCog.imagine.callback(cog(proxy), i, "x", rewrite=False, image=bad)
+    assert proxy.calls == [] and not i.response.deferred and i.response.messages[0][1] is True
 
 
 def test_prompt_and_rewrite_are_the_required_options_and_come_first():
@@ -109,6 +185,21 @@ async def test_client_sends_n_and_returns_every_image():
     client = ProxyClient("http://proxy")
     client._client = httpx.AsyncClient(base_url="http://proxy", transport=httpx.MockTransport(handler))
     assert await client.generate_image("x", "1024x1024", 2) == pngs
+
+
+async def test_client_sends_the_image_as_base64_with_its_strength():
+    sent = []
+
+    def handler(req):
+        sent.append(json.loads(req.content))
+        return httpx.Response(200, json={"data": [{"b64_json": base64.b64encode(b"out").decode()}]})
+
+    client = ProxyClient("http://proxy")
+    client._client = httpx.AsyncClient(base_url="http://proxy", transport=httpx.MockTransport(handler))
+    await client.generate_image("x", "1024x1024", image=b"pic", strength=0.45)
+    await client.generate_image("x", "1024x1024")
+    assert sent[0]["image"] == base64.b64encode(b"pic").decode() and sent[0]["strength"] == 0.45
+    assert "image" not in sent[1] and "strength" not in sent[1]
 
 
 async def test_generates_and_attaches_the_image():
@@ -234,9 +325,37 @@ def test_every_description_fits_discords_limit_and_gives_examples():
 
 
 def test_the_footer_times_each_step_and_omits_a_rewrite_not_asked_for():
-    assert imagine.footer_text("ann", "1024x1024", None, 6.44) == (
-        f"Requested by ann · {imagine.IMAGINE_MODEL_LABEL} · 1024x1024 · image 6.4 s")
-    assert imagine.footer_text("ann", "832x1216", 1.25, 16.0).endswith("832x1216 · rewrite 1.2 s · image 16.0 s")
+    assert imagine.footer_text("ann", "Model A", "1024x1024", None, 6.44) == (
+        "Requested by ann · Model A · 1024x1024 · image 6.4 s")
+    assert imagine.footer_text("ann", "Model A", "832x1216", 1.25, 16.0).endswith(
+        "832x1216 · rewrite 1.2 s · image 16.0 s")
+
+
+async def test_effort_sets_the_steps_and_only_high_shows_in_the_footer():
+    proxy = FakeProxy()
+    low, high = interaction(), interaction()
+    high_effort = next(c for c in imagine._EFFORT_CHOICES if c.name == "High")
+
+    await imagine.ImagineCog.imagine.callback(cog(proxy), low, "a goose", rewrite=False)
+    await imagine.ImagineCog.imagine.callback(cog(proxy), high, "a goose", rewrite=False, effort=high_effort)
+
+    assert proxy.steps == [8, 16]
+    assert " steps" not in low.followup.sent[0][1]["embed"].footer.text
+    assert " · 16 steps · " in high.followup.sent[0][1]["embed"].footer.text
+
+
+async def test_a_listed_server_draws_with_its_own_model(monkeypatch):
+    monkeypatch.setattr(imagine, "IMAGINE_GUILD_MODELS", {42: "alt"})
+    monkeypatch.setattr(imagine, "IMAGINE_MODEL_LABELS", {"default": "Model A", "alt": "Model B"})
+    proxy = FakeProxy()
+    listed, other = interaction(guild_id=42), interaction(guild_id=7)
+
+    await imagine.ImagineCog.imagine.callback(cog(proxy), listed, "a goose", rewrite=False)
+    await imagine.ImagineCog.imagine.callback(cog(proxy), other, "a goose", rewrite=False)
+
+    assert proxy.models == ["alt", "default"]
+    assert " · Model B · " in listed.followup.sent[0][1]["embed"].footer.text
+    assert " · Model A · " in other.followup.sent[0][1]["embed"].footer.text
 
 
 async def test_the_sent_footer_carries_the_timings():
