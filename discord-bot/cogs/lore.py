@@ -24,6 +24,7 @@ from discord.ext import commands, tasks
 from cogs.common import admit, admit_message
 from config import (
     AGENT_MODEL,
+    LORE_ARCHIVE_GUILD_ID,
     LORE_OFFER_TTL_SECONDS,
     LORE_SWEEP_INTERVAL_SECONDS,
     LORE_THREAD_EMOJI,
@@ -162,7 +163,10 @@ class LoreCog(commands.Cog):
                 catalog=services.personas,
             )
 
-            for embed in build_lore_embeds(result.answer):
+            # The stored answer keeps the model's [mN] refs; only what is shown
+            # gets links, so the thread transcript stays in the model's own form.
+            shown = result.citations.link(result.answer, LORE_ARCHIVE_GUILD_ID, suppress_previews=False)
+            for embed in build_lore_embeds(shown):
                 await interaction.followup.send(embed=embed)
 
             # Offer a follow-up thread rather than opening one.
@@ -398,7 +402,8 @@ class LoreCog(commands.Cog):
 
             services.sessions.put(session)
             await post_lore_answer(
-                thread, answer, _lore_footer(session, metrics, searched),
+                thread, session.citations.link(answer, LORE_ARCHIVE_GUILD_ID),
+                _lore_footer(session, metrics, searched),
                 edit_first=status.message,
             )
 

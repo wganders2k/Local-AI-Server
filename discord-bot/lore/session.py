@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from lore.citations import Citations
 from lore.metrics import CHARS_PER_TOKEN, fraction
 
 logger = logging.getLogger("mimic-bot.lore-session")
@@ -65,6 +66,8 @@ class LoreSession:
             to and never mutated, except by compaction.
         seen_keys: chunk_key() of every chunk already shown, so a follow-up
             that re-runs a similar search does not re-add text already present.
+        citations: The [mN] refs this thread's research carries, so every turn
+            numbers messages the same way and answers can link them.
     """
 
     thread_id: int
@@ -84,6 +87,7 @@ class LoreSession:
     )
     transcript: List[dict] = field(default_factory=list)
     seen_keys: set[str] = field(default_factory=set)
+    citations: Citations = field(default_factory=Citations)
     turns: int = 0
     searches: int = 0
     compactions: int = 0
@@ -195,6 +199,7 @@ class LoreSession:
             "last_active_at": self.last_active_at,
             "transcript": self.transcript,
             "seen_keys": sorted(self.seen_keys),
+            "citations": self.citations.to_dict(),
             "turns": self.turns,
             "searches": self.searches,
             "compactions": self.compactions,
@@ -217,6 +222,7 @@ class LoreSession:
             last_active_at=d.get("last_active_at") or d.get("created_at", ""),
             transcript=list(d.get("transcript") or []),
             seen_keys=set(d.get("seen_keys") or []),
+            citations=Citations.from_dict(d.get("citations")),
             turns=int(d.get("turns") or 0),
             searches=int(d.get("searches") or 0),
             compactions=int(d.get("compactions") or 0),

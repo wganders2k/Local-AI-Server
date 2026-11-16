@@ -66,6 +66,9 @@ THREAD_REGISTRY_PATH: str = os.environ.get(
 # ──────────────────────────────────────────────────────────────
 
 RAG_SERVICE_URL: str = os.environ.get("RAG_SERVICE_URL", "http://rag-service:8001")
+# The guild the archive was exported from. /lore citations link to messages
+# there; unset, answers are posted without citation links.
+LORE_ARCHIVE_GUILD_ID: str = os.environ.get("LORE_ARCHIVE_GUILD_ID", "")
 RAG_ENABLED: bool = os.environ.get("RAG_ENABLED", "true").lower() == "true"
 
 # ──────────────────────────────────────────────────────────────

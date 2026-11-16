@@ -69,6 +69,47 @@ class RAGClient:
             "retrieve",
         )
 
+    async def search_images(
+        self,
+        query: str,
+        top_k: int = 5,
+        channel_name: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> Tuple[str, int]:
+        """
+        Semantic search over image captions. Returns the conversations the
+        matching images were posted in, and how many.
+        """
+        return await self._post(
+            "/search_images",
+            {
+                "query": query, "top_k": top_k, "channel_name": channel_name or None,
+                "start_date": start_date or None, "end_date": end_date or None,
+            },
+            "search_images",
+        )
+
+    async def surrounding(
+        self,
+        channel_id: str,
+        message_id: str,
+        direction: str = "after",
+        count: int = 20,
+    ) -> Tuple[str, int]:
+        """
+        The messages before and/or after one message, across chunk boundaries.
+
+        Returns:
+            (context, messages returned besides the anchor). ("", 0) when the
+            anchor is not in the collection or the service is unreachable.
+        """
+        return await self._post(
+            "/surrounding",
+            {"channel_id": channel_id, "message_id": message_id, "direction": direction, "count": count},
+            "surrounding",
+        )
+
     async def _post(self, path: str, payload: dict, what: str) -> Tuple[str, int]:
         """
         POST to a RAG endpoint, degrading to empty rather than raising.

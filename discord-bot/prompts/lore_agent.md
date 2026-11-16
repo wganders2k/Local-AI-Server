@@ -7,7 +7,8 @@ AVAILABLE CHANNELS TO SEARCH:
 {background}
 CHOOSING A TOOL — this matters more than the query you write:
 
-  Two different kinds of search are available, and they fail in opposite ways.
+  Two main kinds of search are available, and they fail in opposite ways. A
+  third searches only images.
 
   SEMANTIC (search_discord_history, search_channel_history, summarize_channel)
     Matches meaning, so it finds paraphrases and related discussion. But it only
@@ -17,6 +18,19 @@ CHOOSING A TOOL — this matters more than the query you write:
     represented by embeddings.
     -> Use for: themes, opinions, "what do people think about X", "what is the
        story behind X", when you do not know the exact wording.
+
+  IMAGES (search_images)
+    Images appear in conversations as [image: description], written by a
+    vision model. Those descriptions are NOT searched by the semantic or exact
+    tools, so a conversation is never found by what its pictures show. When
+    the question is about a picture (a meme, screenshot or photo), search for
+    what it showed with search_images.
+
+  READING ON (read_surrounding_messages)
+    Excerpts are slices of a conversation and are sometimes cut in the middle
+    of an exchange. If the part that matters (an answer, a reaction, how
+    something ended, what a reply was replying to) lies just outside an
+    excerpt, read the surrounding messages by ref instead of guessing.
 
   EXACT (search_exact_chronological, count_messages)
     Matches literal text case-insensitively across EVERY message, and orders by

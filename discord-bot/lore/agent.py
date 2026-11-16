@@ -37,6 +37,7 @@ from config import (
     LORE_FOLLOWUP_MAX_ROUNDS,
     LORE_MAX_SIMULATIONS,
 )
+from lore.citations import Citations
 from lore.compaction import compact_tool_rounds
 from lore.context_window import limit as ctx_limit
 from lore.metrics import TOOL_CHARS_PER_TOKEN, AgentMetrics, fraction
@@ -71,6 +72,9 @@ class LoreRunResult:
     metrics: AgentMetrics
     tool_messages: list[dict] = field(default_factory=list)
     ok: bool = True
+    # The [mN] refs the run's research carries; a thread seeded from the run
+    # inherits them, so its answers keep linking the same messages.
+    citations: Citations = field(default_factory=Citations)
 
 
 # ---------------------------------------------------------------------------
@@ -364,6 +368,7 @@ async def run_agent_loop(
     max_rounds = max(1, min(max_rounds, AGENT_MAX_ROUNDS_HARD_CAP))
 
     metrics = AgentMetrics()
+    citations = Citations()
     logger.info("=" * 60)
     logger.info("AGENT LOOP START — question=%r", user_question[:80])
     logger.info("=" * 60)
@@ -375,7 +380,7 @@ async def run_agent_loop(
 
     try:
         direct_answer, tool_messages = await _run_tool_rounds(
-            messages, proxy_client, ToolContext(rag_client, proxy_client, catalog, metrics),
+            messages, proxy_client, ToolContext(rag_client, proxy_client, catalog, metrics, citations),
             build_tools(catalog), metrics, max_rounds, status=status, label="Agent",
         )
     except ProxyError as e:
@@ -389,7 +394,7 @@ async def run_agent_loop(
         logger.info(metrics.summary())
         logger.info("Final answer preview: %s...", direct_answer[:100])
         await status.complete(user_question)
-        return LoreRunResult(direct_answer, metrics, tool_messages)
+        return LoreRunResult(direct_answer, metrics, tool_messages, citations=citations)
 
     # Budget exhausted — synthesise from everything gathered.
     await status.generating()
@@ -411,13 +416,14 @@ async def run_agent_loop(
         logger.info(metrics.summary())
         logger.info("Final answer preview: %s...", answer[:100])
         await status.complete(user_question)
-        return LoreRunResult(answer, metrics, tool_messages)
+        return LoreRunResult(answer, metrics, tool_messages, citations=citations)
     except ProxyError as e:
         metrics.error = str(e)
         logger.exception("Failed to generate final answer")
         await status.failed()
         return LoreRunResult(
-            f"⚠️ Failed to generate final answer: {e}", metrics, tool_messages, ok=False
+            f"⚠️ Failed to generate final answer: {e}", metrics, tool_messages, ok=False,
+            citations=citations,
         )
 # ---------------------------------------------------------------------------
 # Lore follow-up threads
@@ -554,7 +560,8 @@ async def run_lore_turn(
     if allow_tools:
         work = session.build_messages(extra=extra)
         direct_answer, tool_messages = await _run_tool_rounds(
-            work, proxy_client, ToolContext(rag_client, proxy_client, catalog, metrics), tools, metrics, max_rounds,
+            work, proxy_client, ToolContext(rag_client, proxy_client, catalog, metrics, session.citations),
+            tools, metrics, max_rounds,
             status=status, label="Lore follow-up", seen_keys=session.seen_keys,
         )
         if direct_answer:
@@ -649,6 +656,7 @@ def seed_session_from_run(
         system_prompt=build_lore_followup_prompt(channel_names, now=now),
         original_question=question,
         pinned_now=now,
+        citations=Citations.from_dict(result.citations.to_dict()),
     )
     session.append_question(question)
 

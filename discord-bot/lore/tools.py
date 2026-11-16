@@ -24,6 +24,7 @@ from config import (
     MIMIC_CHAT_MAX_LENGTH,
     MIMIC_CHAT_MAX_PERSONAS,
 )
+from lore.citations import Citations
 from lore.metrics import AgentMetrics
 from lore.research import CHUNK_SEPARATOR
 from mimic.engine import render_transcript, simulate
@@ -123,6 +124,83 @@ _SEARCH_TOOLS = [
                     },
                 },
                 "required": ["channel_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_images",
+            "description": (
+                "SEMANTIC search over descriptions of the IMAGES people posted: memes, screenshots, "
+                "photos, art. Each image was described by a vision model, including any text visible "
+                "in it. Use it when the question is about a picture - 'that meme about X', 'the "
+                "screenshot of Y', 'who posted the picture of Z', 'what images did people share "
+                "about W'. Ordinary searches do not look inside images, so this is the only way to "
+                "find one by what it shows. Each result is the conversation the image was posted "
+                "in, led by the matching image. Same limits as any semantic search: top_k by "
+                "similarity, no ordering, no counting."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "What the image shows or says, in natural language (e.g. 'cat wearing sunglasses', 'screenshot of a Steam sale').",
+                    },
+                    "channel_name": {
+                        "type": "string",
+                        "description": "Optional - restrict to one channel.",
+                    },
+                    "start_date": {
+                        "type": "string",
+                        "description": "Optional ISO 8601 lower bound.",
+                    },
+                    "end_date": {
+                        "type": "string",
+                        "description": "Optional ISO 8601 upper bound.",
+                    },
+                    "top_k": {
+                        "type": "integer",
+                        "description": "Number of conversations to return. Default 5.",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_surrounding_messages",
+            "description": (
+                "Read the messages just BEFORE or AFTER a message you have already seen, in the "
+                "same channel, regardless of where excerpts were cut. Excerpts are slices of a "
+                "conversation and can stop mid-exchange; when the part that matters to the "
+                "question (an answer, a reaction, how an argument ended, what a reply was "
+                "replying to) lies just outside an excerpt, read it with this tool instead of "
+                "guessing. Name the message by its ref, e.g. 'm42'. The anchor is marked "
+                ">>> ANCHOR, and long silences are noted, so you can tell a cut conversation "
+                "from one that ended. To keep reading, call again anchored on the last ref returned."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ref": {
+                        "type": "string",
+                        "description": "The ref of a message shown in the research, e.g. 'm42'.",
+                    },
+                    "direction": {
+                        "type": "string",
+                        "enum": ["after", "before", "both"],
+                        "description": "'after' to read on, 'before' for what led up to it, 'both' for each side. Default 'after'.",
+                    },
+                    "count": {
+                        "type": "integer",
+                        "description": "Messages to read on each requested side, 1-60. Default 20.",
+                    },
+                },
+                "required": ["ref"],
             },
         },
     },
@@ -322,6 +400,9 @@ class ToolContext:
     proxy: Optional[ProxyClient] = None
     catalog: Optional[PersonaCatalog] = None
     metrics: Optional[AgentMetrics] = None
+    # Swaps the RAG service's raw message tags for this conversation's [mN]
+    # refs. None leaves results untouched.
+    citations: Optional[Citations] = None
 
 
 def _date_scope(start_date: Optional[str], end_date: Optional[str]) -> str:
@@ -380,6 +461,52 @@ async def _search_discord_history(args: dict, ctx: ToolContext) -> str:
 
 async def _search_channel_history(args: dict, ctx: ToolContext) -> str:
     return await _semantic_search(args, ctx, scoped=True)
+
+
+async def _search_images(args: dict, ctx: ToolContext) -> str:
+    query = args.get("query", "")
+    channel_name = args.get("channel_name") or None
+    start_date, end_date = args.get("start_date"), args.get("end_date")
+    context, count = await ctx.rag.search_images(
+        query, top_k=args.get("top_k", 5), channel_name=channel_name,
+        start_date=start_date, end_date=end_date,
+    )
+    logger.info("RAG search_images: query=%r channel=%r -> %d conversation(s)", query, channel_name, count)
+    if count:
+        return context
+    scope = f" in channel '{channel_name}'" if channel_name else ""
+    return (
+        f"No images matched '{query}'{scope}{_date_scope(start_date, end_date)}. Image search "
+        "only sees the vision model's description of each picture, so describe what it would "
+        "visibly show, or drop the filters."
+    )
+
+
+async def _read_surrounding_messages(args: dict, ctx: ToolContext) -> str:
+    # The model may write the ref the way it appears in research: "[m42]".
+    ref = str(args.get("ref") or "").strip().strip("[]").strip().lower()
+    target = ctx.citations.refs.get(ref) if ctx.citations is not None else None
+    if target is None:
+        return (
+            f"Error: '{ref}' is not a ref from this conversation's research. Use the ref "
+            "printed at the start of a message you were shown, e.g. 'm12'."
+        )
+    direction = args.get("direction") or "after"
+    if direction not in ("after", "before", "both"):
+        direction = "after"
+    try:
+        count = int(args.get("count") or 20)
+    except (TypeError, ValueError):
+        count = 20
+
+    context, returned = await ctx.rag.surrounding(target[0], target[1], direction=direction, count=count)
+    logger.info("RAG read_surrounding_messages: %s %s x%d -> %d", ref, direction, count, returned)
+    if context:
+        return context
+    return (
+        f"Could not read around {ref}: the message is not in the searchable archive, or "
+        "the archive search is unavailable. Answer from what you have."
+    )
 
 
 async def _summarize_channel(args: dict, ctx: ToolContext) -> str:
@@ -548,6 +675,8 @@ HANDLERS: dict[str, _Tool] = {
     "search_discord_history": _Tool(_search_discord_history, "rag", _NO_RAG),
     "search_channel_history": _Tool(_search_channel_history, "rag", _NO_RAG),
     "summarize_channel": _Tool(_summarize_channel, "rag", _NO_RAG),
+    "search_images": _Tool(_search_images, "rag", _NO_RAG),
+    "read_surrounding_messages": _Tool(_read_surrounding_messages, "rag", _NO_RAG),
     "search_exact_chronological": _Tool(_search_exact_chronological, "rag", _NO_RAG),
     "count_messages": _Tool(_count_messages, "rag", _NO_RAG),
     "simulate_conversation": _Tool(_simulate_conversation, "catalog", _NO_PERSONAS),
@@ -584,7 +713,8 @@ async def execute_tool(tool_name: str, tool_args: dict, ctx: ToolContext) -> str
 
     tool_start = time.monotonic()
     try:
-        return await tool.run(tool_args, ctx)
+        result = await tool.run(tool_args, ctx)
+        return ctx.citations.tag(result) if ctx.citations is not None else result
     except Exception as e:
         logger.exception("Tool execution failed for %s", tool_name)
         return f"Error executing {tool_name}: {type(e).__name__}: {e}"

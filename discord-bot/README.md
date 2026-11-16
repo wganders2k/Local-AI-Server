@@ -23,7 +23,7 @@ history, disclaimer stripping, and the agentic RAG loop behind `/lore`.
 ## How `/lore` works
 
 1. The agent model (`AGENT_MODEL`, currently `brain-dense-heretic`) is given the
-   five tools in [`lore/tools.py`](lore/tools.py) and loops: call a tool, read the
+   tools in [`lore/tools.py`](lore/tools.py) and loops: call a tool, read the
    result, decide whether to search again — up to `rounds` times.
 2. If it answers before the budget runs out, that is the answer. If it doesn't,
    the research is flattened into plain text and a separate synthesis call writes
@@ -39,7 +39,19 @@ Two searching styles are exposed on purpose, because they fail in opposite ways:
 semantic search finds paraphrases but only returns top-k and cannot count or
 order; literal search matches exact text across every message in time order and
 reports totals. The prompt in [`prompts/lore_agent.md`](prompts/lore_agent.md)
-spends most of its length teaching the model which to reach for.
+spends most of its length teaching the model which to reach for. A third,
+`search_images`, searches only the descriptions of posted images. Conversation
+search never looks inside images; it shows them as `[image: …]` once a chunk has
+been found (see [`rag/README.md`](../rag/README.md)). `read_surrounding_messages`
+reads on from, or back from, any message the agent has seen (by its ref), for
+when an excerpt stops in the middle of an exchange.
+
+**Citations.** Every retrieved message carries a ref (`[m12]`) that
+[`lore/citations.py`](lore/citations.py) assigns per conversation, so a message
+keeps its ref across searches and follow-ups. The model cites refs inline, and
+the posted answer turns them into numbered links to the message (`[¹](…)`). The
+saved transcript keeps the plain refs. Links point into `LORE_ARCHIVE_GUILD_ID`
+and only open for members of that server. With it unset, refs are stripped.
 
 ## Privileged intents
 
@@ -124,6 +136,7 @@ discord-bot/
 │   ├── compaction.py    #   condensing oldest research, mid-run or between turns
 │   ├── research.py      #   rendering tool results as plain text, dedup
 │   ├── session.py       #   LoreSession + its JSON store
+│   ├── citations.py     #   [mN] refs for retrieved messages, and their links
 │   ├── metrics.py       #   timing, token accounting, char->token estimates
 │   ├── context_window.py #  the agent model's context size, read from the proxy
 │   └── progress.py      #   ProgressReporter protocol
@@ -184,6 +197,7 @@ warning and answers without the alias index.
 | `RATE_LIMIT_PER_USER` | ❌ | `5` | Max requests per user per minute |
 | `RAG_SERVICE_URL` | ❌ | `http://rag-service:8001` | RAG service base URL |
 | `RAG_ENABLED` | ❌ | `true` | Set false to run without `/lore` retrieval |
+| `LORE_ARCHIVE_GUILD_ID` | ❌ | `DISCORD_GUILD_ID` | Guild citation links point into; unset = no links |
 | `VISION_MIMIC_ENABLED` | ❌ | `false` | Live image captions for the mimic chat controller. Needs a vision projector on `[mimic-multi]` first |
 | `IMAGINE_ENABLED` | ❌ | `false` | Registers `/imagine`. Needs the proxy's `IMAGEGEN_ENABLED` |
 | `IMAGINE_MODEL_LABEL` | ❌ | `Z-Image-Turbo` | Model name in each image's footer; set it to match the proxy's `IMAGEGEN_*` model |

@@ -287,6 +287,8 @@ services:
       - MIMIC_ADAPTER_SCALE=${MIMIC_ADAPTER_SCALE:-0.85}
       - RATE_LIMIT_PER_USER=${RATE_LIMIT_PER_USER:-5}
       - RAG_SERVICE_URL=http://rag-service:8001
+      # /lore citations link to messages in the archived guild.
+      - LORE_ARCHIVE_GUILD_ID=${DISCORD_GUILD_ID:-}
       - RAG_ENABLED=${RAG_ENABLED:-true}
       - LORE_CONTEXT_PATH=${LORE_CONTEXT_PATH:-bot_context/lore/context.md}
       - LORE_EMBED_TITLE=${LORE_EMBED_TITLE:-📚 Lore}
@@ -394,6 +396,9 @@ services:
       - CHROMA_HOST=chromadb
       - CHROMA_PORT=8000
       - ARCHIVE_DIR=/archive
+      # Collection retrieval reads (images: <name>_images). Rebuild into a new
+      # name with `python ingest.py <name> --rebuild`, check it, then switch.
+      - COLLECTION_NAME=${RAG_COLLECTION:-lore}
     depends_on:
       chromadb:
         condition: service_started

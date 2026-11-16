@@ -14,7 +14,14 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from ingest import run_ingest
-from retrieve import aggregate_stats, build_lore_context, search_literal
+from retrieve import (
+    aggregate_stats,
+    build_lore_context,
+    clear_exact_indexes,
+    search_images,
+    search_literal,
+    surrounding_messages,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +71,22 @@ class RetrieveResponse(BaseModel):
     chunk_count: int
 
 
+class ImageSearchRequest(BaseModel):
+    query: str
+    top_k: int = 5
+    channel_name: Optional[str] = None
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+
+
+class SurroundingRequest(BaseModel):
+    """The messages either side of one message, across chunk boundaries."""
+    channel_id: str
+    message_id: str
+    direction: str = "after"  # "before" | "after" | "both"
+    count: int = 20           # per side; capped at SURROUNDING_MAX_COUNT
+
+
 class LiteralSearchRequest(BaseModel):
     """Chronological/literal search — no embedding involved."""
     term: Optional[str] = None       # literal text, matched case-insensitively
@@ -91,6 +114,10 @@ class AggregateRequest(BaseModel):
 
 class IngestRequest(BaseModel):
     since: Optional[str] = None
+    # Defaults to the live collection. A full rebuild is better done into a
+    # fresh name with `python ingest.py <name> --rebuild`, then switched to.
+    collection: Optional[str] = None
+    rebuild: bool = False
 
 
 class IngestResponse(BaseModel):
@@ -98,11 +125,32 @@ class IngestResponse(BaseModel):
     messages_loaded: int = 0
     chunks_created: int = 0
     chunks_upserted: int = 0
+    images_upserted: int = 0
 
 
 # ──────────────────────────────────────────────────────────────
 # Endpoints
 # ──────────────────────────────────────────────────────────────
+
+
+@app.on_event("startup")
+async def warm_exact_index():
+    """
+    Load the exact-search vectors in the background at startup, so the first
+    /lore search does not wait several seconds for them.
+    """
+    def _warm():
+        try:
+            from retrieve import exact_index, get_chroma_client, get_embedding_model
+
+            client = get_chroma_client()
+            for name in (COLLECTION_NAME, f"{COLLECTION_NAME}_images"):
+                exact_index(client.get_or_create_collection(name=name))
+            get_embedding_model()
+        except Exception:
+            logger.exception("Warming the exact-search index failed; it will load on first use")
+
+    asyncio.get_running_loop().run_in_executor(None, _warm)
 
 
 @app.get("/health")
@@ -133,6 +181,46 @@ async def retrieve(req: RetrieveRequest):
     )
 
     return RetrieveResponse(context=context, chunk_count=chunk_count)
+
+
+@app.post("/search_images", response_model=RetrieveResponse)
+async def search_images_endpoint(req: ImageSearchRequest):
+    """
+    Semantic search over image captions only. Returns the conversations the
+    matching images were posted in; chunk_count is how many.
+    """
+    if not req.query.strip():
+        raise HTTPException(status_code=400, detail="Query must not be empty")
+    context, count = search_images(
+        query=req.query,
+        collection_name=COLLECTION_NAME,
+        top_k=req.top_k,
+        channel_name=req.channel_name,
+        start_date=req.start_date,
+        end_date=req.end_date,
+    )
+    return RetrieveResponse(context=context, chunk_count=count)
+
+
+@app.post("/surrounding", response_model=RetrieveResponse)
+async def surrounding_endpoint(req: SurroundingRequest):
+    """
+    Read on from (or back from) one message. chunk_count is the number of
+    messages returned besides the anchor; 0 with empty context means the
+    anchor is not in the collection.
+    """
+    if req.direction not in ("before", "after", "both"):
+        raise HTTPException(status_code=400, detail="direction must be 'before', 'after' or 'both'")
+    if not (req.channel_id.isdigit() and req.message_id.isdigit()):
+        raise HTTPException(status_code=400, detail="channel_id and message_id must be Discord ids")
+    context, count = surrounding_messages(
+        channel_id=req.channel_id,
+        message_id=req.message_id,
+        direction=req.direction,
+        count=req.count,
+        collection_name=COLLECTION_NAME,
+    )
+    return RetrieveResponse(context=context, chunk_count=count)
 
 
 @app.post("/search_literal", response_model=RetrieveResponse)
@@ -215,9 +303,14 @@ async def ingest(req: IngestRequest):
                 chroma_host=CHROMA_HOST,
                 chroma_port=CHROMA_PORT,
                 since=req.since,
+                collection_name=req.collection or COLLECTION_NAME,
+                rebuild=req.rebuild,
             )
             return result
         finally:
+            # Re-ingested chunks keep their ids, so the cached vectors would
+            # not notice a change by size alone.
+            clear_exact_indexes()
             _ingest_task = None
 
     _ingest_task = asyncio.create_task(asyncio.to_thread(_run))
@@ -228,6 +321,7 @@ async def ingest(req: IngestRequest):
         messages_loaded=result.get("messages_loaded", 0),
         chunks_created=result.get("chunks_created", 0),
         chunks_upserted=result.get("chunks_upserted", 0),
+        images_upserted=result.get("images_upserted", 0),
     )
 
 

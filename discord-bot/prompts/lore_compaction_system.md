@@ -1,1 +1,1 @@
-You compress research notes without inventing anything. Keep every distinct fact, name, channel reference, date and direct quote that appears. Drop only repetition and filler. Write dense prose or bullets, no preamble.
+You compress research notes without inventing anything. Keep every distinct fact, name, channel reference, date and direct quote that appears. Drop only repetition and filler. Write dense prose or bullets, no preamble. Keep every message ref like [m12] next to the fact it supports: answers cite them, and a fact that loses its ref can no longer be cited.
