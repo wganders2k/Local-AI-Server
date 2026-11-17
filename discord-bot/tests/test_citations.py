@@ -24,22 +24,22 @@ def test_link_numbers_by_first_citation_and_suppresses_previews():
     c.tag("[@5/10] [@5/11] [@6/12]")
     out = c.link("Second [m2]. First [m1, m3]. Again [m2][m1].", GUILD)
     assert out == (
-        f"Second [¹](<{URL.format(5, 11)}>). "
-        f"First [²](<{URL.format(5, 10)}>)[³](<{URL.format(6, 12)}>). "
-        f"Again [¹](<{URL.format(5, 11)}>)[²](<{URL.format(5, 10)}>)."
+        f"Second ([1](<{URL.format(5, 11)}>)). "
+        f"First ([2](<{URL.format(5, 10)}>), [3](<{URL.format(6, 12)}>)). "
+        f"Again ([1](<{URL.format(5, 11)}>), [2](<{URL.format(5, 10)}>))."
     )
 
 
 def test_link_for_embeds_leaves_urls_bare():
     c = Citations()
     c.tag("[@5/10]")
-    assert c.link("x [m1]", GUILD, suppress_previews=False) == f"x [¹]({URL.format(5, 10)})"
+    assert c.link("x [m1]", GUILD, suppress_previews=False) == f"x ([1]({URL.format(5, 10)}))"
 
 
 def test_unknown_refs_and_missing_guild_are_dropped_cleanly():
     c = Citations()
     c.tag("[@5/10]")
-    assert c.link("Made up [m9]. Real [m1].", GUILD) == f"Made up. Real [¹](<{URL.format(5, 10)}>)."
+    assert c.link("Made up [m9]. Real [m1].", GUILD) == f"Made up. Real ([1](<{URL.format(5, 10)}>))."
     assert c.link("Real [m1].", "") == "Real."
 
 
@@ -103,6 +103,24 @@ def test_ranges_link_both_ends():
     c.tag("[@5/10] [@5/11]")
     out = c.link("Every girlfriend [m1–m2]. Also [m1-m2].", GUILD)
     assert out == (
-        f"Every girlfriend [¹](<{URL.format(5, 10)}>)[²](<{URL.format(5, 11)}>). "
-        f"Also [¹](<{URL.format(5, 10)}>)[²](<{URL.format(5, 11)}>)."
+        f"Every girlfriend ([1](<{URL.format(5, 10)}>), [2](<{URL.format(5, 11)}>)). "
+        f"Also ([1](<{URL.format(5, 10)}>), [2](<{URL.format(5, 11)}>))."
     )
+
+
+def test_m_may_be_dropped_after_first_ref():
+    c = Citations()
+    c.tag("[@5/10] [@5/11] [@5/12]")
+    one, three = URL.format(5, 10), URL.format(5, 12)
+    assert c.link("Range [m1-3]. List [m1, 3].", GUILD) == (
+        f"Range ([1](<{one}>), [2](<{three}>)). List ([1](<{one}>), [2](<{three}>))."
+    )
+
+
+def test_adjacent_brackets_form_one_run():
+    c = Citations()
+    c.tag("[@5/10] [@5/11]")
+    one, two = URL.format(5, 10), URL.format(5, 11)
+    want = f"x ([1](<{one}>), [2](<{two}>))."
+    for text in ("x [m1][m2].", "x [m1] [m2].", "x [m1], [m2].", "x [m1][m1, m2]."):
+        assert c.link(text, GUILD) == want, text

@@ -18,12 +18,16 @@ import re
 from typing import Optional
 
 _RAW_TAG = re.compile(r"\[@(\d+)/(\d+)\]")
-# A ref or a run of them: [m3], [m3, m7], [m3][m7] (the last is two matches),
-# and the ranges the model sometimes writes, [m3–m4], which link their two
-# ends. The leading space is captured so a dropped ref takes it along.
+# A ref or a run of them: [m3], [m3, m7], and the ranges the model sometimes
+# writes, [m3–m4], which link their two ends. After the first ref the "m" may
+# be dropped ([m123-127], [m3, 7]). Adjacent brackets, [m3][m7], [m3] [m7] or
+# [m3], [m7], are one match so they render as a single comma-separated run.
+# The leading space is captured so a dropped ref takes it along, and a
+# rendered run always gets exactly one space before its parentheses.
 _SEP = r"\s*[,\-–—]\s*"
-_CITE = re.compile(rf"( ?)\[(m\d+(?:{_SEP}m\d+)*)\]")
-_SUPERSCRIPT = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
+_GROUP = rf"\[m\d+(?:{_SEP}m?\d+)*\]"
+_CITE = re.compile(rf"( ?)({_GROUP}(?:[\s,]*{_GROUP})*)")
+_REF = re.compile(r"m?(\d+)")
 
 
 class Citations:
@@ -73,15 +77,16 @@ class Citations:
         numbers: dict[str, int] = {}
 
         def render(match: re.Match) -> str:
-            out = []
-            for ref in (r.strip() for r in re.split(_SEP, match.group(2))):
+            out, seen = [], set()
+            for ref in ("m" + d for d in _REF.findall(match.group(2))):
                 url = self.url(ref, guild_id)
-                if url is None:
+                if url is None or ref in seen:
                     continue
+                seen.add(ref)
                 n = numbers.setdefault(ref, len(numbers) + 1)
                 target = f"<{url}>" if suppress_previews else url
-                out.append(f"[{str(n).translate(_SUPERSCRIPT)}]({target})")
-            return match.group(1) + "".join(out) if out else ""
+                out.append(f"[{n}]({target})")
+            return f" ({', '.join(out)})" if out else ""
 
         return _CITE.sub(render, answer)
 
