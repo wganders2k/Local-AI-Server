@@ -145,7 +145,7 @@ class TestChannelsNeedingExport:
             }
         }
         channels = [
-            {"id": "111", "name": "general", "last_message_timestamp": "2026-02-01T00:00:00Z"}
+            {"id": "111", "name": "general", "last_message_at": "2026-02-01T00:00:00Z"}
         ]
 
         result = channels_needing_export(state, channels)
@@ -163,7 +163,7 @@ class TestChannelsNeedingExport:
             }
         }
         channels = [
-            {"id": "111", "name": "general", "last_message_timestamp": "2026-01-15T00:00:00Z"}
+            {"id": "111", "name": "general", "last_message_at": "2026-01-15T00:00:00Z"}
         ]
 
         result = channels_needing_export(state, channels)
@@ -182,11 +182,22 @@ class TestChannelsNeedingExport:
             }
         }
         channels = [
-            {"id": "111", "name": "general", "last_message_timestamp": "2026-01-15T00:00:00Z"},  # No activity (old message)
-            {"id": "222", "name": "random", "last_message_timestamp": "2026-03-01T00:00:00Z"},  # New channel (needs export)
-            {"id": "333", "name": "offtopic", "last_message_timestamp": "2026-02-15T00:00:00Z"},  # No activity (message before export)
+            {"id": "111", "name": "general", "last_message_at": "2026-01-15T00:00:00Z"},  # No activity (old message)
+            {"id": "222", "name": "random", "last_message_at": "2026-03-01T00:00:00Z"},  # New channel (needs export)
+            {"id": "333", "name": "offtopic", "last_message_at": "2026-02-15T00:00:00Z"},  # No activity (message before export)
         ]
 
         result = channels_needing_export(state, channels)
         assert len(result) == 1  # Only channel 222 needs export (new channel)
         assert result[0]["channel_id"] == "222"
+
+
+def test_reads_the_key_fetch_discord_channels_gives():
+    """
+    Regression: the check read 'last_message_timestamp' while the channel
+    list carries 'last_message_at', so no known channel was ever exported again.
+    """
+    import channel_state as cs
+    state = {"111": {"channel_id": "111", "last_export_at": "2026-08-29T00:00:00+00:00"}}
+    ch = {"id": "111", "name": "general", "last_message_at": "2026-11-01T00:00:00+00:00"}
+    assert [c["channel_id"] for c in cs.channels_needing_export(state, [ch])] == ["111"]

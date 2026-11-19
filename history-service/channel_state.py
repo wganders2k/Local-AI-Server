@@ -120,7 +120,7 @@ def channels_needing_export(
     Args:
         state: Full channel state dictionary.
         channels: List of channel records from Discord API, each with
-                  at least 'id', 'name', and optionally 'last_message_timestamp'.
+                  at least 'id', 'name', and optionally 'last_message_at' (as _fetch_discord_channels gives it).
                   
     Returns:
         List of channels needing export, each with:
@@ -132,7 +132,7 @@ def channels_needing_export(
     for channel in channels:
         channel_id = channel["id"]
         channel_name = channel.get("name", channel_id)
-        last_message_at = channel.get("last_message_timestamp")
+        last_message_at = channel.get("last_message_at")
         
         record = get_channel(state, channel_id)
         
