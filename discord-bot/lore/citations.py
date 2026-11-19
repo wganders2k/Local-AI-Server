@@ -20,14 +20,28 @@ from typing import Optional
 _RAW_TAG = re.compile(r"\[@(\d+)/(\d+)\]")
 # A ref or a run of them: [m3], [m3, m7], and the ranges the model sometimes
 # writes, [m3–m4], which link their two ends. After the first ref the "m" may
-# be dropped ([m123-127], [m3, 7]). Adjacent brackets, [m3][m7], [m3] [m7] or
-# [m3], [m7], are one match so they render as a single comma-separated run.
+# be dropped ([m123-127], [m3, 7]). Adjacent brackets, [m3][m7], [m3] [m7],
+# [m3], [m7] or [m3]–[m7], are one match so they render as a single run.
+# A dash between two refs (inside or between brackets) marks a range and is
+# kept, "(1 – 2)"; any other gap becomes a comma, "(1, 2)".
 # The leading space is captured so a dropped ref takes it along, and a
 # rendered run always gets exactly one space before its parentheses.
 _SEP = r"\s*[,\-–—]\s*"
 _GROUP = rf"\[m\d+(?:{_SEP}m?\d+)*\]"
-_CITE = re.compile(rf"( ?)({_GROUP}(?:[\s,]*{_GROUP})*)")
+_CITE = re.compile(rf"( ?)({_GROUP}(?:[\s,\-–—]*{_GROUP})*)")
 _REF = re.compile(r"m?(\d+)")
+# Bracketed labels the model writes in place of a ref, though the answer rules
+# forbid them: a tool name for a count ("[count_messages]"), a source that has
+# no ref ("[Background]", "[Simulated]"), or a count itself
+# ("[alice_e: 8617 messages]"). None can link, so they are dropped rather
+# than shown as stray brackets. Deliberately narrow: [sic], [...] and the like
+# are left alone.
+_NOT_A_REF = re.compile(
+    r" ?\[(?:count\w*|search_\w+|summarize_channel|read_surrounding_messages"
+    r"|simulate_conversation|background|simulat\w*|[^\[\]\n:]{1,40}:\s*[\d,]+\s+messages?)\]",
+    re.I,
+)
+_DASH = re.compile(r"[\-–—]")
 
 
 class Citations:
@@ -77,18 +91,28 @@ class Citations:
         numbers: dict[str, int] = {}
 
         def render(match: re.Match) -> str:
-            out, seen = [], set()
-            for ref in ("m" + d for d in _REF.findall(match.group(2))):
+            run, seen = match.group(2), set()
+            parts: list[str] = []
+            last_end, dashed = 0, False
+            for m in _REF.finditer(run):
+                # The gap since the last ref kept; a dash anywhere in it, even
+                # around a dropped ref, makes this a range.
+                dashed = dashed or bool(_DASH.search(run, last_end, m.start()))
+                last_end = m.end()
+                ref = "m" + m.group(1)
                 url = self.url(ref, guild_id)
                 if url is None or ref in seen:
                     continue
                 seen.add(ref)
                 n = numbers.setdefault(ref, len(numbers) + 1)
                 target = f"<{url}>" if suppress_previews else url
-                out.append(f"[{n}]({target})")
-            return f" ({', '.join(out)})" if out else ""
+                if parts:
+                    parts.append(" – " if dashed else ", ")
+                parts.append(f"[{n}]({target})")
+                dashed = False
+            return f" ({''.join(parts)})" if parts else ""
 
-        return _CITE.sub(render, answer)
+        return _CITE.sub(render, _NOT_A_REF.sub("", answer))
 
     def to_dict(self) -> dict[str, list[str]]:
         return dict(self.refs)

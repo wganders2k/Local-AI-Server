@@ -103,8 +103,8 @@ def test_ranges_link_both_ends():
     c.tag("[@5/10] [@5/11]")
     out = c.link("Every girlfriend [m1–m2]. Also [m1-m2].", GUILD)
     assert out == (
-        f"Every girlfriend ([1](<{URL.format(5, 10)}>), [2](<{URL.format(5, 11)}>)). "
-        f"Also ([1](<{URL.format(5, 10)}>), [2](<{URL.format(5, 11)}>))."
+        f"Every girlfriend ([1](<{URL.format(5, 10)}>) – [2](<{URL.format(5, 11)}>)). "
+        f"Also ([1](<{URL.format(5, 10)}>) – [2](<{URL.format(5, 11)}>))."
     )
 
 
@@ -113,7 +113,7 @@ def test_m_may_be_dropped_after_first_ref():
     c.tag("[@5/10] [@5/11] [@5/12]")
     one, three = URL.format(5, 10), URL.format(5, 12)
     assert c.link("Range [m1-3]. List [m1, 3].", GUILD) == (
-        f"Range ([1](<{one}>), [2](<{three}>)). List ([1](<{one}>), [2](<{three}>))."
+        f"Range ([1](<{one}>) – [2](<{three}>)). List ([1](<{one}>), [2](<{three}>))."
     )
 
 
@@ -124,3 +124,33 @@ def test_adjacent_brackets_form_one_run():
     want = f"x ([1](<{one}>), [2](<{two}>))."
     for text in ("x [m1][m2].", "x [m1] [m2].", "x [m1], [m2].", "x [m1][m1, m2]."):
         assert c.link(text, GUILD) == want, text
+
+
+def test_dash_between_brackets_is_a_range_and_mixes_with_lists():
+    c = Citations()
+    c.tag("[@5/10] [@5/11] [@5/12]")
+    a, b, d = (URL.format(5, i) for i in (10, 11, 12))
+    for text in ("x [m1]–[m2].", "x [m1] - [m2].", "x [m1]—[m2]."):
+        assert c.link(text, GUILD) == f"x ([1](<{a}>) – [2](<{b}>)).", text
+    assert c.link("x [m1, m2]–[m3].", GUILD) == f"x ([1](<{a}>), [2](<{b}>) – [3](<{d}>))."
+    # An invented ref inside a range drops out but the range survives.
+    assert c.link("x [m1]–[m9]–[m3].", GUILD) == f"x ([1](<{a}>) – [2](<{d}>))."
+
+
+def test_labels_written_in_place_of_refs_are_dropped():
+    c = Citations()
+    c.tag("[@5/10]")
+    out = c.link(
+        "Alice said it 738 times [count_messages] [Count], per [Background] and in the "
+        "simulation [Simulated]; alice_e posted most [alice_e: 8,617 messages] [m1].",
+        GUILD, suppress_previews=False,
+    )
+    assert out == (
+        "Alice said it 738 times, per and in the simulation; alice_e posted most "
+        f"([1]({URL.format(5, 10)}))."
+    )
+
+
+def test_ordinary_brackets_are_left_alone():
+    c = Citations()
+    assert c.link("he wrote [sic] and then [...] later", GUILD) == "he wrote [sic] and then [...] later"
