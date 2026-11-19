@@ -2,17 +2,17 @@
 
 [![CI](https://github.com/wganders2k/Local-AI-Server/actions/workflows/ci.yml/badge.svg)](https://github.com/wganders2k/Local-AI-Server/actions/workflows/ci.yml)
 
-A self-hosted, multi-tenant AI platform that runs a whole stack on a single RTX 3090: a Discord bot with an agentic RAG assistant, a private chat UI (Open WebUI behind SSO), IDE code completion, and a preemptible QLoRA fine-tuning pipeline. They all share one 24 GB card. A FastAPI orchestration proxy routes every request, and a dedicated GPU arbiter enforces priority-based admission control so that interactive traffic always wins and background training gives way.
+A self-hosted, multi-tenant AI platform that runs a whole stack on a single RTX 3090: a Discord bot with an agentic RAG assistant, LoRA persona models and image generation, a private chat UI (Open WebUI behind SSO), and a preemptible QLoRA fine-tuning pipeline. They all share one 24 GB card. A FastAPI orchestration proxy routes every request, and a dedicated GPU arbiter enforces priority-based admission control so that interactive traffic always wins and background training gives way.
 
-It's a dozen containerized services across five Python codebases, with continuous integration, more than 270 unit tests, and Prometheus metrics, all serving real users.
+It's a dozen containerized services across six Python codebases, with continuous integration, more than 600 unit tests, and Prometheus metrics, all serving real users.
 
-Built as a deliberate exercise in agentic development workflows: specifying, steering, and reviewing model-generated code across a production multi-service system.
+I built it to learn how LLMs are deployed, how real systems are built around them, how they're managed in production, and eventually how they're trained.
 
 ## Highlights
 
 - **GPU admission control on a single card.** A purpose-built arbiter grants and revokes GPU leases by priority, as declared in one policy file. Lower-priority work is reclaimed on demand, so a chat request never waits behind a training run.
 - **Preemptible fine-tuning.** The QLoRA trainer is designed to be SIGKILLed at any moment. A supervisor/worker split holds the lease and the CUDA context separately, and training resumes from the last verified checkpoint.
-- **Hot-swappable model fleet.** Eight named model presets (Qwen3.6, Gemma 4, and others, from 26B to 35B) load on demand through llama-server's router mode, with an idle evictor that frees VRAM for background jobs.
+- **Hot-swappable model fleet.** A dozen named model presets (Qwen3.6, Gemma 4, and others, from 12B to 35B), including seven persona LoRAs served over one shared base, load on demand through llama-server's router mode, with an idle evictor that frees VRAM for background jobs.
 - **Agentic RAG over a community's history.** `/lore` runs a multi-round tool-calling agent (up to 25 rounds) over a ChromaDB index built from an incrementally exported Discord archive, with optional image captioning.
 - **Self-healing boot.** A systemd unit detects and recovers from NVIDIA driver upgrades that would otherwise leave every GPU container unable to start.
 - **Continuous integration.** GitHub Actions lints the monorepo and runs each service's test suite in parallel on the exact Python version its production image ships, with no GPU required. See [Testing & CI](#testing--ci).
@@ -64,6 +64,7 @@ Policy lives entirely in [`arbiter/jobs.yaml`](arbiter/jobs.yaml). Priority alon
 |---|---|---|---|
 | `llm` | 100 | `none` | the proxy; wins every contention |
 | `profile-segment` | 50 | `none` | LongSafeVision profiler, run by hand |
+| `llm-batch` | 25 | `cooperative` | proxy batch work (archive captioning); yields to `llm` |
 | `video-processing` | 0 | `cooperative` | host job, not a container |
 | `lora-trainer` | −10 | `cooperative` | SIGKILLed on demand; resumes from checkpoint |
 
@@ -111,9 +112,9 @@ cd Local-AI-Server
 cp .env.example .env
 ```
 
-Set at minimum `DISCORD_TOKEN` and `DISCORD_GUILD_ID`. If you run Open WebUI behind authentik SSO, also set `OPENWEBUI_CLIENT_ID` / `OPENWEBUI_CLIENT_SECRET` — these are read by `docker-compose.yml` but are **not yet listed in `.env.example`**.
+Set at minimum `DISCORD_TOKEN` and `DISCORD_GUILD_ID`. If you run Open WebUI behind authentik SSO, also set `OPENWEBUI_CLIENT_ID` / `OPENWEBUI_CLIENT_SECRET`.
 
-The compose file bind-mounts several configs by absolute path under `/home/peacow/local-ai-server` (`models.ini`, `arbiter/jobs.yaml`, `dce-compose.yml`). Deploying elsewhere means editing those paths.
+The compose file bind-mounts several host paths absolutely: configs under `/home/peacow/local-ai-server` (`models.ini`, `arbiter/jobs.yaml`, `dce-compose.yml`, `lora-training/configs`), plus `/home/peacow/lora-outputs` and `/home/peacow/.cache/huggingface` for the trainer. Deploying elsewhere means editing those paths.
 
 ### 2. Download model files
 
@@ -132,7 +133,7 @@ make status
 make check-gpu
 ```
 
-`make up` deliberately skips three profiled services: `lora-trainer` and `imagegen` (`managed`), and `discord-chat-exporter` (`manual`). The trainer in particular would take 16 GB behind the arbiter's back if a plain `up` started it; the proxy starts and stops `imagegen` itself.
+`make up` deliberately skips four profiled services: `lora-trainer`, `imagegen` and `imagegen-alt` (`managed`), and `discord-chat-exporter` (`manual`). The trainer in particular would take 16 GB behind the arbiter's back if a plain `up` started it; the proxy starts and stops the image servers itself.
 
 **No IDE autocomplete.** An always-resident autocomplete model (`llama-permanent`, :11435) was removed on 2026-11-12. It went unused and held 2.2 GB of VRAM around the clock. It can't come back as a `models.ini` preset either: the router holds one model at a time, so every completion would evict the chat model.
 
@@ -147,15 +148,15 @@ make check-gpu
 | `make build` | Rebuild custom images without starting |
 | `make logs` | Tail all logs (`logs-proxy`, `logs-bot`, `logs-llama`, `logs-rag`, `logs-history`, `logs-openwebui`) |
 | `make status` | Container state and health |
-| `make check-gpu` | Verify the GPU is visible inside the llama-server containers |
-| `make llama-ps` | Models currently loaded in both slots |
+| `make check-gpu` | Verify the GPU is visible inside the `llama-swappable` container |
+| `make llama-ps` | Presets the router knows, and which one is loaded |
 | `make restart-bot` / `restart-proxy` / `restart-rag` / `restart-openwebui` | Per-service restart |
 | `make restart-llama-swappable` | Pick up `models.ini` changes |
 | `make shell-bot` / `shell-proxy` / `shell-rag` | Shell into a container |
 | `make gpu-status` | Arbiter view: holder, reason, free VRAM |
 | `make train-submit [CONFIG=…]` | Submit a training run — the only thing that starts one |
 | `make train-status` / `train-logs` / `train-cancel` | Manage the run |
-| `make rag-ingest` / `rag-status` | Ingest lore into ChromaDB; show collection counts |
+| `make rag-ingest` / `rag-status` | Add new archive messages to the lore index (the weekly job does this); show collection counts |
 | `make dce-evaluate` (alias `history-refresh`) | Trigger channel evaluation + targeted exports |
 | `make dce-export-full` / `dce-export-guild` / `dce-export-channel` | Manual DCE exports |
 | `make nuke` | ⚠️ Remove containers + anonymous volumes (`/opt/appdata` and `$MODELS_DIR` survive) |
@@ -166,6 +167,7 @@ make check-gpu
 |---|---|---|---|
 | `llama-swappable` | `:11434` | — | Router mode, `--models-max 1`; loads a preset on demand |
 | `imagegen` | — | `managed` | sd-server (stable-diffusion.cpp, built for sm_86); model set in `.env`; started and stopped by the proxy |
+| `imagegen-alt` | — | `managed` | Second sd-server with its own model (`IMAGEGEN_ALT_*`); never runs beside `imagegen` |
 | `proxy` | `:11436` | — | FastAPI orchestration proxy |
 | `arbiter` | `127.0.0.1:11438` | — | GPU admission control; NVML-only, no CUDA |
 | `history-service` | `127.0.0.1:11437` | — | DCE orchestration, archive merge, image captioning |
@@ -199,14 +201,22 @@ Currently enabled aliases in `models.ini`:
 |---|---|---|
 | `qwen3.6-35b-a3b` | Qwen3.6-35B-A3B UD-IQ4_NL | coding assistant |
 | `qwen3.6-27b` | Qwen3.6-27B Q4_K_M | coding assistant |
-| `qwen3.6-27b-u` | Qwen3.6-27B Heretic (uncensored) | `/lore` agent (`AGENT_MODEL`) |
+| `qwen3.6-27b-u` | Qwen3.6-27B Heretic Q4_K_M | not used by the bot; base of `qwen3.6-27b-judge-u` |
+| `qwen3.6-35b-a3b-u` | Qwen3.6 35B-A3B IQ4_XS | `/lore speed:fast` research and answers |
+| `qwen3.8-27b-u` | Qwen3.8 27B Q4_K_P + built-in MTP head | `/lore speed:slow` research and answers |
+| `gemma4-26b-a4b-u` | Gemma 4 26B-A4B QAT Q4_K_M + MTP draft head | `/lore writer:gemma-26b-moe` |
+| `gemma4-31b-u` | Gemma 4 31B QAT Q4_K_M + MTP draft head | `/lore writer:gemma-31b` |
+| `qwen3.6-27b-judge-u` | Qwen3.6-27B Heretic Q4_K_M, thinking off, temperature 0 | persona dataset labelling and topic eval (`lora-training/`) |
 | `gemma4-31b` | gemma-4-31B-it Q4_K_M | coding assistant |
+| `gemma4-12b-u` | gemma-4-12b-heretic-abliterated Q4_K_M | the bare persona base; nothing in the bot uses it |
+| `gemma4-12b-mimic-u` | same base + seven persona LoRAs + vision projector | `/mimic`, `/mimic-chat`, `/lore`'s simulated chats, live image captions |
+| `gemma4-12b-mimic-candidate-u` | same base + an unreleased adapter | blind A/B in `make train-sample` |
 | `gemma4-26b-a4b` | gemma-4-26B-A4B-it UD-Q4_K_XL | direct lore routing (not `/lore`) |
 | `gemma4-26b-a4b-chat` | gemma-4-26B-A4B-it UD-Q4_K_XL | Open WebUI |
 | `qwen3.6-35b-a3b-chat` | Qwen3.6-35B-A3B UD-IQ4_NL | Open WebUI |
 | `qwen3.6-27b-caption-u` | Qwen3.6-27B heretic Q4_K_M + vision projector | archive image captioning (proxy batch work) |
 
-**Commented out and therefore unavailable:** `mimic_user1` (a template awaiting its trained adapter). `/mimic` still offers `mimic_user1`–`mimic_user6` via autocomplete, but a request reaches llama-server and finds no such preset. `gemma4-12b-u` is the bare persona base, used as the control in `make train-sample`.
+Personas aren't presets of their own. Each is a LoRA adapter in `[gemma4-12b-mimic-u]`'s list, picked per request, so switching speakers costs no model swap. The bot offers a persona only when it's on the roster *and* its adapter is loaded.
 
 The proxy does not gate on a model list of its own: it forwards *any* model name to the swappable slot and lets llama-server decide. `models.ini` is the single source of truth for what's actually available.
 
@@ -223,6 +233,7 @@ The proxy does not gate on a model list of its own: it forwards *any* model name
 | `/mimic <persona>` | A mimic persona replies to the channel's recent conversation, via webhook |
 | `/mimic-chat <persona1> <premise> [persona2-7] [length]` | A thread where personas chat with each other and with whoever joins in. `/lore` can also run a short simulated chat via its `simulate_conversation` tool |
 | `/chat <model>` | Creates a thread; every subsequent message in it is streamed to that model. Model list is autocompleted live from the proxy's `/v1/models`. Threads survive restarts via `discord-bot/data/threads.json` |
+| `/imagine <prompt>` | Generates an image, or restyles an attached one, on the proxy-managed sd-server |
 | `/lore <question> [rounds]` | Agentic RAG. The agent iteratively calls `search_discord_history`, `search_channel_history`, and `summarize_channel` against the RAG service before synthesising an answer. Default 10 rounds, hard cap 25 |
 
 `/lore` injects server-specific background (member alias index, persona notes) from `discord-bot/prompts/lore_context.md`, which is gitignored because it holds real names:
@@ -233,7 +244,7 @@ cp discord-bot/prompts/lore_context.example.md discord-bot/prompts/lore_context.
 
 Missing, the bot still starts and `/lore` still answers — it just logs a warning.
 
-`/admin-clear-history` is disabled: it had no authorization check.
+`/admin-clear-history` was removed: it had no authorization check.
 
 ## History & RAG Pipeline
 
@@ -246,7 +257,7 @@ make dce-evaluate  →  history-service reads channel_state.json
 
 make rag-ingest    →  rag-service chunks the JSONL by conversation, embeds with
                       ibm-granite/granite-embedding-311m-multilingual-r2, upserts to
-                      ChromaDB collection `lore`  (idempotent)
+                      ChromaDB collection `lore`  (append-only; weekly + quarterly rebuild via server-ops)
 ```
 
 Archive tiers live on cold storage at `/mnt/storage_cold/array/DiscordArchive/{raw,archive,state}` — bind mounts, so they survive `make nuke`.
@@ -267,7 +278,6 @@ make train-datasets [PERSONA=mimic_user1]
 make train-queue    [PERSONAS="mimic_user1"]
 make train-export-latest PERSONA=mimic_user1 CANDIDATE=1
 make train-sample   PERSONA=mimic_user1 MODELS="mimic_user1 candidate" ARGS=--blind
-make train-export-latest [PERSONA=mimic_user1]
 ```
 
 The container is PID-1 `supervisor.py` holding the arbiter lease, with `train_worker.py` as a child holding the CUDA context. Preemption SIGKILLs the worker; the container survives and resumes from the last checkpoint carrying a `COMPLETE` marker. Being killed is the normal path — see [`lora-training/README.md`](lora-training/README.md) for why the split is forced and why the cadence is wall-clock rather than step-based.
@@ -290,17 +300,17 @@ The fallback matters: the NVIDIA container runtime bakes versioned driver librar
 
 ## Testing & CI
 
-More than 270 tests across five independent per-service pytest suites:
+More than 600 tests across five independent per-service pytest suites:
 
 | Suite | Tests | Covers |
 |---|---|---|
-| `discord-bot` | 96 | lore agent loop, tools, sessions, formatters |
-| `history-service` | 63 | channel state, DCE parser, JSONL store |
-| `arbiter` | 51 | scheduler guarantees, config, Docker client |
-| `lora-training` | 49 | arbiter client, checkpoints, supervisor, dataset builder |
-| `proxy` | 17 | GPU gate, idle evictor |
+| `discord-bot` | 245 | lore agent loop and tools, citations, mimic chat, personas, `/imagine`, vision, threads |
+| `lora-training` | 137 | arbiter client, checkpoints, supervisor, dataset builder, context cut, topic eval, export |
+| `history-service` | 114 | channel state, DCE orchestration and parser, JSONL and media stores, image captioning |
+| `proxy` | 80 | GPU gate, idle evictor, image-server management |
+| `arbiter` | 52 | scheduler guarantees, config, Docker client |
 
-There are per-service pytest suites for `arbiter` (scheduler, config, docker client), `proxy` (GPU gate, idle evictor), `discord-bot` (lore agent, tools, session, formatters), `history-service` (channel state, DCE parser, JSONL store), and `lora-training` (arbiter client, checkpoints, supervisor, dataset builder). Each service's `requirements-test.txt` defines its gitignored `.venv-test/` — the trainer's deliberately excludes `torch`, so every suite runs on a machine with no GPU and no multi-GB install:
+Each service's `requirements-test.txt` defines its gitignored `.venv-test/` — the trainer's deliberately excludes `torch`, so every suite runs on a machine with no GPU and no multi-GB install:
 
 ```bash
 make test-venvs   # create/refresh every .venv-test/ plus .venv-lint/ (re-run after editing requirements)
