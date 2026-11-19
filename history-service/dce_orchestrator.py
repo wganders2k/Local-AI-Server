@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from config import (
+    ARCHIVE_DIR,
     EXCLUDED_CHANNELS,
 )
 from channel_state import (
@@ -23,11 +24,14 @@ from channel_state import (
     update_channel,
     channels_needing_export,
 )
-from dce_parser import parse_dce_export_directory
-from jsonl_store import append_messages
+from dce_parser import ATTACHMENT_PARSER_FIELDS, parse_dce_export_directory
+from jsonl_store import append_messages, replace_archive
 
 DCE_OUTPUT_ROOT = "/out"       # Path as seen by DCE container (mounted cold storage)
 HOST_RAW_DIR = "/archive/raw"  # Path as seen by history-service (bind mount)
+# One older copy of each, kept by refresh_archive.
+ARCHIVE_PREV_DIR = ARCHIVE_DIR.rstrip("/") + "_prev"
+RAW_PREV_DIR = HOST_RAW_DIR + "_prev"
 
 logger = logging.getLogger(__name__)
 
@@ -331,3 +335,61 @@ def evaluate_and_export(
     )
     
     return total_results
+
+
+def _included(channels: List[dict]) -> List[dict]:
+    return [c for c in channels if c["id"] not in EXCLUDED_CHANNELS and c.get("name") not in EXCLUDED_CHANNELS]
+
+
+def refresh_archive(channels: List[dict]) -> dict:
+    """
+    Rebuild the archive from a full export of every channel (the quarterly
+    refresh), so edits and deletions on Discord reach it.
+
+    Each channel is exported whole into raw/. Only once every export has
+    succeeded is the archive replaced (replace_archive keeps the old one in
+    archive_prev, with captions and media carried over by attachment id),
+    the older raw exports moved to raw_prev — /reparse would otherwise bring
+    deleted messages back — and the channel state reset, so the weekly
+    export carries on from the moment this one started. A failed export
+    leaves everything as it was and raises.
+    """
+    import shutil
+
+    started = datetime.now(timezone.utc).isoformat()
+    channels = _included(channels)
+    new_dirs: List[str] = []
+    try:
+        for ch in channels:
+            out = export_channel(ch["id"]) or export_channel(ch["id"])  # one retry
+            if not out:
+                raise RuntimeError(f"export of channel {ch['id']} ({ch.get('name')}) failed; archive left as it was")
+            new_dirs.append(os.path.join(HOST_RAW_DIR, os.path.basename(out)))
+    except BaseException:
+        for d in new_dirs:
+            shutil.rmtree(d, ignore_errors=True)
+        raise
+
+    fresh: Dict[str, Dict[str, dict]] = {}
+    for d in new_dirs:
+        for uid, records in parse_dce_export_directory(d).items():
+            by_id = fresh.setdefault(uid, {})
+            for rec in records:
+                by_id[rec["message_id"]] = rec
+    result = replace_archive({u: list(r.values()) for u, r in fresh.items()}, ARCHIVE_PREV_DIR, ATTACHMENT_PARSER_FIELDS)
+
+    if os.path.isdir(RAW_PREV_DIR):
+        shutil.rmtree(RAW_PREV_DIR)
+    os.makedirs(RAW_PREV_DIR)
+    keep = {os.path.basename(d) for d in new_dirs}
+    for name in os.listdir(HOST_RAW_DIR):
+        if name not in keep:
+            shutil.move(os.path.join(HOST_RAW_DIR, name), RAW_PREV_DIR)
+
+    state: Dict[str, dict] = {}
+    for ch in channels:
+        update_channel(state, ch["id"], ch.get("name", ch["id"]), last_export_at=started,
+                       last_message_at=ch.get("last_message_at"))
+    save_state(state)
+    logger.info(f"Refresh complete: {len(channels)} channels exported, {result}")
+    return {"channels_exported": len(channels), **result}

@@ -30,9 +30,9 @@ from config import (
     PORT,
 )
 from channel_state import reset_state
-from dce_orchestrator import evaluate_and_export
-from image_captioner import process_pending_batch
-from media_store import fetch_batch
+from dce_orchestrator import evaluate_and_export, refresh_archive
+from image_captioner import needs_caption, process_pending_batch
+from media_store import fetch_batch, needs_fetch
 from jsonl_store import get_message_count, get_all_user_ids, clear_all
 
 logging.basicConfig(
@@ -146,7 +146,7 @@ async def evaluate() -> dict:
     """
     Trigger channel evaluation + targeted DCE exports.
 
-    Called by host cron (monthly). Evaluates all channels in the
+    Called weekly by the server-ops timer. Evaluates all channels in the
     guild, invokes DCE for channels with activity since last export,
     and merges raw exports into per-user JSONL archive.
     """
@@ -180,6 +180,26 @@ async def evaluate() -> dict:
             "status": "error",
             "message": str(e),
         }
+
+
+@app.post("/refresh")
+async def refresh() -> dict:
+    """
+    Quarterly: export every channel in full and rebuild the archive from it,
+    so edits and deletions on Discord reach the archive. Captions and media
+    carry over by attachment id; the replaced archive is kept in
+    archive_prev (dce_orchestrator.refresh_archive). Takes hours.
+    """
+    logger.info("Full refresh triggered via POST /refresh")
+    try:
+        channels = await asyncio.to_thread(_fetch_discord_channels)
+        if not channels:
+            return {"status": "error", "message": "Failed to fetch Discord channels"}
+        result = await asyncio.to_thread(refresh_archive, channels)
+        return {"status": "complete", **result}
+    except Exception as e:
+        logger.error(f"Refresh failed: {e}", exc_info=True)
+        return {"status": "error", "message": str(e)}
 
 
 @app.post("/reparse")
@@ -297,18 +317,23 @@ async def media_status() -> dict:
     """
     Progress of the media fetch and caption backfill: attachment counts by
     media_status and by caption_status, across the whole archive.
+    `outstanding` counts images the scheduled jobs will still fetch or
+    caption; the weekly update waits for it to reach 0 before ingesting.
     """
     def count() -> dict:
         from collections import Counter
         from jsonl_store import load_all_records
         media, caption = Counter(), Counter()
+        outstanding = 0
         for uid in get_all_user_ids():
             for rec in load_all_records(uid):
                 for att in rec.get("attachments") or []:
                     caption[att.get("caption_status", "none")] += 1
                     if att.get("caption_status") != "skipped":
                         media[att.get("media_status", "none")] += 1
-        return {"media_status": dict(media), "caption_status": dict(caption)}
+                    if att.get("caption_status") == "pending" and (needs_fetch(att) or needs_caption(att)):
+                        outstanding += 1
+        return {"media_status": dict(media), "caption_status": dict(caption), "outstanding": outstanding}
 
     return await asyncio.to_thread(count)
 

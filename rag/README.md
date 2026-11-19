@@ -14,16 +14,26 @@ Embeddings: `ibm-granite/granite-embedding-311m-multilingual-r2`, loaded in **fl
 | `POST` | `/surrounding` | The messages before/after one message in its channel, across chunk boundaries |
 | `POST` | `/search_literal` | Exact-text / per-author search over every chunk, in time order |
 | `POST` | `/aggregate` | Message counts grouped by author, channel or month |
-| `POST` | `/ingest` | Chunk, embed, and upsert the archive. Idempotent, but see below |
+| `POST` | `/ingest` | Chunk, embed, and upsert the archive into a collection. Idempotent, but the scheduled jobs use the CLI below |
 
-`make rag-ingest` triggers ingestion; `make rag-status` shows collection counts.
+`make rag-status` shows collection counts.
 
-**Full rebuilds** go into a fresh collection and are switched to afterwards, because upsert never deletes: when chunk boundaries move, the old chunks stay behind as near-duplicates.
+**Keeping it current** is two scheduled jobs in the private server-ops repo, both run through `ingest.py`'s CLI:
 
 ```bash
-docker compose exec rag-service python ingest.py lore_v2 --rebuild   # writes lore_v2 + lore_v2_images
-# check it, then set RAG_COLLECTION=lore_v2 in .env and recreate rag-service
+# Weekly, after history-service has exported and captioned the week's messages
+# (`make rag-ingest` runs this too):
+docker compose exec rag-service python ingest.py --append
+# Quarterly, after a full re-export rebuilt the archive:
+docker compose exec rag-service python ingest.py lore_next --rebuild --reuse-from lore
+docker compose stop rag-service
+docker compose run --rm --no-deps rag-service python ingest.py --promote lore_next
+docker compose start rag-service
 ```
+
+- `--append` adds the messages no stored chunk holds, chunked on their own, and any captioned image `lore_images` lacks. It never changes a stored row, so a conversation still going at the last run continues in a chunk of its own, and edits, deletions and late captions in chunk text wait for the next rebuild.
+- A rebuild goes into a fresh collection, because upsert never deletes. `--reuse-from` copies a vector only where the id *and* the text are unchanged, so it re-embeds only what changed and carries nothing stale over.
+- `--promote` renames `lore` to `lore_prev` (the one older copy kept) and the new collection to `lore`, and refuses one with under 90% of the live chunk count. `--rollback` swaps them back. Both need rag-service stopped: retrieval opens collections with get-or-create, so a request between the renames would create an empty `lore`.
 
 ## Chunking is temporal, not per-message
 

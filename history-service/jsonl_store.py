@@ -460,6 +460,70 @@ def update_attachments(user_id: str, changes: Dict[tuple, dict]) -> int:
     return done
 
 
+def carry_attachment_state(records: List[dict], old_by_id: Dict[str, dict], parser_fields: Iterable[str]) -> int:
+    """
+    Give freshly parsed attachments what the archive already knew about them:
+    caption, downloaded copy, attempt counts — every field outside
+    `parser_fields`. Paired by attachment_id, which Discord never changes, so
+    a full re-export keeps three days of captioning. caption_status follows
+    the rule in refresh_attachments: the parser's "skipped"/"pending" yields
+    to whatever the captioner decided. Returns the attachments carried over.
+    """
+    parser_fields = set(parser_fields)
+    carried = 0
+    for rec in records:
+        for att in rec.get("attachments") or []:
+            old = old_by_id.get(att.get("attachment_id"))
+            if old is None:
+                continue
+            for k, v in old.items():
+                if k not in parser_fields and k != "caption_status":
+                    att[k] = v
+            if old.get("caption_status") not in ("skipped", "pending", None):
+                att["caption_status"] = old["caption_status"]
+            carried += 1
+    return carried
+
+
+def replace_archive(fresh: Dict[str, List[dict]], prev_dir: str, parser_fields: Iterable[str]) -> dict:
+    """
+    Replace the whole archive with `fresh` ({user_id: records}, a full
+    re-export), keeping one copy of the archive it replaces in `prev_dir`.
+
+    Captions and media carry over by attachment_id (carry_attachment_state).
+    Messages missing from `fresh` were deleted on Discord and are dropped,
+    as is the file of a user left with none. Holds the archive lock
+    throughout, so a caption written meanwhile cannot land in the old copy
+    and be lost.
+    """
+    import shutil
+
+    _ensure_archive_dir()
+    with _archive_lock:
+        if os.path.isdir(prev_dir):
+            shutil.rmtree(prev_dir)
+        os.makedirs(prev_dir)
+        old_by_id: Dict[str, dict] = {}
+        old_users = get_all_user_ids()
+        for uid in old_users:
+            shutil.copy2(_user_file_path(uid), prev_dir)
+            for rec in load_all_records(uid):
+                for att in rec.get("attachments") or []:
+                    if att.get("attachment_id"):
+                        old_by_id[att["attachment_id"]] = att
+        carried = messages = 0
+        for uid, records in fresh.items():
+            records = sorted(records, key=lambda r: (r.get("timestamp", ""), r["message_id"]))
+            carried += carry_attachment_state(records, old_by_id, parser_fields)
+            messages += len(records)
+            _write_atomically(_user_file_path(uid), uid, records)
+        for uid in set(old_users) - set(fresh):
+            os.unlink(_user_file_path(uid))
+        _user_id_cache.clear()
+    logger.info(f"Archive replaced: {messages} messages, {carried} attachments carried over, previous copy in {prev_dir}")
+    return {"messages": messages, "users": len(fresh), "attachments_carried": carried}
+
+
 def clear_all() -> int:
     """
     Delete all user archive files and reset the in-memory ID cache.

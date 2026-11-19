@@ -82,10 +82,11 @@ Bound to `127.0.0.1:11437`. No authentication.
 |---|---|---|
 | `GET` | `/health` | Liveness |
 | `GET` | `/status` | Users in the archive and per-user message counts |
-| `POST` | `/evaluate` | Channel evaluation + targeted DCE exports (the main entry point) |
+| `POST` | `/evaluate` | Channel evaluation + targeted DCE exports. Run weekly by server-ops |
+| `POST` | `/refresh` | Full re-export of every channel, rebuilt into a fresh archive: deleted messages drop out, captions and media carry over by attachment id, the old archive and raw exports move to `archive_prev` / `raw_prev`, channel state resets. Run quarterly by server-ops; takes hours |
 | `POST` | `/reparse` | Rebuild Tier 2 from every existing Tier 1 export: append new messages, refresh parser-owned fields on archived ones. No Discord API calls, no DCE. Use it after any parser change |
 | `POST` | `/clear` | ⚠️ Deletes all per-user archives, all raw exports, and resets channel state |
-| `GET` | `/media/status` | Attachment counts by `media_status` and `caption_status` (backfill progress) |
+| `GET` | `/media/status` | Attachment counts by `media_status` and `caption_status`, and `outstanding`: images still to be fetched or captioned (the weekly job waits for 0) |
 | `GET` | `/archive/{user_id}/count` | Message count for one user |
 
 ---

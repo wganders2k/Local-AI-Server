@@ -412,8 +412,8 @@ services:
       - CHROMA_HOST=chromadb
       - CHROMA_PORT=8000
       - ARCHIVE_DIR=/archive
-      # Collection retrieval reads (images: <name>_images). Rebuild into a new
-      # name with `python ingest.py <name> --rebuild`, check it, then switch.
+      # Collection retrieval reads (images: <name>_images). Rebuilds are
+      # swapped in under this name (ingest.py --promote; rag/README.md).
       - COLLECTION_NAME=${RAG_COLLECTION:-lore}
     depends_on:
       chromadb:

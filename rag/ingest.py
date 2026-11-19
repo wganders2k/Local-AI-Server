@@ -26,7 +26,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -434,30 +434,34 @@ def image_docs(chunks: List[Chunk]) -> List[ImageDoc]:
     the poster wrote alongside it. Each points back at its chunk, so a hit can
     be returned as the conversation the image was posted in.
     """
+    return _image_docs((chunk.chunk_id, msg) for chunk in chunks for msg in chunk.messages)
+
+
+def _image_docs(placed: Iterable[Tuple[str, Message]]) -> List[ImageDoc]:
+    """image_docs() for (chunk_id, message) pairs."""
     docs: List[ImageDoc] = []
-    for chunk in chunks:
-        for msg in chunk.messages:
-            for n, caption in enumerate(msg.images):
-                if not caption:
-                    continue
-                text = caption
-                if msg.content.strip():
-                    text = f"{caption}\n{msg.username}: {msg.content}"
-                docs.append(ImageDoc(
-                    doc_id=f"{msg.message_id}:{n}",
-                    text=text,
-                    metadata={
-                        "chunk_id": chunk.chunk_id,
-                        "message_id": msg.message_id,
-                        "channel_id": msg.channel_id,
-                        "channel_name": msg.channel_name,
-                        "author": msg.username,
-                        # Same field names as chunks, so the date/channel where
-                        # clause builder works on both collections.
-                        "timestamp_start": int(msg.timestamp.timestamp()),
-                        "timestamp_end": int(msg.timestamp.timestamp()),
-                    },
-                ))
+    for chunk_id, msg in placed:
+        for n, caption in enumerate(msg.images):
+            if not caption:
+                continue
+            text = caption
+            if msg.content.strip():
+                text = f"{caption}\n{msg.username}: {msg.content}"
+            docs.append(ImageDoc(
+                doc_id=f"{msg.message_id}:{n}",
+                text=text,
+                metadata={
+                    "chunk_id": chunk_id,
+                    "message_id": msg.message_id,
+                    "channel_id": msg.channel_id,
+                    "channel_name": msg.channel_name,
+                    "author": msg.username,
+                    # Same field names as chunks, so the date/channel where
+                    # clause builder works on both collections.
+                    "timestamp_start": int(msg.timestamp.timestamp()),
+                    "timestamp_end": int(msg.timestamp.timestamp()),
+                },
+            ))
     return docs
 
 
@@ -483,11 +487,46 @@ def _encode(model, texts: List[str]):
     return emb, set(still_bad)
 
 
-def _upsert_batched(model, collection, ids: List[str], texts: List[str], metadatas: List[dict], what: str) -> int:
+def _stored_vectors(source, ids: List[str], texts: List[str]) -> Dict[int, list]:
+    """
+    {row -> embedding} for rows ``source`` already holds with the same id and
+    byte-identical text, so a rebuild re-embeds only what actually changed.
+    The text is compared, not just the id: chunk and image ids are stable
+    across rebuilds, but the text under one can change (a message edited, a
+    mention rewritten), and that row must be embedded afresh.
+    """
+    out: Dict[int, list] = {}
+    for i in range(0, len(ids), 1000):
+        got = source.get(ids=ids[i:i + 1000], include=["documents", "embeddings"])
+        old = {x: (d, e) for x, d, e in zip(got["ids"], got["documents"], got["embeddings"])}
+        for k in range(i, min(i + 1000, len(ids))):
+            hit = old.get(ids[k])
+            if hit is not None and hit[0] == texts[k]:
+                out[k] = list(hit[1])
+    return out
+
+
+def _upsert_batched(
+    model, collection, ids: List[str], texts: List[str], metadatas: List[dict], what: str,
+    reuse: Optional[Dict[int, list]] = None,
+) -> int:
+    import numpy as np
+
+    reuse = reuse or {}
     done = 0
     for i in range(0, len(ids), EMBED_BATCH):
         end = min(i + EMBED_BATCH, len(ids))
-        emb, bad = _encode(model, texts[i:end])
+        need = [j for j in range(end - i) if i + j not in reuse]
+        emb = [None] * (end - i)
+        bad: set = set()
+        if need:
+            fresh, bad_need = _encode(model, [texts[i + j] for j in need])
+            for n, j in enumerate(need):
+                emb[j] = fresh[n]
+            bad = {need[n] for n in bad_need}
+        for j in range(end - i):
+            if i + j in reuse:
+                emb[j] = np.asarray(reuse[i + j])
         keep = [j for j in range(end - i) if j not in bad]
         for j in bad:
             logger.error(f"Skipping {what} {ids[i + j]}: embedding is not finite")
@@ -503,12 +542,12 @@ def _upsert_batched(model, collection, ids: List[str], texts: List[str], metadat
 
 
 def _unstored(collection, ids: List[str], *rows: List) -> tuple:
-    """Drop rows whose id the collection already holds (for --resume)."""
+    """Drop rows whose id the collection already holds (--resume, --append)."""
     have = set()
     for i in range(0, len(ids), 5000):
         have.update(collection.get(ids=ids[i:i + 5000], include=[])["ids"])
     keep = [k for k, x in enumerate(ids) if x not in have]
-    logger.info(f"Resume: {len(have)} already stored, {len(keep)} to embed")
+    logger.info(f"{collection.name}: {len(have)} already stored, {len(keep)} to embed")
     return ([ids[k] for k in keep],) + tuple([r[k] for k in keep] for r in rows)
 
 
@@ -519,6 +558,7 @@ def embed_and_upsert(
     collection_name: str = "lore",
     rebuild: bool = False,
     resume: bool = False,
+    reuse_from: Optional[str] = None,
 ) -> Dict[str, int]:
     """
     Embed chunks and their captioned images, and upsert both into ChromaDB:
@@ -530,6 +570,10 @@ def embed_and_upsert(
     first; the safe way to use it is on a fresh collection name, then point
     COLLECTION_NAME at it once it has been checked. ``resume=True`` skips ids
     the collections already hold, to finish an interrupted rebuild.
+    ``reuse_from`` names an earlier collection (and its ``_images``) whose
+    vectors are copied for every row whose id and text are unchanged; only the
+    rest are embedded. A full CPU re-embed takes hours, while an archive change
+    usually touches a few percent of rows.
 
     Returns:
         {"chunks_upserted": n, "images_upserted": m}
@@ -552,19 +596,33 @@ def embed_and_upsert(
     collection = client.get_or_create_collection(name=collection_name)
     image_collection = client.get_or_create_collection(name=images_name)
 
+    def reusable(name: str, rows: tuple) -> Dict[int, list]:
+        if not reuse_from:
+            return {}
+        try:
+            source = client.get_collection(name)
+        except Exception:
+            logger.warning(f"Cannot reuse vectors: no collection '{name}'")
+            return {}
+        found = _stored_vectors(source, rows[0], rows[1])
+        logger.info(f"Reusing {len(found)} of {len(rows[0])} vectors from '{name}'; embedding {len(rows[0]) - len(found)}")
+        return found
+
     model = load_embedding_model()
     rows = ([c.chunk_id for c in chunks], [format_chunk_text(c) for c in chunks], [_build_metadata(c) for c in chunks])
     if resume:
         rows = _unstored(collection, *rows)
     logger.info(f"Embedding {len(rows[0])} chunks into '{collection_name}' with {EMBEDDING_MODEL}")
-    n_chunks = _upsert_batched(model, collection, *rows, "chunks")
+    n_chunks = _upsert_batched(model, collection, *rows, "chunks", reuse=reusable(reuse_from or "", rows))
 
     docs = image_docs(chunks)
     rows = ([d.doc_id for d in docs], [d.text for d in docs], [d.metadata for d in docs])
     if resume:
         rows = _unstored(image_collection, *rows)
     logger.info(f"Embedding {len(rows[0])} captioned images into '{images_name}'")
-    n_images = _upsert_batched(model, image_collection, *rows, "images")
+    n_images = _upsert_batched(
+        model, image_collection, *rows, "images", reuse=reusable(f"{reuse_from}_images", rows),
+    )
     return {"chunks_upserted": n_chunks, "images_upserted": n_images}
 
 
@@ -583,6 +641,7 @@ def run_ingest(
     collection_name: str = "lore",
     rebuild: bool = False,
     resume: bool = False,
+    reuse_from: Optional[str] = None,
 ) -> Dict[str, int]:
     """
     Run the full ingest pipeline: load → chunk → embed → upsert.
@@ -623,6 +682,7 @@ def run_ingest(
     counts = embed_and_upsert(
         chunks, chroma_host=chroma_host, chroma_port=chroma_port,
         collection_name=collection_name, rebuild=rebuild, resume=resume,
+        reuse_from=reuse_from,
     )
 
     result = {"messages_loaded": len(messages), "chunks_created": len(chunks), **counts}
@@ -630,24 +690,148 @@ def run_ingest(
     return result
 
 
+def _stored_messages(collection) -> Dict[str, str]:
+    """{message_id -> chunk_id} for every message the collection's chunks hold."""
+    placed: Dict[str, str] = {}
+    offset = 0
+    while True:
+        got = collection.get(include=["metadatas"], limit=5000, offset=offset)
+        if not got["ids"]:
+            return placed
+        for chunk_id, meta in zip(got["ids"], got["metadatas"]):
+            for mid in (meta.get("message_ids") or "").split(","):
+                if mid:
+                    placed[mid] = chunk_id
+        offset += len(got["ids"])
+
+
+def append_new(
+    archive_dir: str = "/archive",
+    chroma_host: str = "chromadb",
+    chroma_port: int = 8000,
+    collection_name: str = "lore",
+    gap_minutes: int = DEFAULT_GAP_MINUTES,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
+) -> Dict[str, int]:
+    """
+    Add what the collection does not hold yet, and touch nothing it does.
+
+    The weekly update. Messages that are in no stored chunk are chunked on
+    their own and added, so a conversation that was still going at the last
+    run continues in a chunk of its own. Captioned images not yet in
+    ``<name>_images`` are added too, which also picks up images captioned
+    after their messages were added. Edits, deletions and a late caption's
+    place in its chunk's text wait for the next full rebuild.
+    """
+    import chromadb  # noqa: F811
+
+    client = chromadb.HttpClient(host=chroma_host, port=str(chroma_port))
+    # get_collection, not get_or_create: appending to a collection that is
+    # not there would quietly start a new, nearly empty index.
+    collection = client.get_collection(collection_name)
+    image_collection = client.get_collection(f"{collection_name}_images")
+
+    messages = load_archive(archive_dir)
+    placed = _stored_messages(collection)
+    chunks = chunk_by_conversation(
+        [m for m in messages if m.message_id not in placed],
+        gap_minutes=gap_minutes, max_tokens=max_tokens,
+    )
+    for chunk in chunks:
+        for m in chunk.messages:
+            placed[m.message_id] = chunk.chunk_id
+    docs = _image_docs((placed[m.message_id], m) for m in messages if m.message_id in placed)
+    image_rows = _unstored(image_collection, [d.doc_id for d in docs], [d.text for d in docs], [d.metadata for d in docs])
+
+    counts = {"messages_loaded": len(messages), "chunks_created": len(chunks), "chunks_upserted": 0, "images_upserted": 0}
+    if chunks or image_rows[0]:
+        model = load_embedding_model()
+        rows = ([c.chunk_id for c in chunks], [format_chunk_text(c) for c in chunks], [_build_metadata(c) for c in chunks])
+        counts["chunks_upserted"] = _upsert_batched(model, collection, *rows, "chunks")
+        counts["images_upserted"] = _upsert_batched(model, image_collection, *image_rows, "images")
+    logger.info(f"Append complete: {counts}")
+    return counts
+
+
+def _names(name: str) -> Tuple[str, str]:
+    return name, f"{name}_images"
+
+
+def promote(client, new: str, live: str, min_ratio: float = 0.9) -> None:
+    """
+    Make ``new`` the live collection: ``live`` becomes ``<live>_prev`` (the
+    one older copy kept) and ``new`` takes its name, images included.
+
+    Run with rag-service stopped: retrieval opens collections with
+    get_or_create, so a request between the two renames would create an empty
+    ``live`` and block the second. Refuses a ``new`` much smaller than
+    ``live``, the sign of a rebuild that went wrong.
+    """
+    prev = f"{live}_prev"
+    have = {c.name for c in client.list_collections()}
+    for n in _names(new):
+        if n not in have:
+            raise SystemExit(f"promote: no collection '{n}'")
+    if live in have:
+        old_n, new_n = client.get_collection(live).count(), client.get_collection(new).count()
+        if new_n < min_ratio * old_n:
+            raise SystemExit(f"promote: '{new}' has {new_n} chunks against {old_n} in '{live}'; not promoting")
+    for n in _names(prev):
+        if n in have:
+            client.delete_collection(n)
+    for old, to in zip(_names(live), _names(prev)):
+        if old in have:
+            client.get_collection(old).modify(name=to)
+    for old, to in zip(_names(new), _names(live)):
+        client.get_collection(old).modify(name=to)
+    logger.info(f"Promoted '{new}' to '{live}'; the previous one is now '{prev}'")
+
+
+def rollback(client, live: str) -> None:
+    """Swap ``live`` and ``<live>_prev`` back. Run with rag-service stopped."""
+    prev, tmp = f"{live}_prev", f"{live}_swap"
+    for a, b in ((live, tmp), (prev, live), (tmp, prev)):
+        for x, y in zip(_names(a), _names(b)):
+            client.get_collection(x).modify(name=y)
+    logger.info(f"Rolled back: '{prev}' is live again as '{live}'")
+
+
 if __name__ == "__main__":
-    # Long full rebuilds run here rather than through POST /ingest, whose
-    # caller would otherwise have to hold an HTTP request open for the whole run:
-    #   docker compose exec rag-service python ingest.py lore_v2 --rebuild
+    # The scheduled jobs (server-ops) run these through `docker compose exec`:
+    #   python ingest.py --append                        weekly: add what is new
+    #   python ingest.py lore_next --rebuild --reuse-from lore
+    #   python ingest.py --promote lore_next             quarterly, rag-service stopped
+    #   python ingest.py --rollback                      undo the last promote
     import argparse
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    live = os.environ.get("COLLECTION_NAME", "lore")
     ap = argparse.ArgumentParser(description="Ingest the archive into ChromaDB")
-    ap.add_argument("collection", nargs="?", default=os.environ.get("COLLECTION_NAME", "lore"))
+    ap.add_argument("collection", nargs="?", default=live)
+    ap.add_argument("--append", action="store_true", help="add only messages and images not stored yet")
     ap.add_argument("--rebuild", action="store_true", help="drop the target collections first")
     ap.add_argument("--resume", action="store_true", help="skip ids already stored (finish an interrupted rebuild)")
     ap.add_argument("--since", default=None)
+    ap.add_argument("--reuse-from", default=None, metavar="COLLECTION",
+                    help="copy vectors for unchanged rows from this collection (and its _images)")
+    ap.add_argument("--promote", metavar="COLLECTION", help=f"make COLLECTION the live '{live}'")
+    ap.add_argument("--rollback", action="store_true", help=f"swap '{live}' and '{live}_prev' back")
     a = ap.parse_args()
     if a.rebuild and a.resume:
         ap.error("--rebuild and --resume are opposites")
-    run_ingest(
-        archive_dir=os.environ.get("ARCHIVE_DIR", "/archive"),
-        chroma_host=os.environ.get("CHROMA_HOST", "chromadb"),
-        chroma_port=int(os.environ.get("CHROMA_PORT", "8000")),
-        since=a.since, collection_name=a.collection, rebuild=a.rebuild, resume=a.resume,
-    )
+    host = os.environ.get("CHROMA_HOST", "chromadb")
+    port = int(os.environ.get("CHROMA_PORT", "8000"))
+    archive = os.environ.get("ARCHIVE_DIR", "/archive")
+    if a.promote or a.rollback:
+        import chromadb
+
+        client = chromadb.HttpClient(host=host, port=str(port))
+        promote(client, a.promote, live) if a.promote else rollback(client, live)
+    elif a.append:
+        append_new(archive_dir=archive, chroma_host=host, chroma_port=port, collection_name=a.collection)
+    else:
+        run_ingest(
+            archive_dir=archive, chroma_host=host, chroma_port=port,
+            since=a.since, collection_name=a.collection, rebuild=a.rebuild, resume=a.resume,
+            reuse_from=a.reuse_from,
+        )

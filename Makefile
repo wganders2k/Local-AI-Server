@@ -106,7 +106,7 @@ help:
 	@echo "  history-refresh   Alias for dce-evaluate"
 	@echo ""
 	@echo "  ── RAG ────────────────────────────────────────────────"
-	@echo "  rag-ingest        Trigger lore ingestion into ChromaDB"
+	@echo "  rag-ingest        Add new archive messages to the lore index (append-only)"
 	@echo "                        Reads JSONL archives, embeds, and upserts."
 	@echo "                        Idempotent — safe to re-run."
 	@echo "  rag-status        Show ChromaDB collection stats & data path"
@@ -259,7 +259,7 @@ shell-rag:
 ## Reads JSONL archives, embeds messages, and upserts to the vector store.
 ## Idempotent — safe to re-run (will update existing records).
 rag-ingest:
-	docker compose exec rag-service python -c "import httpx; r = httpx.post('http://localhost:8001/ingest', json={}, timeout=600); print(r.text)"
+	docker compose exec rag-service python ingest.py --append
 
 ## Show ChromaDB collection stats & data path
 rag-status:
