@@ -10,6 +10,7 @@ import json
 
 from lore.agent import LoreRunResult, run_agent_loop, stream_answer
 from lore.progress import ProgressReporter
+from lore.research import split_chunks
 
 
 class FakeProxy:
@@ -336,9 +337,12 @@ async def test_chunks_already_in_context_are_not_appended_again(fake_rag):
     )
 
     results = [m["content"] for m in proxy.tool_requests[-1] if m["role"] == "tool"]
-    assert results[0] == "old"
+    assert split_chunks(results[0])[0] == "old"
     assert results[1].startswith("new")
     assert "1 of 2 excerpt(s) omitted" in results[1]
+    # The page note is not an excerpt: identical on both results, never
+    # deduplicated, and still on the second.
+    assert "page=2" in results[1]
     # The earlier result is untouched, so the cached prefix still matches.
     assert proxy.tool_requests[-1][:4] == proxy.tool_requests[-2][:4]
 

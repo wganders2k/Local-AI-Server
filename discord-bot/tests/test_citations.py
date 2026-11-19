@@ -3,6 +3,7 @@
 import asyncio
 
 from lore.citations import Citations
+from lore.research import split_chunks
 from lore.session import LoreSession
 from lore.tools import ToolContext, execute_tool
 
@@ -65,7 +66,7 @@ class _FakeRAG:
 def test_execute_tool_tags_results():
     c = Citations()
     out = asyncio.run(execute_tool("search_images", {"query": "cat"}, ToolContext(rag=_FakeRAG(), citations=c)))
-    assert out == "[m1] a: [image: a cat]"
+    assert split_chunks(out)[0] == "[m1] a: [image: a cat]"
 
 
 class _SurroundRAG:

@@ -63,27 +63,36 @@ def drop_seen_chunks(result: str, seen: set[str]) -> str:
         a note saying how many were omitted, or only a note if none were new.
     """
     chunks = split_chunks(result)
+    # Search notes (e.g. a semantic search's page note) are not excerpts: the
+    # same wording recurs across searches and must never be deduplicated.
+    notes = [c for c in chunks if c.startswith(SEARCH_NOTE_PREFIX)]
     fresh: list[str] = []
+    excerpts = 0
     for chunk in chunks:
+        if chunk.startswith(SEARCH_NOTE_PREFIX):
+            continue
+        excerpts += 1
         key = chunk_key(chunk)
         if key in seen:
             continue
         seen.add(key)
         fresh.append(chunk)
 
-    dropped = len(chunks) - len(fresh)
+    dropped = excerpts - len(fresh)
     if not dropped:
         return result
     if not fresh:
-        return (
-            f"{SEARCH_NOTE_PREFIX} All {len(chunks)} excerpt(s) this search "
+        return CHUNK_SEPARATOR.join([
+            f"{SEARCH_NOTE_PREFIX} All {excerpts} excerpt(s) this search "
             "returned were already shown earlier in this conversation — it found "
             "nothing new. Change the wording, the tool or the scope, or answer "
-            "from what you have."
-        )
+            "from what you have.",
+            *notes,
+        ])
     return CHUNK_SEPARATOR.join(fresh + [
-        f"{SEARCH_NOTE_PREFIX} {dropped} of {len(chunks)} excerpt(s) omitted — "
-        "already shown earlier in this conversation."
+        f"{SEARCH_NOTE_PREFIX} {dropped} of {excerpts} excerpt(s) omitted — "
+        "already shown earlier in this conversation.",
+        *notes,
     ])
 
 def flatten_research_for_synthesis(

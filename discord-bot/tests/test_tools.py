@@ -7,8 +7,12 @@ while an exact miss has to read as "this question is settled".
 """
 
 
+import pytest
+
 from lore.tools import HANDLERS, SIMULATION_HEADER, ToolContext, build_tools, execute_tool
 from lore.metrics import AgentMetrics
+import asyncio
+from lore.citations import Citations
 from mimic import controller
 
 
@@ -177,3 +181,203 @@ async def test_metrics_record_the_call(fake_rag):
     await execute_tool("search_discord_history", {"query": "x"}, ToolContext(fake_rag, metrics=metrics))
     assert metrics.tools_used == ["search_discord_history"]
     assert len(metrics.tool_call_times) == 1
+
+
+class RosterRAG:
+    """An archive of four handles; any other author matches nothing."""
+
+    HANDLES = {"alice_e": 120, "bob1234": 80, "Deleted User": 40, "al_b": 10}
+
+    def __init__(self):
+        self.roster_reads = 0
+        self.searched: list[str] = []
+
+    async def aggregate(self, author=None, term=None, group_by="author", **kw):
+        if author is None and term is None:
+            self.roster_reads += 1
+            lines = "\n".join(f"  {h}: {n}" for h, n in self.HANDLES.items())
+            return f"Counts of messages — grouped by author, 210 total:\n{lines}", 210
+        self.searched.append(author)
+        n = self.HANDLES.get(author, 0)
+        return (f"Counts of messages by {author}, {n} total:\n  general: {n}", n) if n else ("", 0)
+
+    async def search_literal(self, author=None, **kw):
+        self.searched.append(author)
+        return ("", 0)
+
+
+# The shape of prompts/lore_context.example.md. "Al" names two people; Bob
+# also posted from an account the archive keeps as "Deleted User".
+BACKGROUND = """CORE ACTIVE SERVER MEMBER ALIAS INDEX:
+Alice:
+Real Name: Alice Example
+Aliases: alice_e, aliceee
+
+Bob(Al):
+Real Name: Robert Example
+Aliases: bob1234, bobby (formerly Deleted User)
+
+Carol:
+Aliases: al, al_b
+"""
+
+
+@pytest.fixture
+def archive(monkeypatch):
+    from lore import prompts, tools
+    monkeypatch.setattr(tools, "_handles", None)
+    monkeypatch.setattr(prompts, "_lore_context_cache", BACKGROUND)
+    return RosterRAG()
+
+
+async def test_a_name_from_the_background_is_searched_as_its_handle(archive):
+    out = await execute_tool("count_messages", {"author": "Alice", "group_by": "channel"},
+                             ToolContext(rag=archive))
+    assert archive.searched == ["alice_e"]
+    assert "'Alice' was searched as alice_e" in out and "120 total" in out
+
+
+async def test_real_names_and_people_with_old_accounts_resolve(archive):
+    # Bob's "(formerly Deleted User)" is his old account: a search for him by
+    # any name, or by either account, covers both.
+    for name in ("Robert", "Bob", "bobby", "bob1234", "Deleted User"):
+        await execute_tool("search_exact_chronological", {"author": name}, ToolContext(rag=archive))
+    assert archive.searched == ["bob1234,Deleted User"] * 5
+
+
+async def test_a_search_across_accounts_says_so(archive):
+    out = await execute_tool("count_messages", {"author": "Bob", "group_by": "channel"},
+                             ToolContext(rag=archive))
+    assert "searched across all of that person's accounts: bob1234, Deleted User" in out
+
+
+async def test_an_ambiguous_or_unknown_name_lists_the_real_handles(archive):
+    ctx = ToolContext(rag=archive)
+    for name, args in (("count_messages", {"author": "Al", "group_by": "channel"}),
+                       ("search_exact_chronological", {"author": "Zed"})):
+        out = await execute_tool(name, args, ctx)
+        assert f"'{args['author']}' is not an account handle" in out
+        assert "alice_e, bob1234, Deleted User, al_b" in out
+    assert archive.searched == []  # nothing was searched that could only return zero
+    assert archive.roster_reads == 1  # read once, then cached
+
+
+async def test_an_ambiguous_name_says_who_it_could_be(archive):
+    out = await execute_tool("search_exact_chronological", {"author": "al"}, ToolContext(rag=archive))
+    assert "It could be any of: al_b, bob1234." in out
+
+
+async def test_a_real_handle_with_no_matches_is_a_genuine_zero(archive):
+    out = await execute_tool("search_exact_chronological", {"author": "alice_e", "term": "zzz"},
+                             ToolContext(rag=archive))
+    assert archive.searched == ["alice_e"]
+    assert "not an account handle" not in out and "No messages" in out
+
+
+def test_speakers_are_shown_with_their_names():
+    from lore.tools import _name_speakers
+
+    raw = (
+        ">>> MATCH — [@1/2] alice_e: tell bob1234: hi\n"
+        "[#general | 2021-01-01 00:00]\n"
+        "[@1/3] bob1234: hello alice_e\n"
+        "[m4] stranger: who are you\n"
+        "Counts of messages — grouped by author, 3 total:\n"
+        "  alice_e: 2\n"
+        "  Deleted User: 1"
+    )
+    assert _name_speakers(raw, BACKGROUND) == (
+        ">>> MATCH — [@1/2] Alice (alice_e): tell bob1234: hi\n"
+        "[#general | 2021-01-01 00:00]\n"
+        "[@1/3] Bob(Al) (bob1234): hello alice_e\n"
+        "[m4] stranger: who are you\n"
+        "Counts of messages — grouped by author, 3 total:\n"
+        "  Alice (alice_e): 2\n"
+        "  Bob(Al) (Deleted User, old account): 1"  # claimed by one person only
+    )
+
+
+SHARED = BACKGROUND + """
+Dana:
+Aliases: dana_d (formerly Deleted User)
+"""
+
+
+def test_an_old_account_two_people_claim_belongs_to_neither():
+    from lore.tools import _merge_people, _name_speakers
+
+    assert _name_speakers("[m1] Deleted User: hi", SHARED) == "[m1] Deleted User: hi"
+    report = "Counts — grouped by author, 5 total:\n  bob1234: 3\n  Deleted User: 2"
+    assert _merge_people(report, SHARED) == report
+
+
+def test_counts_merge_a_persons_accounts():
+    from lore.tools import _merge_people, _name_speakers
+
+    report = (
+        "Counts of messages containing 'oink' — grouped by author, 170 total:\n"
+        "  alice_e: 60\n"
+        "  bob1234: 50\n"
+        "  Deleted User: 40\n"
+        "  stranger: 20"
+    )
+    merged = _name_speakers(_merge_people(report, BACKGROUND), BACKGROUND)
+    assert merged.splitlines() == [
+        "Counts of messages containing 'oink' — grouped by author, 170 total:",
+        "  Bob(Al): 90 — bob1234 50 + Deleted User 40 (old account)",
+        "  Alice (alice_e): 60",
+        "  stranger: 20",
+    ]
+
+
+def test_without_a_background_results_are_untouched():
+    from lore.tools import _name_speakers
+
+    assert _name_speakers("[@1/2] alice_e: hi", "") == "[@1/2] alice_e: hi"
+
+
+# ---------------------------------------------------------------------------
+# Paging through a semantic search
+# ---------------------------------------------------------------------------
+
+
+class PagingRAG:
+    """A ranking of 25 chunks, served top_k at a time from ``offset``."""
+
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    async def retrieve(self, query, top_k=10, offset=0, **kw):
+        self.calls.append({"top_k": top_k, "offset": offset})
+        hits = [f"[@1/{i}] a: match {i}" for i in range(offset + 1, min(offset + top_k, 25) + 1)]
+        return "\n\n---\n\n".join(hits), len(hits)
+
+
+def _search(rag, **args):
+    from lore.tools import _search_discord_history
+    ctx = ToolContext(rag, None, None, AgentMetrics(), Citations())
+    return asyncio.run(_search_discord_history({"query": "pigs", **args}, ctx))
+
+
+def test_page_two_asks_for_the_next_top_k():
+    rag = PagingRAG()
+    out = _search(rag, page=2)
+    assert rag.calls == [{"top_k": 10, "offset": 10}]
+    assert "match 11" in out and "match 10\n" not in out
+    assert "matches 11-20" in out and "page=3" in out
+
+
+def test_the_first_page_says_more_are_available():
+    out = _search(PagingRAG())
+    assert "matches 1-10" in out and "page=2" in out
+
+
+def test_a_page_past_the_end_says_so():
+    out = _search(PagingRAG(), page=4)
+    assert out.startswith("[Search note]") and "past page 3" in out
+
+
+def test_a_bad_page_is_page_one():
+    rag = PagingRAG()
+    _search(rag, page="soon")
+    assert rag.calls[0]["offset"] == 0

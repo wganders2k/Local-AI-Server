@@ -14,6 +14,7 @@ search), because the agent's next move differs.
 """
 
 import logging
+import re
 import time
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional
@@ -26,7 +27,7 @@ from config import (
 )
 from lore.citations import Citations
 from lore.metrics import AgentMetrics
-from lore.research import CHUNK_SEPARATOR
+from lore.research import CHUNK_SEPARATOR, SEARCH_NOTE_PREFIX
 from mimic.engine import render_transcript, simulate
 from personas import PersonaCatalog
 from proxy_client import ProxyClient
@@ -40,7 +41,7 @@ _SEARCH_TOOLS = [
         "type": "function",
         "function": {
             "name": "search_discord_history",
-            "description": "SEMANTIC search across all channels. Finds messages that are *about* a topic even when they never use your exact words \u2014 good for themes, vibes, opinions and paraphrases (\"what do people think of X\"). It returns only the top_k most similar chunks out of the whole archive, ranked by meaning, so it CANNOT tell you what came first, count anything, or guarantee it has found every mention. For an exact word or name, for \"first/earliest\" questions, or for anything needing complete coverage, use search_exact_chronological instead.",
+            "description": "SEMANTIC search across all channels. Finds messages that are *about* a topic even when they never use your exact words \u2014 good for themes, vibes, opinions and paraphrases (\"what do people think of X\"). It returns the top_k most similar chunks out of the whole archive, ranked by meaning (use `page` to see the next-best ones), so it CANNOT tell you what came first, count anything, or guarantee it has found every mention. For an exact word or name, for \"first/earliest\" questions, or for anything needing complete coverage, use search_exact_chronological instead.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -59,6 +60,10 @@ _SEARCH_TOOLS = [
                     "top_k": {
                         "type": "integer",
                         "description": "Number of chunks to retrieve. Default 10.",
+                    },
+                    "page": {
+                        "type": "integer",
+                        "description": "Which page of the ranking to show: 1 (default) is the top_k best matches, 2 the next top_k, and so on. When a search's matches are on target and you want more of them, repeat it with the next page rather than rewording it.",
                     },
                 },
                 "required": ["query"],
@@ -92,6 +97,10 @@ _SEARCH_TOOLS = [
                     "top_k": {
                         "type": "integer",
                         "description": "Number of chunks to retrieve. Default 10.",
+                    },
+                    "page": {
+                        "type": "integer",
+                        "description": "Which page of the ranking to show: 1 (default) is the top_k best matches, 2 the next top_k, and so on. When a search's matches are on target and you want more of them, repeat it with the next page rather than rewording it.",
                     },
                 },
                 "required": ["query", "channel_name"],
@@ -163,6 +172,10 @@ _SEARCH_TOOLS = [
                     "top_k": {
                         "type": "integer",
                         "description": "Number of conversations to return. Default 5.",
+                    },
+                    "page": {
+                        "type": "integer",
+                        "description": "Which page of the ranking to show: 1 (default) is the top_k best matches, 2 the next top_k, and so on. When a search's matches are on target and you want more of them, repeat it with the next page rather than rewording it.",
                     },
                 },
                 "required": ["query"],
@@ -405,11 +418,261 @@ class ToolContext:
     citations: Optional[Citations] = None
 
 
+# Every account handle in the archive, read once from the RAG service. The model
+# reaches for display names ("Alice") where `author` needs the handle
+# ("alice_e"); that matched nothing, and it went on to build answers from
+# messages that merely mention the name. So a name that is not a handle is
+# resolved through the server background's alias index where that is
+# unambiguous, and otherwise answered with the list of real handles.
+_handles: Optional[list[str]] = None
+_HANDLE_LINE = re.compile(r"^\s+(\S.*?):\s+\d+\s*$", re.M)
+
+
+async def _archive_handles(ctx: ToolContext) -> list[str]:
+    global _handles
+    if _handles is None:
+        report, total = await ctx.rag.aggregate(group_by="author", top_n=100)
+        if not total:
+            return []
+        _handles = _HANDLE_LINE.findall(report)
+    return _handles
+
+
+def _background_people(background: str) -> list[tuple[str, list[str], list[str], list[str]]]:
+    """
+    (name, every name and alias, current aliases, old accounts) for each
+    person in the background's alias index.
+
+    An entry is a "Name:" line followed by lines such as "Real Name: ..." and
+    "Aliases: a, b (formerly c)" (see prompts/lore_context.example.md).
+    "(formerly ...)" aliases are old accounts.
+    """
+    people: list[tuple[str, list[str], list[str], list[str]]] = []
+    for line in background.splitlines():
+        head, sep, rest = line.partition(":")
+        if not sep:
+            continue
+        key, rest = head.strip(), rest.strip()
+        if not rest and key and not key.isupper():
+            people.append((key, re.split(r"[()]", key), [], []))
+        elif people and key.lower() == "real name":
+            people[-1][1].extend([rest, *rest.replace(",", " ").split()])
+        elif people and key.lower() == "aliases":
+            former = re.findall(r"\(\s*formerly\s+([^)]*)\)", rest, flags=re.I)
+            current = re.sub(r"\(\s*formerly[^)]*\)", "", rest, flags=re.I)
+            aliases = [a.strip() for a in current.split(",") if a.strip()]
+            people[-1][2].extend(aliases)
+            people[-1][1].extend(aliases)
+            people[-1][3].extend(a.strip() for f in former for a in f.split(",") if a.strip())
+    return people
+
+
+def _accounts(background: str) -> dict[str, tuple[str, bool]]:
+    """
+    {account handle -> (person's name, is an old account)}.
+
+    An old account counts only when one person claims it: "Deleted User" is
+    Discord's label for any departed account, so if two people list it, it
+    could be either and belongs to neither.
+    """
+    people = _background_people(background)
+    claims: dict[str, int] = {}
+    for _, _, _, former in people:
+        for a in set(former):
+            claims[a] = claims.get(a, 0) + 1
+    accounts: dict[str, tuple[str, bool]] = {}
+    for name, _, current, former in people:
+        for a in current:
+            accounts.setdefault(a, (name, False))
+        for a in former:
+            if claims[a] == 1:
+                accounts.setdefault(a, (name, True))
+    return accounts
+
+
+def _person_accounts(background: str, handles: list[str]) -> dict[str, list[str]]:
+    """
+    {person's name -> their accounts that exist in the archive}, current ones
+    first, in the archive's own spelling.
+    """
+    lower = {h.lower(): h for h in handles}
+    out: dict[str, list[str]] = {}
+    for account, (name, _) in _accounts(background).items():
+        if account.lower() in lower:
+            out.setdefault(name, []).append(lower[account.lower()])
+    return out
+
+
+def _alias_index(background: str, handles: list[str]) -> dict[str, set[str]]:
+    """
+    {lowercased name or account -> author filters of the people it may mean}.
+
+    A filter is all of one person's accounts in the archive, comma-separated
+    (the RAG service matches any of them), so asking for a person finds their
+    old accounts' messages too. A name is ambiguous only when it fits two
+    different people.
+    """
+    accounts = _person_accounts(background, handles)
+    index: dict[str, set[str]] = {}
+    for name, names, _, _ in _background_people(background):
+        if name not in accounts:
+            continue
+        target = ",".join(accounts[name])
+        for n in [*names, *accounts[name]]:
+            if n.strip().strip(","):
+                index.setdefault(n.strip().strip(",").lower(), set()).add(target)
+    return index
+
+
+# Where a speaker's handle sits in a tool result: after a message tag
+# ("[@1/2] alice_e: hi", "[m12] alice_e: hi") or at the head of a count line
+# ("  alice_e: 120"). Text inside messages is never touched.
+_SPEAKER = r"(?m)(\] |^  )({handles})(?=: )"
+
+
+def _name_speakers(result: str, background: str) -> str:
+    """
+    Show each speaker as "Name (handle)", or "Name (handle, old account)",
+    using the background's names.
+
+    Results otherwise carry bare handles, and answers repeated them ("Tech-
+    Priest alice_e") where the background asks for names — or treated a
+    person's old account as somebody else.
+    """
+    accounts = _accounts(background)
+    if not accounts:
+        return result
+    pattern = _SPEAKER.format(handles="|".join(map(re.escape, sorted(accounts, key=len, reverse=True))))
+
+    def label(m: re.Match) -> str:
+        name, old = accounts[m.group(2)]
+        return f"{m.group(1)}{name} ({m.group(2)}{', old account' if old else ''})"
+
+    return re.sub(pattern, label, result)
+
+
+_COUNT_LINE = re.compile(r"^  (.+?): (\d[\d,]*)$")
+
+
+def _merge_people(report: str, background: str) -> str:
+    """
+    A count grouped by author, with each person's accounts added together.
+
+    The backend counts per account, so someone who changed accounts appears
+    as two rows that the model would have to recognise and add up from the
+    background — and did not. Merged rows show their breakdown; single-account
+    rows are left for _name_speakers to label. Re-sorted by total.
+    """
+    accounts = _accounts(background)
+    lines = report.splitlines()
+    rows = [(i, m.group(1), int(m.group(2).replace(",", ""))) for i, line in enumerate(lines)
+            if (m := _COUNT_LINE.match(line))]
+    by_person: dict[str, list[tuple[str, int]]] = {}
+    for _, account, n in rows:
+        if account in accounts:
+            by_person.setdefault(accounts[account][0], []).append((account, n))
+    if not any(len(v) > 1 for v in by_person.values()):
+        return report
+
+    merged: list[tuple[int, str]] = []
+    done: set[str] = set()
+    for _, account, n in rows:
+        person = accounts[account][0] if account in accounts else None
+        if person is None or len(by_person[person]) == 1:
+            merged.append((n, f"  {account}: {n:,}"))
+        elif person not in done:
+            done.add(person)
+            parts = by_person[person]
+            total = sum(c for _, c in parts)
+            breakdown = " + ".join(
+                f"{a} {c:,}{' (old account)' if accounts[a][1] else ''}" for a, c in parts
+            )
+            merged.append((total, f"  {person}: {total:,} — {breakdown}"))
+    merged.sort(key=lambda r: -r[0])
+    first, last = rows[0][0], rows[-1][0]
+    return "\n".join(lines[:first] + [line for _, line in merged] + lines[last + 1:])
+
+
+async def _resolve_author(author: str, ctx: ToolContext) -> tuple[Optional[str], str]:
+    """
+    (author filter to search, note for the result) for what the model passed.
+
+    A name, or any one of a person's accounts, becomes all of that person's
+    accounts in the archive, with a note when that is not exactly what was
+    passed — someone's old account holds messages a search by name should
+    find. A handle no background entry claims comes back unchanged. Anything
+    else comes back as (None, hint): searching it would only return zero.
+    """
+    from lore.prompts import load_lore_context
+
+    handles = await _archive_handles(ctx)
+    if not handles:
+        return author, ""
+    key = author.strip().lower()
+    targets = _alias_index(load_lore_context(), handles).get(key, set())
+    if len(targets) == 1:
+        target = next(iter(targets))
+        if target.lower() == key:
+            return target, ""
+        accounts = target.split(",")
+        searched = (
+            f"was searched as {target}, the handle the background gives for that name"
+            if len(accounts) == 1 else
+            f"was searched across all of that person's accounts: {', '.join(accounts)}"
+        )
+        return target, f"(`author` takes account handles: '{author}' {searched}.)\n"
+    if key in (h.lower() for h in handles):
+        return author, ""
+    could_be = (
+        f" It could be any of: {', '.join(sorted(t.split(',')[0] for t in targets))}." if targets else ""
+    )
+    return None, (
+        f"'{author}' is not an account handle, so it matches nothing.{could_be} `author` "
+        "takes the handle exactly as it appears before the colon in messages — the "
+        "background maps people's names to their handles. Handles in the archive, most "
+        f"active first: {', '.join(handles)}. Repeat the call with the right handle."
+    )
+
+
 def _date_scope(start_date: Optional[str], end_date: Optional[str]) -> str:
     """The " between X and Y" clause of a no-results message, or ""."""
     if not (start_date or end_date):
         return ""
     return f" between {start_date} and {end_date}"
+
+
+def _page(args: dict, top_k: int) -> tuple[int, int]:
+    """(page, offset) for a semantic search: page 1 is the best top_k."""
+    try:
+        page = max(1, int(args.get("page") or 1))
+    except (TypeError, ValueError):
+        page = 1
+    return page, (page - 1) * top_k
+
+
+def _with_page_note(result: str, page: int, offset: int, count: int, top_k: int) -> str:
+    """
+    The results with a closing note on where they sit in the ranking, so the
+    model knows it can ask for more of a good search instead of rewording it.
+
+    A search note, not a chunk: it is never deduplicated as an excerpt and
+    never handed to the writer as research.
+    """
+    note = (
+        f"{SEARCH_NOTE_PREFIX} These are matches {offset + 1}-{offset + count} of this "
+        f"search, best first. Lower-ranked matches continue past them: repeat the same "
+        f"search with page={page + 1} to see the next {top_k}."
+    )
+    return result + CHUNK_SEPARATOR + note
+
+
+def _past_the_end(query: str, page: int) -> str:
+    """What a page beyond the last match says."""
+    return (
+        f"{SEARCH_NOTE_PREFIX} No more matches for '{query}' past page {page - 1} with "
+        "these filters — every match has been shown. Try different wording, another "
+        "tool or a wider scope."
+    )
 
 
 async def _semantic_search(args: dict, ctx: ToolContext, *, scoped: bool) -> str:
@@ -429,18 +692,21 @@ async def _semantic_search(args: dict, ctx: ToolContext, *, scoped: bool) -> str
     channel_name = args.get("channel_name") or None
     start_date, end_date = args.get("start_date"), args.get("end_date")
     top_k = args.get("top_k", AGENT_TOP_K)
+    page, offset = _page(args, top_k)
 
     context, chunk_count = await ctx.rag.retrieve(
         query, top_k=top_k, channel_name=channel_name,
-        start_date=start_date, end_date=end_date,
+        start_date=start_date, end_date=end_date, offset=offset,
     )
     logger.info(
-        "RAG %s: query=%r, channel=%r, top_k=%d → %d chunks",
+        "RAG %s: query=%r, channel=%r, top_k=%d, page=%d → %d chunks",
         "search_channel_history" if scoped else "search_discord_history",
-        query, channel_name, top_k, chunk_count,
+        query, channel_name, top_k, page, chunk_count,
     )
     if chunk_count:
-        return context
+        return _with_page_note(context, page, offset, chunk_count, top_k)
+    if page > 1:
+        return _past_the_end(query, page)
     scope = f" in channel '{channel_name}'" if channel_name else ""
     miss = f"No results found for query '{query}'{scope}{_date_scope(start_date, end_date)}."
     if scoped:
@@ -467,13 +733,20 @@ async def _search_images(args: dict, ctx: ToolContext) -> str:
     query = args.get("query", "")
     channel_name = args.get("channel_name") or None
     start_date, end_date = args.get("start_date"), args.get("end_date")
+    top_k = args.get("top_k", 5)
+    page, offset = _page(args, top_k)
     context, count = await ctx.rag.search_images(
-        query, top_k=args.get("top_k", 5), channel_name=channel_name,
-        start_date=start_date, end_date=end_date,
+        query, top_k=top_k, channel_name=channel_name,
+        start_date=start_date, end_date=end_date, offset=offset,
     )
-    logger.info("RAG search_images: query=%r channel=%r -> %d conversation(s)", query, channel_name, count)
+    logger.info(
+        "RAG search_images: query=%r channel=%r page=%d -> %d conversation(s)",
+        query, channel_name, page, count,
+    )
     if count:
-        return context
+        return _with_page_note(context, page, offset, count, top_k)
+    if page > 1:
+        return _past_the_end(query, page)
     scope = f" in channel '{channel_name}'" if channel_name else ""
     return (
         f"No images matched '{query}'{scope}{_date_scope(start_date, end_date)}. Image search "
@@ -543,6 +816,11 @@ async def _search_exact_chronological(args: dict, ctx: ToolContext) -> str:
             "If you do not know the exact wording, use search_discord_history instead."
         )
 
+    note = ""
+    if author:
+        author, note = await _resolve_author(author, ctx)
+        if author is None:
+            return note
     context, total = await ctx.rag.search_literal(
         term=term, author=author,
         channel_name=args.get("channel_name"),
@@ -558,7 +836,7 @@ async def _search_exact_chronological(args: dict, ctx: ToolContext) -> str:
         scope = f"'{term}'" if term else ""
         if author:
             scope = f"{scope} by {author}".strip()
-        return (
+        return note + (
             f"No messages anywhere in the archive literally contain {scope}. "
             "This is an exact-text search over everything, so this result is conclusive "
             "for that exact wording — do not repeat it. Either the phrasing differs "
@@ -587,7 +865,7 @@ async def _search_exact_chronological(args: dict, ctx: ToolContext) -> str:
             f"To page through time instead, repeat with start_date set just after "
             f"the last result shown.\n"
         )
-    return header + "\n" + context
+    return note + header + "\n" + context
 
 
 async def _count_messages(args: dict, ctx: ToolContext) -> str:
@@ -602,6 +880,11 @@ async def _count_messages(args: dict, ctx: ToolContext) -> str:
         raw_exclude = [raw_exclude]
     exclude_channels = [c.lstrip("#").strip() for c in raw_exclude if c and c.strip()]
 
+    note = ""
+    if author:
+        author, note = await _resolve_author(author, ctx)
+        if author is None:
+            return note
     report, total = await ctx.rag.aggregate(
         term=term, author=author,
         channel_name=args.get("channel_name"),
@@ -615,12 +898,15 @@ async def _count_messages(args: dict, ctx: ToolContext) -> str:
         term, author, group_by, exclude_channels, total,
     )
     if total == 0:
-        return (
+        return note + (
             "No messages matched, so there is nothing to count. This counted over the "
             "whole archive, so the answer is zero for that exact wording — do not repeat "
             "this search."
         )
-    return report
+    if group_by == "author":
+        from lore.prompts import load_lore_context
+        report = _merge_people(report, load_lore_context())
+    return note + report
 
 
 SIMULATION_HEADER = (
@@ -713,7 +999,9 @@ async def execute_tool(tool_name: str, tool_args: dict, ctx: ToolContext) -> str
 
     tool_start = time.monotonic()
     try:
-        result = await tool.run(tool_args, ctx)
+        from lore.prompts import load_lore_context
+
+        result = _name_speakers(await tool.run(tool_args, ctx), load_lore_context())
         return ctx.citations.tag(result) if ctx.citations is not None else result
     except Exception as e:
         logger.exception("Tool execution failed for %s", tool_name)

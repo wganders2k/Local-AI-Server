@@ -43,6 +43,7 @@ class RAGClient:
         channel_name: Optional[str] = None,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
+        offset: int = 0,
     ) -> Tuple[str, int]:
         """
         Retrieve relevant lore chunks for a query.
@@ -53,6 +54,7 @@ class RAGClient:
             channel_name: Optional — only search within this channel.
             start_date: Optional ISO 8601 date — only include results after this date.
             end_date: Optional ISO 8601 date — only include results before this date.
+            offset: Skip this many of the best matches (the next page).
 
         Returns:
             Tuple of (context_string, chunk_count).
@@ -65,6 +67,7 @@ class RAGClient:
             {
                 "query": query, "top_k": top_k, "channel_name": channel_name or None,
                 "start_date": start_date or None, "end_date": end_date or None,
+                "offset": offset,
             },
             "retrieve",
         )
@@ -76,16 +79,19 @@ class RAGClient:
         channel_name: Optional[str] = None,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
+        offset: int = 0,
     ) -> Tuple[str, int]:
         """
         Semantic search over image captions. Returns the conversations the
-        matching images were posted in, and how many.
+        matching images were posted in, and how many; ``offset`` skips that
+        many of the best.
         """
         return await self._post(
             "/search_images",
             {
                 "query": query, "top_k": top_k, "channel_name": channel_name or None,
                 "start_date": start_date or None, "end_date": end_date or None,
+                "offset": offset,
             },
             "search_images",
         )
