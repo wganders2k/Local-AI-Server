@@ -9,6 +9,7 @@ import logging
 import time
 from typing import Optional
 
+from config import LORE_MAX_COMPLETION_TOKENS
 from lore.progress import ProgressReporter
 from proxy_client import ProxyClient
 
@@ -60,6 +61,7 @@ async def stream_answer(
         usage_sink=usage,
         tools=tools,
         enable_thinking=enable_thinking,
+        max_tokens=LORE_MAX_COMPLETION_TOKENS,
     ):
         parts.append(token)
         chars += len(token)

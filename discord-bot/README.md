@@ -22,16 +22,30 @@ history, disclaimer stripping, and the agentic RAG loop behind `/lore`.
 
 ## How `/lore` works
 
-1. The agent model (`AGENT_MODEL`, currently `qwen3.6-27b-u`) is given the
-   tools in [`lore/tools.py`](lore/tools.py) and loops: call a tool, read the
-   result, decide whether to search again — up to `rounds` times.
-2. If it answers before the budget runs out, that is the answer. If it doesn't,
-   the research is flattened into plain text and a separate synthesis call writes
-   one. (Flattened, because leaving tool-call markup in context teaches the model
-   to reply with tool-call markup.)
-3. The answer posts as embeds, followed by an offer message. React with ❓ and the
+1. The research model, picked by `speed` (`LORE_RESEARCH_MODELS`: `fast` is
+   `qwen3.6-35b-a3b-u`, a Qwen3.6 35B-A3B MoE; `slow` is `qwen3.8-27b-u`, a Qwen3.8
+   27B dense), is given the tools in [`lore/tools.py`](lore/tools.py) and loops: call a tool,
+   read the result, decide whether to search again — up to `rounds` times
+   (default 20, at most 50).
+2. `writer` picks the model that writes the answer. By default (`same as
+   research`) it is the research model: if it answers before the budget runs
+   out, that is the answer. If it doesn't, it is told to answer on its own
+   conversation, which the backend still has cached; only if that fails is the
+   research flattened into plain text for a separate synthesis call.
+   (Flattened, because leaving tool-call markup in context teaches the model to
+   reply with tool-call markup.) Any other writer (`LORE_WRITERS`: the two
+   Qwens and the Gemma 4 31B and 26B-A4B) gets the research flattened and
+   writes the answer itself — a model swap and a cold prefill. The research is
+   condensed first if it has outgrown the writer's window. Follow-ups in the
+   thread keep the run's speed and writer.
+3. The answer posts as plain messages — the first replying to the finished status
+   message — followed by an offer message. React with ❓ and the
    bot opens a thread seeded with the research it already did — so follow-ups
-   usually cost no searching at all.
+   usually cost no searching at all. A follow-up turn runs on one model, the
+   thread's writer if it has one, and keeps its tool rounds in the transcript
+   exactly as sent, so each turn extends the backend's cached conversation;
+   chunks the thread already holds are dropped from new results, and old rounds
+   are condensed only when the thread nears its context limit.
 4. Threads are swept after `LORE_THREAD_TTL_SECONDS` of silence, which is what
    actually reclaims the disk: a session stores every excerpt verbatim.
 
@@ -85,7 +99,7 @@ The prefix is stripped before anything reads the message, and the latest one win
 
 `vision.py` describes images posted to the bot, so the models can react to what an image shows rather than to a bare `[attachment]`. A caption is made by the model the feature already has loaded, so it never costs a model swap. Captions are cached by attachment id.
 
-- **Lore threads.** An image posted with or as a follow-up is described by the agent model (`qwen3.6-27b-u`, which has a vision projector in `models.ini`). The description is appended to the question as `[image: …]`, so sessions stay plain text.
+- **Lore threads.** An image posted with or as a follow-up is described by the thread's research model (both Qwen lore presets have a vision projector in `models.ini`). The description is appended to the question as `[image: …]`, so sessions stay plain text.
 - **Mimic chats.** Images are described by `[gemma4-12b-mimic-u]` with no adapter applied, newest first, at most `VISION_MAX_NEW_PER_BURST` new ones per burst. They are captioned only when the controller is about to be asked. The controller sees `[image: …]`. **Persona prompts still show `[attachment]`**, because that is what the adapters were trained on (`shared/mimic_format.context_line`); captions live on `mimic.transcript.Line`, never on the shared `Msg`. Off by default (`VISION_MIMIC_ENABLED`): the 12B base's projector needs a newer llama.cpp than the stack runs; see `[gemma4-12b-mimic-u]` in `models.ini`.
 
 The caption prompt is `prompts/caption.md`, identical to history-service's, so a live caption reads like an archived one.
@@ -214,7 +228,7 @@ lives in [`config.py`](config.py) with the reasoning attached.
 
 The agent's context window is **read from the backend at startup**, not
 configured: `lore/context_window.py` asks the proxy's `/v1/models` for the argv
-llama-server would launch `AGENT_MODEL` with and takes `--ctx-size` from it. So
+llama-server would launch each lore model with and takes `--ctx-size` from it. So
 editing `ctx-size` in [`models.ini`](../models.ini) is enough — nothing in the bot
 needs changing to match. `AGENT_CTX_LIMIT_FALLBACK` in `config.py` is only used if
 the proxy is unreachable, and a disagreement between the two is logged as a stale

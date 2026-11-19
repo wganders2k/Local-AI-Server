@@ -50,14 +50,28 @@ def test_counters_track_turns_and_searches():
     assert (s.turns, s.searches) == (1, 1)
 
 
-def test_research_indices_finds_only_research():
+def test_research_units_pair_each_call_with_its_result():
     s = make_session()
     s.append_question("q")
-    s.append_research("r")
+    s.append_research("r")  # a legacy flat block, or a compaction summary
     s.append_answer("a")
     s.append_question("q2")
-    s.append_research("r2")
-    assert s.research_indices() == [1, 4]
+    s.append_rounds([
+        {"role": "assistant", "content": None, "tool_calls": [{"id": "c1"}], "reasoning_content": "why"},
+        {"role": "tool", "name": "search", "content": "x\n\n---\n\n[Search note] more", "tool_call_id": "c1"},
+    ])
+    assert s.research_units() == [[1], [4, 5]]
+    assert s.searches == 2
+    assert s.seen_keys == {chunk_key("x")}  # notes are not excerpts
+
+
+def test_tool_rounds_go_to_the_backend_as_they_were_sent():
+    call = {"role": "assistant", "content": None, "tool_calls": [{"id": "c1"}], "reasoning_content": "why"}
+    result = {"role": "tool", "name": "search", "content": "x", "tool_call_id": "c1"}
+    s = make_session()
+    s.append_question("q")
+    s.append_rounds([call, result])
+    assert s.build_messages()[-2:] == [call, result]  # no "kind", nothing lost
 
 
 def test_record_context_tracks_the_peak():

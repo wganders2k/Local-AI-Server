@@ -75,33 +75,81 @@ RAG_ENABLED: bool = os.environ.get("RAG_ENABLED", "true").lower() == "true"
 # Agent (Agentic RAG) Configuration
 # ──────────────────────────────────────────────────────────────
 
-AGENT_MODEL: str = "qwen3.6-27b-u"  # Qwen3.6-27B — tool-calling capable model
-AGENT_MAX_ROUNDS: int = 10        # Default max tool-call rounds before forcing a final answer
-AGENT_MAX_ROUNDS_HARD_CAP: int = 25  # Hard cap for user-specified rounds in /lore
+# /lore takes two choices per command:
+#   speed  — which model researches (runs the tool rounds):
+#     fast — the Qwen3.6 35B-A3B MoE ([qwen3.6-35b-a3b-u]): ~130 tok/s, 6 questions
+#            in 374s with 209 citations in the 2026-11-18 bake-off.
+#     slow — the Qwen3.8 27B dense ([qwen3.8-27b-u], built-in MTP): ~50 tok/s,
+#            for the deepest research.
+#   writer — which model writes the final answer. LORE_WRITER_SAME (the
+#     default) keeps the research model, which answers on its own cached
+#     conversation. Any other choice is a model swap and a cold prefill: the
+#     research is flattened, condensed to fit that model's window and handed
+#     over. The Gemma 4 models were the agents until 2026-11-18.
+LORE_RESEARCH_MODELS: dict[str, str] = {"fast": "qwen3.6-35b-a3b-u", "slow": "qwen3.8-27b-u"}
+LORE_SPEEDS: tuple[str, ...] = tuple(LORE_RESEARCH_MODELS)
+LORE_DEFAULT_SPEED: str = "fast"
+LORE_WRITER_SAME: str = "same"
+# Choice name -> models.ini preset.
+LORE_WRITERS: dict[str, str] = {
+    "qwen-35b-moe": "qwen3.6-35b-a3b-u",
+    "qwen-27b": "qwen3.8-27b-u",
+    "gemma-31b": "gemma4-31b-u",
+    "gemma-26b-moe": "gemma4-26b-a4b-u",
+}
+LORE_DEFAULT_WRITER: str = LORE_WRITER_SAME
+# Models whose chat template accepts a system message mid-conversation. The
+# final-answer nudge goes in as one for these instead of as a user message:
+# Gemma 4's template drops every assistant turn's reasoning before the last
+# user message, so a user-role nudge re-prefilled the whole run (4.8k of 50.7k
+# cached, 53s) where a system-role one kept it (24.1k of 26.6k, 11s). Qwen's
+# template raises on a system message anywhere but first, so it is not listed.
+LORE_SYSTEM_NUDGE_MODELS: frozenset[str] = frozenset({"gemma4-26b-a4b-u", "gemma4-31b-u"})
+# Ceiling on any one lore completion, reasoning included. Nothing else stops a
+# model that loops: one was measured generating 73k tokens of repetition, and
+# a streamed request has no deadline, so it would hold the GPU until the
+# context filled. Real answers use a few thousand.
+LORE_MAX_COMPLETION_TOKENS: int = 16384
+# Tighter ceiling for one tool round, which only has to pick the next search:
+# normal rounds measured 300-1,400 tokens (one 7.5k). 8k is ~55s on the MoE.
+LORE_MAX_ROUND_TOKENS: int = 8192
+AGENT_MAX_ROUNDS: int = 20        # Default max tool-call rounds before forcing a final answer
+AGENT_MAX_ROUNDS_HARD_CAP: int = 50  # Hard cap for user-specified rounds in /lore
 # Identical tool calls are refused rather than re-run; after this many refusals
 # in one run, searching stops and the answer is written from what was found.
 AGENT_MAX_REPEATED_SEARCHES: int = 2
 # simulate_conversation runs per /lore run or thread turn. Each is a model swap
-# away from AGENT_MODEL and back, and a re-prefill of the whole research context.
+# away from the research model and back, and a re-prefill of the whole research context.
 LORE_MAX_SIMULATIONS: int = 1
-AGENT_TEMPERATURE: float = 0.1    # Low temperature for deterministic tool calling
+# Malformed tool calls (the backend could not parse one — seen when the MoE
+# loops inside a call's arguments until the round cap cuts it off). Each costs
+# a strike, a run starts with LORE_TOOL_CALL_STRIKES and can never hold more,
+# and LORE_STRIKE_RECOVERY_ROUNDS good rounds in a row earn one back. Searching
+# stops at zero. The model is never told about strikes.
+LORE_TOOL_CALL_STRIKES: int = 3
+LORE_STRIKE_RECOVERY_ROUNDS: int = 5
+# Tool-round temperature. On the Gemma MoE a tool round at 0.1 (repeat-penalty
+# 1.0) looped to the 16k cap in its reasoning. 0.6 is what both the Gemma and
+# the Qwen authors recommend for precise work. Identical repeated searches are
+# caught by the repeat guard, not by low temperature.
+AGENT_TEMPERATURE: float = 0.6
 AGENT_TOP_K: int = 10             # Default chunks per tool call (higher than lore's 5)
 
 # Context-window accounting.
 #
 # The real limit is read from the proxy at startup — see
 # lore/context_window.py, which asks /v1/models for the argv llama-server would
-# launch AGENT_MODEL with and takes --ctx-size from it. Call
-# context_window.limit(), never this constant.
+# launch each model with and takes --ctx-size from it. Call
+# context_window.window(model) or limit(speed, writer), never this constant.
+# Each request is checked against the window of the model it goes to; a
+# thread's transcript is held between turns to the smaller window of its
+# research and writer models.
 #
 # This is only the fallback for a bot that cannot reach the proxy, and it is
 # also the value discovery is checked against: a mismatch is logged as a stale
-# constant. Keep it equal to `ctx-size` for the AGENT_MODEL entry in models.ini
-# (currently the [qwen3.6-27b-u] section).
-#
-# The number matters. A heavy /lore run has been observed holding 65,530 of
-# these 96,000 tokens at round 10, before any thread follow-up accumulates.
-AGENT_CTX_LIMIT_FALLBACK: int = 96000
+# constant. Keep it equal to the smallest `ctx-size` of the lore models in
+# models.ini (currently [gemma4-31b-u]), the value that is safe for all of them.
+AGENT_CTX_LIMIT_FALLBACK: int = 57344
 
 # Fractions of the discovered context limit at which the agent changes behaviour.
 #   SOFT    — start telling the model what is left, so it can wind down searching

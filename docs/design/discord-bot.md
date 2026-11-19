@@ -22,7 +22,7 @@ Three slash commands:
 |---|---|---|
 | `/mimic persona message` | the persona alias itself (`mimic_user*`) | Impersonate a member's Discord personality |
 | `/chat model` | any alias llama-server knows | Create a thread bound to a model; chat in it without further commands |
-| `/lore question [rounds]` | `qwen3.6-27b-u` (`AGENT_MODEL`) | Agentic search over server history |
+| `/lore question [rounds] [speed] [writer]` | research on `qwen3.6-35b-a3b-u` (fast) or `qwen3.8-27b-u` (slow); `writer` can hand the answer to another model | Agentic search over server history |
 
 ### 1.1 Slash commands over mention routing
 
@@ -77,7 +77,7 @@ python-dotenv>=1.0.0
 
 `CHROMA_HOST` / `CHROMA_PORT` are **not** used by the bot — it never talks to ChromaDB directly.
 
-Non-environment constants in [`config.py`](discord-bot/config.py): `AGENT_MODEL` (`qwen3.6-27b-u`), `AGENT_MAX_ROUNDS` (10), `AGENT_MAX_ROUNDS_HARD_CAP` (25), `AGENT_TEMPERATURE` (0.1), `AGENT_TOP_K` (10), `HISTORY_MAX_TURNS` (20), and the proxy timeouts in §10.3.
+Non-environment constants in [`config.py`](discord-bot/config.py): `LORE_RESEARCH_MODELS` (fast `qwen3.6-35b-a3b-u`, slow `qwen3.8-27b-u`), `LORE_WRITERS` (writer choices), `LORE_DEFAULT_WRITER` (same as research), `LORE_TOOL_CALL_STRIKES` (3), `LORE_STRIKE_RECOVERY_ROUNDS` (5), `LORE_DEFAULT_SPEED` (fast), `AGENT_MAX_ROUNDS` (20), `AGENT_MAX_ROUNDS_HARD_CAP` (50), `AGENT_TEMPERATURE` (0.6), `LORE_MAX_COMPLETION_TOKENS` (16384), `LORE_MAX_ROUND_TOKENS` (8192), `AGENT_TOP_K` (10), `HISTORY_MAX_TURNS` (20), and the proxy timeouts in §10.3.
 
 ---
 
@@ -176,7 +176,7 @@ Threads are restored at startup from `threads.json`: each is re-fetched, and ent
 2. defer()
 3. Collect guild text channel names to give the agent a valid channel vocabulary
 4. run_agent_loop(question, rounds) — see §7.3
-5. Render the answer into one or more embeds
+5. Post the answer as plain messages, the first a reply to the status message
 ```
 
 **Rate limiting is deliberately not applied to `/lore`.** A single invocation is a multi-round, minutes-long research task, and a 5-per-minute window is meaningless against it — the queue depth check is the real defence.
@@ -271,7 +271,7 @@ Plain text, no embeds — the bot's own username and avatar are the attribution.
 
 ### 8.3 Lore responses
 
-Discord embeds, blurple `0x5865F2`, titled by `LORE_EMBED_TITLE` (default `📚 Lore`; `.env` names the server). Answers longer than the 4096-character embed limit are split across several embeds at sentence boundaries; an empty answer produces a single `(No results)` embed.
+Plain text since 2026-11-18, split at paragraph boundaries to Discord's 2,000-character limit. The first part replies to the finished status message (which carries the run summary: models, rounds, tool calls, time, tok/s); the rest, and the thread offer, are ordinary channel messages. Mentions are disabled, since model output could otherwise ping, and citation links are wrapped in `<>` so they do not unfurl. A chunk the channel refuses falls back to an interaction followup. `build_lore_embeds` and `LORE_EMBED_TITLE` remain for the earlier embed layout but are unused by `/lore`.
 
 There is no source-count footer. An earlier design specified one, but with an agentic loop "how many chunks were used" is not a single number — the agent may run a dozen retrievals across several rounds and discard most of them.
 
@@ -279,7 +279,7 @@ There is no source-count footer. An earlier design specified one, but with an ag
 
 `DISCLAIMER_PATTERNS` in [`config.py`](discord-bot/config.py) — around a dozen anchored regexes covering "This is general…", "Please consult…", "I'm an AI…", and similar trailing additions. Applied to the tail of the response.
 
-Applied to `/mimic` and `/chat` output. Not applied to `/lore`, whose model is not the uncensored base and whose output is a research answer where a caveat may be legitimate.
+Applied to `/mimic` and `/chat` output. Not applied to `/lore`, whose model is not the mimic base and whose output is a research answer where a caveat may be legitimate.
 
 ---
 
@@ -386,7 +386,7 @@ single-file layout that no longer exists.)
 | First token → user | streaming | Chunks post as they fill |
 | `/lore` full run | **tens of seconds to minutes** | Multi-round; each round is an inference plus retrieval |
 
-The typing indicator is held for the whole of `/mimic` and `/chat`; `/lore` uses `defer()` and posts embeds when the loop finishes.
+The typing indicator is held for the whole of `/mimic` and `/chat`; `/lore` uses `defer()` and posts its answer when the loop finishes.
 
 ---
 

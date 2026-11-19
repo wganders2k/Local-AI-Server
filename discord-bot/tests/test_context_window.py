@@ -1,5 +1,8 @@
 """
-Discovering the agent model's context window from the proxy.
+Discovering the lore models' context windows from the proxy.
+
+Speed-specific behaviour (slow held to the smaller window) is in
+test_lore_speed.py; these cover discovery itself.
 
 The value drives every budget decision a lore thread makes, so the cases that
 matter most here are the failure ones: every path that cannot produce a real
@@ -8,8 +11,16 @@ number must leave the documented fallback in place rather than a zero or a guess
 
 import pytest
 
-from config import AGENT_CTX_LIMIT_FALLBACK, AGENT_MODEL
+from config import AGENT_CTX_LIMIT_FALLBACK, LORE_WRITERS
 from lore import context_window
+from lore.models import research_model
+
+FAST, SLOW = research_model("fast"), research_model("slow")
+
+
+def research(size, **more):
+    """Both research models at ``size``, plus any other entries."""
+    return {FAST: size, SLOW: size, **more}
 
 
 @pytest.fixture(autouse=True)
@@ -36,22 +47,22 @@ DISCOVERED = 65536  # deliberately not the fallback
 
 
 def test_limit_is_the_fallback_before_discovery():
-    assert context_window.limit() == AGENT_CTX_LIMIT_FALLBACK
+    assert context_window.limit("fast") == AGENT_CTX_LIMIT_FALLBACK
     assert not context_window.discovered()
     assert "fallback" in context_window.describe()
 
 
 async def test_discovery_caches_the_backend_value():
-    proxy = FakeProxy({AGENT_MODEL: DISCOVERED, "other": 4096})
+    proxy = FakeProxy(research(DISCOVERED, other=4096))
 
     assert await context_window.discover(proxy) is True
-    assert context_window.limit() == DISCOVERED
+    assert context_window.limit("fast") == DISCOVERED
     assert context_window.discovered()
     assert "/v1/models" in context_window.describe()
 
 
 async def test_a_value_matching_the_fallback_is_still_discovered():
-    proxy = FakeProxy({AGENT_MODEL: AGENT_CTX_LIMIT_FALLBACK})
+    proxy = FakeProxy({m: AGENT_CTX_LIMIT_FALLBACK for m in context_window.all_models()})
     assert await context_window.discover(proxy) is True
     assert context_window.discovered()
 
@@ -61,34 +72,34 @@ async def test_unreachable_proxy_keeps_the_fallback():
     proxy = FakeProxy({})
 
     assert await context_window.discover(proxy) is False
-    assert context_window.limit() == AGENT_CTX_LIMIT_FALLBACK
+    assert context_window.limit("fast") == AGENT_CTX_LIMIT_FALLBACK
     assert not context_window.discovered()
 
 
-async def test_agent_model_missing_from_the_backend_keeps_the_fallback(caplog):
-    proxy = FakeProxy({"some-other-model": 4096})
+async def test_a_research_model_missing_from_the_backend_keeps_the_fallback(caplog):
+    proxy = FakeProxy({FAST: DISCOVERED, "some-other-model": 4096})
 
     with caplog.at_level("WARNING"):
         assert await context_window.discover(proxy) is False
 
-    assert context_window.limit() == AGENT_CTX_LIMIT_FALLBACK
-    assert AGENT_MODEL in caplog.text  # names the model that is missing
+    assert context_window.limit("fast") == AGENT_CTX_LIMIT_FALLBACK
+    assert SLOW in caplog.text  # names the model that is missing
 
 
 async def test_a_stale_fallback_constant_is_flagged(caplog):
-    proxy = FakeProxy({AGENT_MODEL: DISCOVERED})
+    proxy = FakeProxy(research(DISCOVERED, **{LORE_WRITERS['gemma-31b']: DISCOVERED}))
 
     with caplog.at_level("WARNING"):
         await context_window.discover(proxy)
 
     # The discovered value wins; the warning is what replaces the old
     # "keep these two in step by hand" comment.
-    assert context_window.limit() == DISCOVERED
+    assert context_window.limit("fast") == DISCOVERED
     assert "AGENT_CTX_LIMIT_FALLBACK" in caplog.text
 
 
 async def test_ensure_discovered_is_a_no_op_once_cached():
-    proxy = FakeProxy({AGENT_MODEL: DISCOVERED})
+    proxy = FakeProxy(research(DISCOVERED))
 
     await context_window.ensure_discovered(proxy)
     await context_window.ensure_discovered(proxy)
@@ -102,24 +113,18 @@ async def test_ensure_discovered_retries_after_a_failure():
     await context_window.ensure_discovered(failing)
     assert not context_window.discovered()
 
-    recovered = FakeProxy({AGENT_MODEL: DISCOVERED})
+    recovered = FakeProxy(research(DISCOVERED))
     await context_window.ensure_discovered(recovered)
-    assert context_window.limit() == DISCOVERED
-
-
-async def test_an_explicit_model_can_be_queried():
-    proxy = FakeProxy({"lore": 32768, AGENT_MODEL: DISCOVERED})
-    assert await context_window.discover(proxy, model="lore") is True
-    assert context_window.limit() == 32768
+    assert context_window.limit("fast") == DISCOVERED
 
 
 async def test_metrics_track_the_discovered_limit():
     """The accessor exercised through its real consumer."""
     from lore.metrics import AgentMetrics
 
-    await context_window.discover(FakeProxy({AGENT_MODEL: 1000}))
-    metrics = AgentMetrics()
-    metrics.record_usage({"prompt_tokens": 400, "completion_tokens": 100})
+    await context_window.discover(FakeProxy(research(1000)))
+    metrics = AgentMetrics(speed="fast")
+    metrics.record_usage({"prompt_tokens": 400, "completion_tokens": 100}, model=FAST)
 
     assert metrics.context_pct == 0.5
     assert "500/1,000 (50%)" in metrics.context_line()

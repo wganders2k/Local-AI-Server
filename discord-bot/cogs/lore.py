@@ -16,6 +16,7 @@ followed up, and a thread per run buried the channel.
 """
 
 import logging
+from typing import Optional
 
 import discord
 from discord import app_commands
@@ -23,7 +24,12 @@ from discord.ext import commands, tasks
 
 from cogs.common import admit, admit_message
 from config import (
-    AGENT_MODEL,
+    AGENT_MAX_ROUNDS,
+    AGENT_MAX_ROUNDS_HARD_CAP,
+    LORE_DEFAULT_SPEED,
+    LORE_DEFAULT_WRITER,
+    LORE_WRITER_SAME,
+    LORE_WRITERS,
     LORE_ARCHIVE_GUILD_ID,
     LORE_OFFER_TTL_SECONDS,
     LORE_SWEEP_INTERVAL_SECONDS,
@@ -31,12 +37,12 @@ from config import (
     LORE_THREAD_TTL_SECONDS,
 )
 from cogs.lore_status import LoreStatus
-from discord_io import post_lore_answer
-from formatters import build_lore_embeds
+from discord_io import post_lore_answer, post_plain_answer
 from lore.agent import run_agent_loop, run_lore_turn, seed_session_from_run
 from lore.compaction import maybe_compact_session
 from lore.context_window import discover, ensure_discovered, limit as ctx_limit
 from lore.metrics import fraction
+from lore.models import hands_off, research_model, writer_model
 from lore.session import LoreSession
 from proxy_client import ProxyError
 from threads import LORE
@@ -45,6 +51,13 @@ from vision import is_image, with_captions
 logger = logging.getLogger("mimic-bot.cogs.lore")
 
 _OFFER_TEXT = "React to this message to follow up in a thread."
+
+# The /lore option descriptions. Discord caps each at 100 characters.
+# Fast researches on the Qwen 35B-A3B MoE (~130 tok/s); slow on the Qwen 27B
+# dense (~50 tok/s, measured 2026-11-18), so a slow run takes ~3x longer.
+_SPEED_HINT = "Slow researches with the dense Qwen 27B: deeper, but ~3x longer. Fast uses the Qwen MoE."
+_WRITER_HINT = "Model that writes the final answer (default: the research model). Another model adds a swap."
+assert len(_SPEED_HINT) <= 100 and len(_WRITER_HINT) <= 100
 
 
 def _lore_thread_name(question: str) -> str:
@@ -63,8 +76,11 @@ def _lore_footer(session: LoreSession, metrics=None, searched: bool = False) -> 
     thread — which did no searching of its own — can omit it.
     """
     used = session.last_context_tokens
-    total = ctx_limit()
-    bits = [f"🧠 {used:,}/{total:,} ({fraction(used, total):.0%})"]
+    total = ctx_limit(session.speed, session.writer)
+    mode = session.speed
+    if hands_off(session.speed, session.writer):
+        mode += f" → {session.writer}"
+    bits = [f"🧠 {used:,}/{total:,} ({fraction(used, total):.0%})", mode]
     if searched:
         calls = metrics.total_tool_calls
         bits.append(f"{calls} search{'' if calls == 1 else 'es'}")
@@ -110,16 +126,31 @@ class LoreCog(commands.Cog):
     @app_commands.command(name="lore", description="Ask the lore assistant a question")
     @app_commands.describe(
         question="Your question about server lore",
-        rounds="Maximum search rounds (1-25, default: 10)",
+        rounds=f"Maximum search rounds (1-{AGENT_MAX_ROUNDS_HARD_CAP}, default: {AGENT_MAX_ROUNDS})",
+        # Discord caps a parameter description at 100 characters.
+        speed=_SPEED_HINT,
+        writer=_WRITER_HINT,
+    )
+    @app_commands.choices(
+        speed=[
+            app_commands.Choice(name="fast", value="fast"),
+            app_commands.Choice(name="slow", value="slow"),
+        ],
+        writer=[app_commands.Choice(name="same as research", value=LORE_WRITER_SAME)]
+        + [app_commands.Choice(name=name, value=name) for name in LORE_WRITERS],
     )
     async def lore(
         self,
         interaction: discord.Interaction,
         question: str,
-        rounds: int = 10,
+        rounds: app_commands.Range[int, 1, AGENT_MAX_ROUNDS_HARD_CAP] = AGENT_MAX_ROUNDS,
+        speed: Optional[app_commands.Choice[str]] = None,
+        writer: Optional[app_commands.Choice[str]] = None,
     ):
         """Handle the /lore slash command — agentic RAG with tool calling."""
         services = self.services
+        speed = speed.value if speed else LORE_DEFAULT_SPEED
+        writer = writer.value if writer else LORE_DEFAULT_WRITER
 
         # Cheap no-op once discovered; the recovery path if the proxy was not
         # reachable at startup.
@@ -131,9 +162,10 @@ class LoreCog(commands.Cog):
             return
 
         logger.info(
-            "Lore request from %s in %s: question=%r",
+            "Lore request from %s in %s (%s, writer %s, %d rounds): question=%r",
             interaction.user.name,
             interaction.channel.name if interaction.channel else "DM",
+            speed, writer, rounds,
             question[:100],
         )
 
@@ -161,13 +193,22 @@ class LoreCog(commands.Cog):
                 channel_names=channel_names,
                 max_rounds=rounds,
                 catalog=services.personas,
+                speed=speed,
+                writer=writer,
             )
 
             # The stored answer keeps the model's [mN] refs; only what is shown
             # gets links, so the thread transcript stays in the model's own form.
-            shown = result.citations.link(result.answer, LORE_ARCHIVE_GUILD_ID, suppress_previews=False)
-            for embed in build_lore_embeds(shown):
-                await interaction.followup.send(embed=embed)
+            # Plain text, not embeds: the first part replies to the finished
+            # status message, the rest follow as ordinary messages. (Previews
+            # suppressed, or every citation link would unfurl.)
+            shown = result.citations.link(result.answer, LORE_ARCHIVE_GUILD_ID)
+            await post_plain_answer(
+                interaction.channel, shown, reply_to=status.message,
+                fallback=lambda chunk: interaction.followup.send(
+                    chunk, allowed_mentions=discord.AllowedMentions.none(),
+                ),
+            )
 
             # Offer a follow-up thread rather than opening one.
             if result.ok:
@@ -205,10 +246,12 @@ class LoreCog(commands.Cog):
         """
         channel = interaction.channel
         if not hasattr(channel, "create_thread"):
-            return  # DMs: the embed alone is fine.
+            return  # DMs: the answer alone is fine.
 
         try:
-            offer = await interaction.followup.send(_OFFER_TEXT, wait=True)
+            # A plain channel message, so it does not read as a reply to the
+            # command the way a followup does.
+            offer = await channel.send(_OFFER_TEXT)
             await offer.add_reaction(LORE_THREAD_EMOJI)
         except (discord.Forbidden, discord.HTTPException):
             logger.warning("Could not post the /lore thread offer", exc_info=True)
@@ -272,7 +315,7 @@ class LoreCog(commands.Cog):
             return
 
         try:
-            services.threads.open(thread.id, LORE, AGENT_MODEL, thread.name)
+            services.threads.open(thread.id, LORE, writer_model(session.speed, session.writer), thread.name)
 
             logger.info(
                 "Opened lore thread %d from offer %d for %s",
@@ -377,11 +420,13 @@ class LoreCog(commands.Cog):
                 logger.warning("Lore session for thread %d vanished — ignoring", thread.id)
                 return
             # An image posted with (or as) the follow-up is described by the
-            # agent model itself, already loaded for this turn, and the
-            # description rides along in the question as plain text.
+            # thread's research model — the Qwen presets carry a vision
+            # projector and the Gemma 31B writer does not — and the description
+            # rides along in the question as plain text. On a thread with a
+            # separate writer that is one extra swap, only when there is an image.
             question = message.content
             if services.vision is not None and any(is_image(a) for a in message.attachments):
-                question = with_captions(question, await services.vision.captions(message.attachments, AGENT_MODEL))
+                question = with_captions(question, await services.vision.captions(message.attachments, research_model(session.speed)))
             try:
                 answer, metrics, searched = await run_lore_turn(
                     session=session,

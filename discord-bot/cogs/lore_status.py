@@ -91,9 +91,12 @@ class LoreStatus:
         else:
             await self._set(f"\U0001f4dd Generating final answer… ({chars:,} chars)")
 
-    async def complete(self, question: str) -> None:
+    async def complete(self, question: str, details: Optional[str] = None) -> None:
         preview = question[:100] + ("..." if len(question) > 100 else "")
-        await self._set(f"✅ Search complete — \"{preview}\"")
+        text = f"✅ Search complete — \"{preview}\""
+        if details:
+            text += f"\n-# {details}"  # Discord subtext
+        await self._set(text)
 
     async def failed(self) -> None:
         await self._set("❌ Search failed")

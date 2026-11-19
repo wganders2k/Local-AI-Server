@@ -20,6 +20,7 @@ This module must not import discord: progress goes through
 
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -29,25 +30,30 @@ from config import (
     AGENT_CTX_COMPACT_PCT,
     AGENT_CTX_HARD_PCT,
     AGENT_CTX_SOFT_PCT,
-    AGENT_MODEL,
     AGENT_MAX_ROUNDS,
     AGENT_MAX_ROUNDS_HARD_CAP,
     AGENT_MAX_REPEATED_SEARCHES,
     AGENT_TEMPERATURE,
+    LORE_DEFAULT_SPEED,
+    LORE_DEFAULT_WRITER,
     LORE_FOLLOWUP_MAX_ROUNDS,
+    LORE_MAX_ROUND_TOKENS,
     LORE_MAX_SIMULATIONS,
+    LORE_STRIKE_RECOVERY_ROUNDS,
+    LORE_SYSTEM_NUDGE_MODELS,
+    LORE_TOOL_CALL_STRIKES,
 )
 from lore.citations import Citations
-from lore.compaction import compact_tool_rounds
-from lore.context_window import limit as ctx_limit
+from lore.compaction import compact_tool_rounds, fit_research_for, fit_session_for
+from lore.context_window import limit as ctx_limit, window
 from lore.metrics import TOOL_CHARS_PER_TOKEN, AgentMetrics, fraction
+from lore.models import hands_off, research_model, writer_model
 from lore.progress import ProgressReporter
 from lore.prompts import build_lore_followup_prompt, build_system_prompt
 from lore.research import (
     SEARCH_NOTE_PREFIX,
     flatten_research_for_synthesis,
     drop_seen_chunks,
-    render_research_blocks,
 )
 from lore.session import LoreSession
 from lore.streaming import stream_answer
@@ -58,6 +64,11 @@ from rag_client import RAGClient
 
 logger = logging.getLogger("mimic-bot.lore.agent")
 
+# What llama-server says when the model's tool call is not valid JSON —
+# typically one cut off by max_tokens after the model looped inside the
+# arguments. A failed round, not a failed backend.
+_BAD_TOOL_CALL = "failed to parse tool call"
+
 
 @dataclass
 class LoreRunResult:
@@ -66,7 +77,7 @@ class LoreRunResult:
 
     ``tool_messages`` is kept so the run can seed a follow-up session without
     re-searching: it is the raw assistant/``tool_calls`` + ``role="tool"``
-    material, ready for render_research_blocks().
+    material, which seeds a thread's transcript as it is.
     """
     answer: str
     metrics: AgentMetrics
@@ -75,6 +86,10 @@ class LoreRunResult:
     # The [mN] refs the run's research carries; a thread seeded from the run
     # inherits them, so its answers keep linking the same messages.
     citations: Citations = field(default_factory=Citations)
+    # "fast" or "slow", and the writer choice; a thread seeded from the run
+    # keeps both.
+    speed: str = LORE_DEFAULT_SPEED
+    writer: str = LORE_DEFAULT_WRITER
 
 
 # ---------------------------------------------------------------------------
@@ -92,6 +107,8 @@ async def _run_tool_rounds(
     status: Optional[ProgressReporter] = None,
     label: str = "Agent",
     seen_keys: Optional[set[str]] = None,
+    *,
+    model: str,
 ) -> tuple[Optional[str], list[dict]]:
     """
     Drive tool-calling rounds until the model answers or the budget runs out.
@@ -123,6 +140,7 @@ async def _run_tool_rounds(
         label: Prefix for log lines, so the two callers are distinguishable.
         seen_keys: chunk_key() of chunks already in ``messages`` from earlier
             turns. Copied, not mutated.
+        model: The research model — every round goes to it.
 
     Returns:
         (direct_answer, tool_messages). ``direct_answer`` is the model's prose
@@ -137,6 +155,12 @@ async def _run_tool_rounds(
     ran: dict[str, int] = {}  # call signature -> round it first ran in
     repeats = 0
     simulations = 0
+    # Malformed tool calls cost a strike each; LORE_STRIKE_RECOVERY_ROUNDS
+    # good rounds in a row earn one back, up to the starting budget. Searching
+    # stops when none are left. Kept out of the model's context entirely: it
+    # is only ever told that its last call was discarded.
+    strikes = LORE_TOOL_CALL_STRIKES
+    clean_rounds = 0
 
     for round_num in range(max_rounds):
         metrics.rounds_executed += 1
@@ -150,19 +174,54 @@ async def _run_tool_rounds(
         llm_start = time.monotonic()
         try:
             result = await proxy_client.chat_with_tools(
-                model=AGENT_MODEL,
+                model=model,
                 messages=messages,
                 tools=tools,
                 temperature=AGENT_TEMPERATURE,
+                max_tokens=LORE_MAX_ROUND_TOKENS,
             )
+        except ProxyError as e:
+            if _BAD_TOOL_CALL not in str(e).lower():
+                raise
+            # Seen on the Gemma MoE: it looped inside a tool call's arguments,
+            # the round cap cut it off, and the backend could not parse what
+            # was left. That used to end the whole run as a backend error.
+            strikes -= 1
+            clean_rounds = 0
+            logger.warning(
+                "Round %d produced a malformed tool call (%d/%d strikes left): %s",
+                round_num + 1, strikes, LORE_TOOL_CALL_STRIKES, str(e)[:160],
+            )
+            if strikes <= 0:
+                logger.warning("Out of strikes for malformed tool calls — stopping search")
+                return None, tool_messages
+            messages.append(_note(
+                "Your last tool call was malformed — it ran past the length limit and "
+                "was discarded. Make one short, well-formed call with different wording, "
+                "or answer from what you already have.",
+                model,
+            ))
+            continue
         finally:
             llm_elapsed = time.monotonic() - llm_start
             metrics.llm_response_times.append(llm_elapsed)
             logger.info("LLM response in %.2fs", llm_elapsed)
 
-        metrics.record_usage(result.get("usage"))
+        metrics.record_usage(result.get("usage"), model=model)
         logger.info("Round %d %s", round_num + 1, metrics.context_line())
+        if strikes < LORE_TOOL_CALL_STRIKES:
+            clean_rounds += 1
+            if clean_rounds >= LORE_STRIKE_RECOVERY_ROUNDS:
+                strikes += 1
+                clean_rounds = 0
+                logger.info("%d good rounds — a strike back (%d/%d)",
+                            LORE_STRIKE_RECOVERY_ROUNDS, strikes, LORE_TOOL_CALL_STRIKES)
 
+        if result.get("finish_reason") == "length":
+            logger.warning(
+                "Round %d hit the %d-token cap (the model was looping) — its output is cut short",
+                round_num + 1, LORE_MAX_ROUND_TOKENS,
+            )
         content = result.get("content")
         tool_calls = result.get("tool_calls")
         reasoning = (result.get("reasoning_content") or "").strip()
@@ -172,14 +231,17 @@ async def _run_tool_rounds(
                 logger.info("Model returned final answer (%d chars)", len(content))
                 return content.strip(), tool_messages
             # Empty response — nudge and retry rather than abandoning the run.
+            # As an instruction, not as words put in the model's mouth: a canned
+            # assistant line ("I didn't find enough information...") was copied
+            # verbatim into the top of a later answer.
             logger.warning(
                 "Model returned empty response (no content, no tool_calls) in round %d",
                 round_num + 1,
             )
-            messages.append({
-                "role": "assistant",
-                "content": "I didn't find enough information. Let me try a different search.",
-            })
+            messages.append(_note(
+                "Your last reply was empty. Either make your next tool call, or write the answer.",
+                model,
+            ))
             continue
 
         names = [tc.get("function", {}).get("name", "?") for tc in tool_calls]
@@ -219,8 +281,10 @@ async def _run_tool_rounds(
                 tool_result = (
                     f"{SEARCH_NOTE_PREFIX} You already ran this exact search in "
                     f"round {ran[signature]}, and its results are above. Running it "
-                    "again returns the same thing. Change the wording, the tool or "
-                    "the scope (a channel or date range), or answer from what you have."
+                    "again returns the same thing. For more matches from a semantic "
+                    "search, repeat it with the next page; otherwise change the "
+                    "wording, the tool or the scope (a channel or date range), or "
+                    "answer from what you have."
                 )
             else:
                 ran[signature] = round_num + 1
@@ -267,7 +331,8 @@ async def _run_tool_rounds(
             return None, tool_messages
 
         # The last usage report predates this round's results, so add them on.
-        limit = ctx_limit()
+        # The next request goes to the research model, so its window applies.
+        limit = window(model)
         projected = metrics.context_used + result_chars // TOOL_CHARS_PER_TOKEN
         if projected < AGENT_CTX_COMPACT_PCT * limit:
             continue
@@ -280,7 +345,7 @@ async def _run_tool_rounds(
             f"{projected:,}", f"{limit:,}", projected / limit * 100,
         )
         projected -= await compact_tool_rounds(
-            messages, tool_messages, proxy_client, metrics, compactions,
+            messages, tool_messages, proxy_client, metrics, compactions, model,
             shown_keys=shown,
         )
         if projected >= AGENT_CTX_HARD_PCT * limit:
@@ -295,12 +360,97 @@ async def _run_tool_rounds(
     return None, tool_messages
 
 
+_ANSWER_NUDGE_TEXT = (
+        "Now write the answer to the most recent question, using the material "
+        "above. Do NOT call any tool, and do NOT output any tool calls, "
+        "function names, or XML tags — searching is finished for this turn. "
+        "Reply with the answer itself, as prose. Cite with refs written exactly "
+        "as [m12], [m12, m15] or [m12-m14] — no backticks, and no channel "
+        "names or other text inside the brackets."
+)
+
+
+def _note(text: str, model: str) -> dict:
+    """
+    An instruction appended mid-conversation, in the role ``model`` takes best:
+    system where its template allows one (LORE_SYSTEM_NUDGE_MODELS), user
+    otherwise. See _answer_nudge for why the role matters to the cache.
+    """
+    role = "system" if model in LORE_SYSTEM_NUDGE_MODELS else "user"
+    return {"role": role, "content": text}
+
+
+def _answer_nudge(model: str) -> dict:
+    """
+    The instruction to stop searching and answer, in the role ``model`` takes best.
+
+    A system message for models in LORE_SYSTEM_NUDGE_MODELS, a user message
+    otherwise. Gemma 4's template keeps an assistant turn's reasoning only after
+    the last user message, so a user-role nudge rewrites every earlier turn and
+    re-prefills the whole run; a system turn changes nothing before it. Qwen's
+    template rejects a system message anywhere but first, so it gets the user
+    role — its preserve_thinking keeps the prefix intact either way.
+    """
+    return _note(_ANSWER_NUDGE_TEXT, model)
+
+# Tool-call markup the model might write as text. With tools attached the
+# backend's parser normally lifts a call out of the reply, leaving it empty;
+# this catches one that slipped through as prose instead.
+_TOOL_MARKUP = re.compile(r"<tool_call|<function[=\s>]|<tool_response|</?parameter[=\s>]")
+
+
+async def _answer_in_place(
+    proxy_client: ProxyClient,
+    messages: list[dict],
+    tools: list[dict],
+    metrics: AgentMetrics,
+    status: Optional[ProgressReporter],
+    model: str,
+) -> str:
+    """
+    Ask for the answer on the loop's own conversation, so the prefix is cached.
+    ``model`` is the research model, which holds that conversation.
+
+    The request is the loop's messages, unchanged, plus the answer nudge, with the
+    same tools attached: everything before the nudge is what the backend
+    already holds, so only the nudge is prefilled. The flattened synthesis
+    prompt shares nothing with that conversation — not even the system
+    prompt, which carries the tool list — and cost a full re-prefill (34.6k
+    tokens, ~25s, on a typical run).
+
+    Keeping the tools is also what keeps tool-call markup out of the answer:
+    if the model calls a tool anyway, the backend parses it out and the text
+    comes back empty.
+
+    Returns:
+        The answer, or "" if the model called a tool or wrote markup, in which
+        case the caller falls back to the flattened synthesis.
+    """
+    llm_start = time.monotonic()
+    text, usage = await stream_answer(
+        proxy_client, model, messages + [_answer_nudge(model)], status=status, tools=tools,
+    )
+    elapsed = time.monotonic() - llm_start
+    metrics.llm_response_times.append(elapsed)
+    metrics.record_usage(usage, fallback_completion_chars=len(text), model=model)
+    if not text.strip():
+        logger.warning("In-place answer was empty (likely a tool call) — falling back to synthesis")
+        return ""
+    if _TOOL_MARKUP.search(text):
+        logger.warning("In-place answer contained tool-call markup — falling back to synthesis")
+        return ""
+    logger.info("Answer generated in place in %.2fs (%d chars) — %s", elapsed, len(text), metrics.context_line())
+    return text.strip()
+
+
 async def _generate_answer(
     proxy_client: ProxyClient,
     messages: list[dict],
     metrics: AgentMetrics,
     status: Optional[ProgressReporter],
     tools: Optional[list[dict]] = None,
+    *,
+    model: str,
 ) -> str:
     """
     Stream one answer and record its timing and usage. Streamed so a long
@@ -313,18 +463,22 @@ async def _generate_answer(
     entirely at the cost of one cold prefill.
     """
     llm_start = time.monotonic()
-    text, usage = await stream_answer(proxy_client, AGENT_MODEL, messages, status=status, tools=tools)
+    text, usage = await stream_answer(proxy_client, model, messages, status=status, tools=tools)
     if tools and not text.strip():
         logger.warning("Streamed answer was empty (likely a tool call) — retrying without tools")
-        text, usage = await stream_answer(proxy_client, AGENT_MODEL, messages, status=status)
+        text, usage = await stream_answer(proxy_client, model, messages, status=status)
     elapsed = time.monotonic() - llm_start
     metrics.llm_response_times.append(elapsed)
     metrics.record_usage(
         usage,
         fallback_prompt_chars=sum(len(m.get("content") or "") for m in messages),
         fallback_completion_chars=len(text),
+        model=model,
     )
-    logger.info("Answer generated in %.2fs (%d chars) — %s", elapsed, len(text), metrics.context_line())
+    logger.info(
+        "Answer generated by %s in %.2fs (%d chars) — %s",
+        model, elapsed, len(text), metrics.context_line(),
+    )
     return text.strip()
 
 
@@ -336,15 +490,25 @@ async def run_agent_loop(
     channel_names: Optional[list[str]] = None,
     max_rounds: Optional[int] = None,
     catalog: Optional[PersonaCatalog] = None,
+    speed: str = LORE_DEFAULT_SPEED,
+    writer: str = LORE_DEFAULT_WRITER,
 ) -> LoreRunResult:
     """
     Run the opening agentic RAG turn for /lore.
 
     Flow:
-    1. Send user question + system prompt to the agent model with tools attached.
+    1. Send user question + system prompt to the research model (picked by
+       ``speed``) with tools attached.
     2. Rounds of tool_calls -> execute -> append, via _run_tool_rounds().
-    3. If the model answers without exhausting the budget, that is the answer.
-    4. Otherwise flatten the research and synthesise one.
+    3. Writer is the research model: if it answers without exhausting the
+       budget, that is the answer; otherwise it answers on its own cached
+       conversation, and only if that fails is the research flattened and an
+       answer synthesised.
+    4. Writer is another model: the research is flattened and the writer
+       writes the answer, whether or not the research model already wrote one.
+       The research was budgeted against the research model's window, so it is
+       condensed first until it fits the writer's. A run that never searched
+       has nothing to hand over and keeps its direct answer.
 
     Args:
         user_question: The question from /lore.
@@ -358,6 +522,10 @@ async def run_agent_loop(
         max_rounds: Round cap (defaults to AGENT_MAX_ROUNDS, hard-capped).
         catalog: The personas simulate_conversation may use; None leaves the
             tool out.
+        speed: "fast" or "slow" — which model researches; see
+            config.LORE_RESEARCH_MODELS.
+        writer: Which model writes the answer — a config.LORE_WRITERS key, or
+            LORE_WRITER_SAME for the research model.
 
     Returns:
         LoreRunResult carrying the answer, the metrics, and the raw tool
@@ -367,10 +535,18 @@ async def run_agent_loop(
         max_rounds = AGENT_MAX_ROUNDS
     max_rounds = max(1, min(max_rounds, AGENT_MAX_ROUNDS_HARD_CAP))
 
-    metrics = AgentMetrics()
+    researcher = research_model(speed)
+    author = writer_model(speed, writer)
+    metrics = AgentMetrics(
+        speed=speed, model=researcher, research_model=researcher,
+        writer_model=author, max_rounds=max_rounds,
+    )
     citations = Citations()
     logger.info("=" * 60)
-    logger.info("AGENT LOOP START — question=%r", user_question[:80])
+    logger.info(
+        "AGENT LOOP START (%s: research %s, writer %s) — question=%r",
+        speed, researcher, author, user_question[:80],
+    )
     logger.info("=" * 60)
 
     messages = [
@@ -378,53 +554,82 @@ async def run_agent_loop(
         {"role": "user", "content": user_question},
     ]
 
+    tools = build_tools(catalog)
     try:
         direct_answer, tool_messages = await _run_tool_rounds(
             messages, proxy_client, ToolContext(rag_client, proxy_client, catalog, metrics, citations),
-            build_tools(catalog), metrics, max_rounds, status=status, label="Agent",
+            tools, metrics, max_rounds, status=status, label="Agent", model=researcher,
         )
     except ProxyError as e:
         metrics.error = str(e)
         logger.error("ProxyError in agent loop: %s", e)
         await status.failed()
-        return LoreRunResult(f"⚠️ Backend error: {e}", metrics, [], ok=False)
+        return LoreRunResult(f"⚠️ Backend error: {e}", metrics, [], ok=False, speed=speed, writer=writer)
+
+    if hands_off(speed, writer) and tool_messages:
+        if direct_answer:
+            logger.info("Setting aside the research model's answer for %s's", author)
+        await status.generating()
+        try:
+            synthesis = await fit_research_for(
+                author, messages, tool_messages, user_question,
+                proxy_client, metrics, researcher,
+            )
+            answer = await _generate_answer(
+                proxy_client, synthesis, metrics, status, model=author,
+            )
+        except ProxyError as e:
+            metrics.error = str(e)
+            logger.exception("Writer %s failed to write the answer", author)
+            await status.failed()
+            return LoreRunResult(
+                f"⚠️ Failed to generate final answer: {e}", metrics, tool_messages, ok=False,
+                citations=citations, speed=speed, writer=writer,
+            )
+        answer = answer or direct_answer or "I couldn't write an answer from that research. Please try rephrasing."
+        logger.info(metrics.summary())
+        logger.info("Final answer preview: %s...", answer[:100])
+        await status.complete(user_question, metrics.run_line())
+        return LoreRunResult(answer, metrics, tool_messages, citations=citations, speed=speed, writer=writer)
 
     if direct_answer:
         await status.writing()
         logger.info(metrics.summary())
         logger.info("Final answer preview: %s...", direct_answer[:100])
-        await status.complete(user_question)
-        return LoreRunResult(direct_answer, metrics, tool_messages, citations=citations)
+        await status.complete(user_question, metrics.run_line())
+        return LoreRunResult(direct_answer, metrics, tool_messages, citations=citations, speed=speed, writer=writer)
 
-    # Budget exhausted — synthesise from everything gathered.
+    # Searching stopped without an answer: ask for one on the conversation
+    # the backend already has cached, and only if that fails, flatten.
     await status.generating()
     try:
-        # Flatten the tool-calling history into a single plain-text user turn.
-        # Replacing just the system prompt left the assistant/tool_calls and
-        # role="tool" messages in context and the model kept imitating them,
-        # emitting tool-call markup as its answer. See the helper for why that
-        # markup reaches the user instead of being parsed out.
-        # From tool_messages rather than messages: it carries any research
-        # condensed mid-loop in a form the flattener recognises.
-        synthesis_messages = flatten_research_for_synthesis(tool_messages, user_question)
-        # No tools in this request either way — the synthesis prompt carries no
-        # tool-calling pattern to continue, which is the whole point of
-        # flattening it. The synthesis prompt is the largest single request the
-        # run makes, so this is normally where peak_context_tokens is set.
-        answer = await _generate_answer(proxy_client, synthesis_messages, metrics, status)
+        answer = await _answer_in_place(proxy_client, messages, tools, metrics, status, researcher)
+        if not answer:
+            # Flatten the tool-calling history into a single plain-text user
+            # turn and answer with no tools. This re-prefills everything, but
+            # leaves no tool-calling pattern in context to imitate, and with no
+            # tools attached nothing could be parsed out if the model did. From
+            # tool_messages rather than messages: it carries any research
+            # condensed mid-loop in a form the flattener recognises.
+            synthesis_messages = flatten_research_for_synthesis(tool_messages, user_question)
+            answer = await _generate_answer(
+                proxy_client, synthesis_messages, metrics, status, model=researcher,
+            )
         answer = answer or "I've exhausted my search rounds. Please try rephrasing your question."
         logger.info(metrics.summary())
         logger.info("Final answer preview: %s...", answer[:100])
-        await status.complete(user_question)
-        return LoreRunResult(answer, metrics, tool_messages, citations=citations)
+        await status.complete(user_question, metrics.run_line())
+        return LoreRunResult(answer, metrics, tool_messages, citations=citations, speed=speed, writer=writer)
     except ProxyError as e:
         metrics.error = str(e)
         logger.exception("Failed to generate final answer")
         await status.failed()
         return LoreRunResult(
             f"⚠️ Failed to generate final answer: {e}", metrics, tool_messages, ok=False,
-            citations=citations,
+            citations=citations, speed=speed, writer=writer,
         )
+
+
 # ---------------------------------------------------------------------------
 # Lore follow-up threads
 # ---------------------------------------------------------------------------
@@ -450,19 +655,6 @@ def _budget_notice(used: int, limit: int) -> dict:
     }
 
 
-# The answer call keeps the tools attached even though it must not use them —
-# see chat_stream(tools=...) for why dropping them would cold-prefill the whole
-# thread. So the instruction not to call them has to be explicit and firm.
-_ANSWER_NUDGE = {
-    "role": "user",
-    "content": (
-        "Now write the answer to the most recent question, using the material "
-        "above. Do NOT call any tool, and do NOT output any tool calls, "
-        "function names, or XML tags — searching is finished for this turn. "
-        "Reply with the answer itself, as prose."
-    ),
-}
-
 async def run_lore_turn(
     session: LoreSession,
     question: str,
@@ -475,41 +667,29 @@ async def run_lore_turn(
     """
     Run one follow-up turn against an existing lore session.
 
-    Two paths. If the model decides the thread already holds what it needs, it
-    answers on the first call and that answer is used as-is — no second request,
-    and the prefix cache makes it cheap. If it calls tools, the results are
-    rendered into one research block, appended, and the answer is generated by a
-    separate streamed call.
+    The whole turn runs on one model: the thread's writer if it has one
+    (``session.writer``), otherwise its research model. Searching on one model
+    and writing on another meant two swaps a turn, each starting from an empty
+    cache, so a writer thread re-read everything twice per reply. The opening
+    run still researches on the research model; only follow-ups move over.
 
-    Progress is reported through the same status vocabulary the opening
-    /lore run uses, so a thread shows identical indicators.
+    If the model decides the thread already holds what it needs, it answers on
+    the first call and that answer is used as-is. If it searches, its tool
+    rounds are kept in the transcript exactly as they were sent, and the answer
+    is asked for on that same conversation — so it extends what the backend
+    already holds rather than re-reading the research in another form. Chunks
+    the thread has already shown are dropped from each result before it enters
+    the context (drop_seen_chunks); compaction condenses old rounds when the
+    thread actually grows large.
 
-    On caching: every request here carries the same tools payload, so an
-    append-only transcript reuses the prefix almost entirely — measured at 98%
-    on a third turn, answering in 6.3s against 36.2s for the opening turn.
-    There is exactly one unavoidable miss. A turn that searches leaves the
-    backend holding the loop's raw assistant/``tool_calls`` + ``role="tool"``
-    messages, while the transcript keeps the same results rendered as a flat
-    research block; the two are different text, so the turn *after* a searching
-    turn re-prefills from the first research block onward (~44% hit observed).
-    Paying it here rather than deferring it is not worth an extra generation —
-    the flattened form has to be prefilled once either way — so the direct
-    answer is used when the loop produces one.
+    Caching, measured: a turn that answers from context hits ~98%. What still
+    misses: the first follow-up (its system prompt differs from the opening
+    run's), any model swap or idle unload, and on Gemma the previous turn's
+    rounds, since its template drops earlier reasoning at a new question.
 
-    The session is mutated (question, any research, and the answer are appended)
-    but NOT persisted — the caller owns the store so it can persist once after
-    posting to Discord succeeds.
-
-    Args:
-        session: The thread's session. Mutated in place.
-        question: The new user message.
-        proxy_client: Proxy client for the agent model.
-        rag_client: RAG client for tool execution.
-        max_rounds: Tool rounds allowed this turn. Defaults to
-            LORE_FOLLOWUP_MAX_ROUNDS.
-        status: Progress reporter, or None.
-        catalog: The personas simulate_conversation may use; None leaves the
-            tool out.
+    The session is mutated (question, tool rounds, answer) but NOT persisted —
+    the caller owns the store so it can persist once after posting to Discord
+    succeeds.
 
     Returns:
         (answer, metrics, searched) — the answer text, this turn's metrics, and
@@ -519,26 +699,35 @@ async def run_lore_turn(
         max_rounds = LORE_FOLLOWUP_MAX_ROUNDS
     max_rounds = max(1, min(max_rounds, AGENT_MAX_ROUNDS_HARD_CAP))
 
-    metrics = AgentMetrics()
-    # Built once for the turn: the loop and the answer call must send identical
-    # tools, or the answer call cold-prefills the thread.
+    model = writer_model(session.speed, session.writer)
+    metrics = AgentMetrics(
+        speed=session.speed, model=model, research_model=model,
+        writer_model=model, max_rounds=max_rounds,
+    )
+    # Built once for the turn: every request in it must send identical tools,
+    # or the next one cold-prefills the thread.
     tools = build_tools(catalog)
-    used = session.last_context_tokens
-    ctx_total = ctx_limit()
-    pct = session.pct_of(ctx_total)
+    ctx_total = window(model)
 
     logger.info("=" * 60)
     logger.info(
-        "LORE FOLLOW-UP turn %d (thread=%d) — question=%r",
-        session.turns + 1, session.thread_id, question[:80],
+        "LORE FOLLOW-UP turn %d (thread=%d, %s) — question=%r",
+        session.turns + 1, session.thread_id, model, question[:80],
     )
+
+    session.append_question(question)
+    # A thread opened from a run whose research outgrew this model's window
+    # (a 128k research model handing a thread to a 56k writer) is condensed
+    # before the first request, not rejected by the backend.
+    await fit_session_for(model, session, [], proxy_client, metrics, model)
+
+    used = session.last_context_tokens
+    pct = session.pct_of(ctx_total)
     logger.info(
-        "Session context before turn: %s (%d%% of limit), %d search block(s)",
+        "Session context before turn: %s (%d%% of limit), %d search result(s)",
         f"{used:,}/{ctx_total:,}", pct * 100, session.searches,
     )
     logger.info("=" * 60)
-
-    session.append_question(question)
 
     # Above the hard ceiling the model does not get a vote: searching again
     # would push the thread out of context entirely.
@@ -554,68 +743,45 @@ async def run_lore_turn(
         logger.info("Context at %.0f%% — telling the model its budget", pct * 100)
         extra.append(_budget_notice(used, ctx_total))
 
+    work = session.build_messages(extra=extra)
     direct_answer: Optional[str] = None
     tool_messages: list[dict] = []
-
     if allow_tools:
-        work = session.build_messages(extra=extra)
         direct_answer, tool_messages = await _run_tool_rounds(
             work, proxy_client, ToolContext(rag_client, proxy_client, catalog, metrics, session.citations),
             tools, metrics, max_rounds,
             status=status, label="Lore follow-up", seen_keys=session.seen_keys,
+            model=model,
         )
-        if direct_answer:
-            logger.info(
-                "No further searching needed — answered from existing context (%d chars)",
-                len(direct_answer),
-            )
-
-    searched = bool(tool_messages)
-
-    # Collapse this turn's results into one block, skipping anything an earlier
-    # turn already put in the transcript.
-    if searched:
-        blocks, dropped = render_research_blocks(
-            tool_messages,
-            seen_keys=session.seen_keys,
-            start_index=session.searches,
-        )
-        if blocks:
-            session.append_research("\n\n".join(blocks))
-        else:
-            logger.info(
-                "Every chunk this turn was already in the thread (%d dropped) — "
-                "nothing appended",
-                dropped,
-            )
+        if direct_answer and not tool_messages:
+            logger.info("No searching needed — answered from existing context (%d chars)", len(direct_answer))
 
     if direct_answer:
         answer = direct_answer
         if status:
             await status.writing()
     else:
-        # Streamed so a long answer cannot trip the read timeout, and so the
-        # thread shows progress instead of going silent.
-        logger.info("Generating answer (streamed)...")
+        # On the loop's own conversation, ephemeral budget notice included, so
+        # only the nudge is new to the backend. Tools stay attached for the same
+        # reason; the nudge is what holds the model back from using them.
         if status:
             await status.generating()
-        # Tools stay attached even though this turn must not call them: the
-        # prompt shape has to match the surrounding calls or the whole thread
-        # re-prefills. _ANSWER_NUDGE is what actually holds the model back.
         answer = await _generate_answer(
-            proxy_client, session.build_messages(extra=[_ANSWER_NUDGE]), metrics, status, tools=tools
+            proxy_client, work + [_answer_nudge(model)], metrics, status,
+            tools=tools, model=model,
         )
 
     if not answer:
         answer = "I wasn't able to produce an answer for that. Try rephrasing?"
 
+    session.append_rounds(tool_messages)
     session.append_answer(answer)
     session.record_context(metrics.context_used)
     logger.info(metrics.summary())
     if status:
-        await status.complete(question)
+        await status.complete(question, metrics.run_line())
 
-    return answer, metrics, searched
+    return answer, metrics, bool(tool_messages)
 
 
 def seed_session_from_run(
@@ -657,15 +823,12 @@ def seed_session_from_run(
         original_question=question,
         pinned_now=now,
         citations=Citations.from_dict(result.citations.to_dict()),
+        speed=result.speed,
+        writer=result.writer,
     )
     session.append_question(question)
-
-    blocks, _ = render_research_blocks(
-        result.tool_messages, seen_keys=session.seen_keys
-    )
-    if blocks:
-        session.append_research("\n\n".join(blocks))
-
+    # The run's tool rounds as they were, condensed summaries included.
+    session.append_rounds(result.tool_messages)
     session.append_answer(result.answer)
     # From the transcript itself, not from the opening run's peak. The run's
     # peak includes its longest single request, which is not what this thread
@@ -673,9 +836,9 @@ def seed_session_from_run(
     # the first follow-up returns one.
     session.record_context(session.estimated_tokens())
     logger.info(
-        "Lore session seeded for thread %d — %d research block(s), "
+        "Lore session seeded for thread %d — %d search result(s), "
         "estimated context %s/%s",
-        thread_id, len(blocks),
-        f"{session.last_context_tokens:,}", f"{ctx_limit():,}",
+        thread_id, session.searches,
+        f"{session.last_context_tokens:,}", f"{ctx_limit(session.speed, session.writer):,}",
     )
     return session

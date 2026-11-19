@@ -28,10 +28,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from config import LORE_DEFAULT_SPEED, LORE_DEFAULT_WRITER, LORE_SPEEDS, LORE_WRITERS
 from lore.citations import Citations
 from lore.metrics import CHARS_PER_TOKEN, fraction
 
 logger = logging.getLogger("mimic-bot.lore-session")
+
+
+# What a transcript entry sends to the backend; anything else (the "kind" tag)
+# is bookkeeping.
+_WIRE_FIELDS = ("role", "content", "tool_calls", "tool_call_id", "name", "reasoning_content")
 
 
 def chunk_key(chunk: str) -> str:
@@ -68,6 +74,12 @@ class LoreSession:
             that re-runs a similar search does not re-add text already present.
         citations: The [mN] refs this thread's research carries, so every turn
             numbers messages the same way and answers can link them.
+        speed: "fast" or "slow", from the /lore that opened it: which model
+            researches. Follow-ups run at the same speed.
+        writer: Which model writes the answers (config.LORE_WRITERS, or
+            LORE_WRITER_SAME for the research model), also kept from the /lore
+            that opened it. Speed and writer together set the thread's context
+            limit — see lore.context_window.limit.
     """
 
     thread_id: int
@@ -93,6 +105,8 @@ class LoreSession:
     compactions: int = 0
     last_context_tokens: int = 0
     peak_context_tokens: int = 0
+    speed: str = LORE_DEFAULT_SPEED
+    writer: str = LORE_DEFAULT_WRITER
 
     # ---- message assembly -------------------------------------------------
 
@@ -103,12 +117,11 @@ class LoreSession:
         this one call without becoming part of the thread's history.
         """
         msgs = [{"role": "system", "content": self.system_prompt}]
-        # Project to role/content only. Transcript entries carry a "kind" tag so
-        # compaction can find research blocks without pattern-matching their
-        # text, and that tag must not reach the backend.
-        msgs.extend(
-            {"role": m["role"], "content": m["content"]} for m in self.transcript
-        )
+        # Entries carry a "kind" tag so compaction can find research without
+        # pattern-matching text; the tag must not reach the backend. Tool rounds
+        # keep every field they were sent with — calls, ids, reasoning — so the
+        # next request repeats the cached prefix byte for byte.
+        msgs.extend({k: v for k, v in m.items() if k in _WIRE_FIELDS} for m in self.transcript)
         if extra:
             msgs.extend(extra)
         return msgs
@@ -122,11 +135,35 @@ class LoreSession:
         self.touch()
 
     def append_research(self, block: str) -> None:
-        """Add one turn's retrieved material as a plain user message."""
+        """Add retrieved material as a plain user message: a compaction summary,
+        or a whole turn's research in sessions from before tool rounds were kept."""
         self.transcript.append(
             {"role": "user", "content": block, "kind": "research"}
         )
         self.searches += 1
+
+    def append_rounds(self, messages: List[dict]) -> None:
+        """
+        Add a turn's tool rounds exactly as the loop sent them: each assistant
+        tool call with its result, and any summary the loop condensed older
+        results into. Kept raw rather than re-rendered, so the answer and the
+        next turn extend the conversation the backend already holds instead of
+        re-reading the research in another form.
+        """
+        for m in messages:
+            if m.get("role") == "tool":
+                self.transcript.append({**m, "kind": "result"})
+                self.searches += 1
+                for chunk in (m.get("content") or "").split("\n\n---\n\n"):
+                    chunk = chunk.strip()
+                    if chunk and not chunk.startswith("[Search note]"):
+                        self.seen_keys.add(chunk_key(chunk))
+            elif m.get("tool_calls"):
+                self.transcript.append({**m, "kind": "call"})
+            else:  # a summary condensed mid-loop
+                self.transcript.append(
+                    {"role": "user", "content": m.get("content") or "", "kind": "research"}
+                )
 
     def append_answer(self, answer: str) -> None:
         self.transcript.append(
@@ -153,11 +190,22 @@ class LoreSession:
             last = last.replace(tzinfo=timezone.utc)
         return (now - last).total_seconds()
 
-    def research_indices(self) -> List[int]:
-        """Positions in the transcript holding retrieved material, oldest first."""
-        return [
-            i for i, m in enumerate(self.transcript) if m.get("kind") == "research"
-        ]
+    def research_units(self) -> List[List[int]]:
+        """
+        The transcript's research, oldest first, as groups of positions that
+        must be condensed together: a plain research block alone, or a tool
+        call with its result — never a call without its answer.
+        """
+        units: List[List[int]] = []
+        for i, m in enumerate(self.transcript):
+            kind = m.get("kind")
+            if kind == "research":
+                units.append([i])
+            elif kind == "call":
+                units.append([i])
+            elif kind == "result" and units and self.transcript[units[-1][-1]].get("kind") == "call":
+                units[-1].append(i)
+        return units
 
     # ---- context accounting ----------------------------------------------
 
@@ -178,9 +226,11 @@ class LoreSession:
 
         Uses the same CHARS_PER_TOKEN conversion as the metrics fallback.
         """
-        chars = len(self.system_prompt) + sum(
-            len(m.get("content") or "") for m in self.transcript
-        )
+        def size(m: dict) -> int:
+            calls = json.dumps(m["tool_calls"]) if m.get("tool_calls") else ""
+            return len(m.get("content") or "") + len(m.get("reasoning_content") or "") + len(calls)
+
+        chars = len(self.system_prompt) + sum(size(m) for m in self.transcript)
         return chars // CHARS_PER_TOKEN
 
     def pct_of(self, limit: int) -> float:
@@ -205,6 +255,8 @@ class LoreSession:
             "compactions": self.compactions,
             "last_context_tokens": self.last_context_tokens,
             "peak_context_tokens": self.peak_context_tokens,
+            "speed": self.speed,
+            "writer": self.writer,
         }
         return d
 
@@ -228,6 +280,11 @@ class LoreSession:
             compactions=int(d.get("compactions") or 0),
             last_context_tokens=int(d.get("last_context_tokens") or 0),
             peak_context_tokens=int(d.get("peak_context_tokens") or 0),
+            # Sessions from before speeds existed run at the default.
+            speed=d.get("speed") if d.get("speed") in LORE_SPEEDS else LORE_DEFAULT_SPEED,
+            # Sessions from before writers existed, or naming one since
+            # removed, answer with their research model.
+            writer=d.get("writer") if d.get("writer") in LORE_WRITERS else LORE_DEFAULT_WRITER,
         )
 
 

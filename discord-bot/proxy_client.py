@@ -139,6 +139,7 @@ class ProxyClient:
         messages: list[dict],
         tools: list[dict],
         temperature: float = 0.1,
+        max_tokens: int | None = None,
     ) -> dict:
         """
         Send a chat completion request with tool definitions attached.
@@ -151,6 +152,7 @@ class ProxyClient:
             messages: Conversation history including system, user, assistant, and tool messages.
             tools: List of tool schema dicts (OpenAI function-calling format).
             temperature: Sampling temperature (low for deterministic tool calling).
+            max_tokens: Caps the completion, reasoning included, when set.
 
         Returns:
             Dict with keys: "content" (str|None), "tool_calls" (list|None).
@@ -158,19 +160,28 @@ class ProxyClient:
         Raises:
             ProxyError: When the proxy is unreachable or returns an error.
         """
-        message, data = await self._complete(_payload(model, messages, False, tools=tools, temperature=temperature))
+        message, data = await self._complete(_payload(
+            model, messages, False, tools=tools, temperature=temperature, max_tokens=max_tokens,
+        ))
+        usage = data.get("usage")
+        if usage and data.get("timings"):
+            # llama-server's own generation timings ride along in the usage
+            # dict, so speed is measured, not estimated (AgentMetrics).
+            usage = {**usage, "timings": data["timings"]}
         return {
             "content": message.get("content"),
             "tool_calls": message.get("tool_calls"),
             # prompt_tokens is how full the model's context actually was for
             # this call — the only trustworthy number for context accounting,
             # since estimating from characters drifts badly on tool-result text.
-            "usage": data.get("usage"),
+            "usage": usage,
             # Thinking models return their chain of thought separately. The agent
             # loop feeds it back so the model can see why it made its previous
             # choices; without it, it re-derives its plan from an almost
             # unchanged context each round and reissues identical queries.
             "reasoning_content": message.get("reasoning_content"),
+            # "length" when max_tokens cut the reply off.
+            "finish_reason": (data.get("choices") or [{}])[0].get("finish_reason"),
         }
 
     async def chat_stream(
@@ -180,6 +191,7 @@ class ProxyClient:
         usage_sink: dict | None = None,
         tools: list[dict] | None = None,
         enable_thinking: bool = True,
+        max_tokens: int | None = None,
     ) -> AsyncGenerator[str, None]:
         """
         Stream a chat completion from the proxy using Server-Sent Events.
@@ -210,6 +222,7 @@ class ProxyClient:
                 summarising and compression. Note that reasoning_effort is only
                 partially honoured by this build (14.1s at "none"), so this is
                 the control that actually works.
+            max_tokens: Caps the completion, reasoning included, when set.
 
         Yields:
             Non-empty content strings from each SSE delta chunk.
@@ -221,6 +234,7 @@ class ProxyClient:
         payload = _payload(
             model, messages, True,
             tools=tools or None,
+            max_tokens=max_tokens,
             chat_template_kwargs=None if enable_thinking else {"enable_thinking": False},
             # Without this the streamed response carries no token counts at all.
             stream_options={"include_usage": True} if usage_sink is not None else None,
@@ -248,6 +262,8 @@ class ProxyClient:
                         continue
                     if usage_sink is not None and chunk.get("usage"):
                         usage_sink.update(chunk["usage"])
+                    if usage_sink is not None and chunk.get("timings"):
+                        usage_sink["timings"] = chunk["timings"]
                     choices = chunk.get("choices", [])
                     if not choices:
                         continue

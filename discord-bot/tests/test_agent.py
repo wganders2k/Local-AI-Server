@@ -7,10 +7,15 @@ the loop can be exercised without a gateway, a token, or a network.
 
 import json
 
-
+from config import AGENT_CTX_LIMIT_FALLBACK, AGENT_MAX_ROUNDS_HARD_CAP
 from lore.agent import LoreRunResult, run_agent_loop, stream_answer
 from lore.progress import ProgressReporter
+from config import LORE_SYSTEM_NUDGE_MODELS
 from lore.research import split_chunks
+from lore.models import research_model
+
+# The role a mid-conversation instruction takes on the default research model.
+NUDGE_ROLE = "system" if research_model("fast") in LORE_SYSTEM_NUDGE_MODELS else "user"
 
 
 class FakeProxy:
@@ -21,12 +26,12 @@ class FakeProxy:
         self._stream_text = stream_text
         self.tool_payloads: list[object] = []
 
-    async def chat_with_tools(self, model, messages, tools, temperature):
+    async def chat_with_tools(self, model, messages, tools, temperature, max_tokens=None):
         self.tool_payloads.append(tools)
         return self._turns.pop(0)
 
     async def chat_stream(self, model, messages, usage_sink=None, tools=None,
-                          enable_thinking=True):
+                          enable_thinking=True, max_tokens=None):
         self.tool_payloads.append(tools)
         if usage_sink is not None:
             usage_sink.update({"prompt_tokens": 10, "completion_tokens": 4})
@@ -48,7 +53,9 @@ class RecordingStatus:
     async def simulating(self): self.events.append("simulating")
     async def writing(self): self.events.append("writing")
     async def generating(self, chars=None): self.events.append("generating")
-    async def complete(self, q): self.events.append("complete")
+    async def complete(self, q, details=None):
+        self.events.append("complete")
+        self.details = details
     async def failed(self): self.events.append("failed")
 
 
@@ -131,22 +138,98 @@ async def test_exhausting_the_round_budget_falls_back_to_synthesis(fake_rag):
     assert result.answer.strip() == "synthesised answer"
     assert result.metrics.rounds_executed == 2
     assert "generating" in status.events
-    # The synthesis request must carry no tools — there is no tool-calling
-    # pattern left in context for the model to imitate.
-    assert proxy.tool_payloads[-1] is None
+    # Answered in place: the same tools as the loop, so the prompt keeps the
+    # shape the backend has cached.
+    assert proxy.tool_payloads[-1] == proxy.tool_payloads[0]
+    assert len([p for p in proxy.tool_payloads if p is None]) == 0
+
+
+class ScriptedStreamProxy(FakeProxy):
+    """Streams a scripted reply per chat_stream call and keeps each request."""
+
+    def __init__(self, turns, replies):
+        super().__init__(turns)
+        self._replies = list(replies)
+        self.loop_messages: list[list[dict]] = []
+        self.stream_requests: list[tuple[list[dict], object]] = []
+
+    async def chat_with_tools(self, model, messages, tools, temperature, max_tokens=None):
+        self.loop_messages.append(list(messages))
+        return await super().chat_with_tools(model, messages, tools, temperature, max_tokens)
+
+    async def chat_stream(self, model, messages, usage_sink=None, tools=None,
+                          enable_thinking=True, max_tokens=None):
+        self.stream_requests.append((list(messages), tools))
+        if usage_sink is not None:
+            usage_sink.update({"prompt_tokens": 10, "completion_tokens": 4})
+        reply = self._replies.pop(0)
+        if reply:
+            yield reply
+
+
+async def test_the_in_place_answer_extends_the_cached_conversation(fake_rag):
+    fake_rag.retrieve_result = ("chunk", 1)
+    proxy = ScriptedStreamProxy([tool_call(), tool_call(args='{"query": "cows"}')], ["the answer"])
+
+    result = await run_agent_loop(
+        user_question="q", proxy_client=proxy, rag_client=fake_rag,
+        status=RecordingStatus(), channel_names=[], max_rounds=2,
+    )
+
+    assert result.answer == "the answer"
+    [(sent, tools)] = proxy.stream_requests
+    assert tools
+    # Everything the last loop request held, then its round's call and
+    # result, then the nudge — nothing earlier rewritten.
+    last = proxy.loop_messages[-1]
+    assert sent[: len(last)] == last
+    # In the role the research model's template keeps cached: system for
+    # Gemma 4, which drops earlier reasoning after a user turn; user for Qwen,
+    # which rejects a late system message.
+    assert [m["role"] for m in sent[len(last):]] == ["assistant", "tool", NUDGE_ROLE]
+    assert "Do NOT call any tool" in sent[-1]["content"]
+
+
+async def test_an_empty_in_place_answer_falls_back_to_flattened_synthesis(fake_rag):
+    fake_rag.retrieve_result = ("chunk", 1)
+    proxy = ScriptedStreamProxy([tool_call()], ["", "synthesised"])
+
+    result = await run_agent_loop(
+        user_question="q", proxy_client=proxy, rag_client=fake_rag,
+        status=RecordingStatus(), channel_names=[], max_rounds=1,
+    )
+
+    assert result.answer == "synthesised"
+    (_, first_tools), (flat, flat_tools) = proxy.stream_requests
+    assert first_tools and flat_tools is None
+    assert [m["role"] for m in flat] == ["system", "user"]
+
+
+async def test_tool_markup_in_the_in_place_answer_falls_back(fake_rag):
+    fake_rag.retrieve_result = ("chunk", 1)
+    leaked = '<tool_call>\n<function=search_discord_history>\n<parameter=query>x'
+    proxy = ScriptedStreamProxy([tool_call()], [leaked, "synthesised"])
+
+    result = await run_agent_loop(
+        user_question="q", proxy_client=proxy, rag_client=fake_rag,
+        status=RecordingStatus(), channel_names=[], max_rounds=1,
+    )
+
+    assert result.answer == "synthesised"
+    assert len(proxy.stream_requests) == 2
 
 
 async def test_max_rounds_is_hard_capped(fake_rag):
     fake_rag.retrieve_result = ("chunk", 1)
     # Distinct queries, or the repeat guard would end the run first.
     proxy = FakeProxy([
-        tool_call(args=json.dumps({"query": f"q{i}"})) for i in range(30)
+        tool_call(args=json.dumps({"query": f"q{i}"})) for i in range(AGENT_MAX_ROUNDS_HARD_CAP + 5)
     ])
     result = await run_agent_loop(
         user_question="q", proxy_client=proxy, rag_client=fake_rag,
         status=RecordingStatus(), channel_names=[], max_rounds=9999,
     )
-    assert result.metrics.rounds_executed == 25  # AGENT_MAX_ROUNDS_HARD_CAP
+    assert result.metrics.rounds_executed == AGENT_MAX_ROUNDS_HARD_CAP
 
 
 async def test_an_empty_model_response_is_nudged_rather_than_abandoned(fake_rag):
@@ -203,18 +286,21 @@ class RecordingProxy(FakeProxy):
         self.tool_requests: list[list[dict]] = []
         self.stream_requests: list[tuple[list[dict], bool]] = []
 
-    async def chat_with_tools(self, model, messages, tools, temperature):
+    async def chat_with_tools(self, model, messages, tools, temperature, max_tokens=None):
         self.tool_requests.append([dict(m) for m in messages])
-        return await super().chat_with_tools(model, messages, tools, temperature)
+        return await super().chat_with_tools(model, messages, tools, temperature, max_tokens)
 
     async def chat_stream(self, model, messages, usage_sink=None, tools=None,
-                          enable_thinking=True):
+                          enable_thinking=True, max_tokens=None):
         self.stream_requests.append((messages, enable_thinking))
         # Compaction is the only call made with thinking off.
         text = "the gist" if not enable_thinking else self._stream_text
         if usage_sink is not None:
             usage_sink.update({"prompt_tokens": 10, "completion_tokens": 4})
         yield text
+
+
+PAST_COMPACT_MARK = int(0.80 * AGENT_CTX_LIMIT_FALLBACK)
 
 
 def tool_call_at(prompt_tokens, call_id):
@@ -226,9 +312,10 @@ def tool_call_at(prompt_tokens, call_id):
 
 async def test_nearing_the_limit_condenses_the_oldest_results(fake_rag):
     fake_rag.retrieve_result = ("chunk", 1)
-    # The window is the 96k fallback: 75k lands past the 75% compaction mark.
+    # The window is the fallback: 80% is past the 75% compaction mark and
+    # short of the 85% hard limit.
     proxy = RecordingProxy([
-        tool_call_at(100, "a"), tool_call_at(200, "b"), tool_call_at(75_000, "c"),
+        tool_call_at(100, "a"), tool_call_at(200, "b"), tool_call_at(PAST_COMPACT_MARK, "c"),
         final("done"),
     ])
     status = RecordingStatus()
@@ -259,7 +346,7 @@ async def test_nearing_the_limit_condenses_the_oldest_results(fake_rag):
 async def test_condensed_research_reaches_the_synthesis_prompt(fake_rag):
     fake_rag.retrieve_result = ("chunk", 1)
     proxy = RecordingProxy([
-        tool_call_at(100, "a"), tool_call_at(200, "b"), tool_call_at(75_000, "c"),
+        tool_call_at(100, "a"), tool_call_at(200, "b"), tool_call_at(PAST_COMPACT_MARK, "c"),
     ])
 
     await run_agent_loop(
@@ -267,9 +354,9 @@ async def test_condensed_research_reaches_the_synthesis_prompt(fake_rag):
         status=RecordingStatus(), channel_names=[], max_rounds=3,
     )
 
-    synthesis, thinking = proxy.stream_requests[-1]
+    answer_request, thinking = proxy.stream_requests[-1]
     assert thinking
-    assert "the gist" in synthesis[-1]["content"]
+    assert any("the gist" in (m.get("content") or "") for m in answer_request)
 
 
 async def test_still_too_full_after_compacting_stops_searching(fake_rag):
@@ -365,7 +452,7 @@ async def test_condensed_chunks_can_be_shown_again():
     shown = {chunk_key("old"), chunk_key("kept")}
 
     await compact_tool_rounds(
-        messages, tool_messages, RecordingProxy([]), AgentMetrics(), 1,
+        messages, tool_messages, RecordingProxy([]), AgentMetrics(), 1, "lore-model",
         shown_keys=shown,
     )
 
@@ -404,3 +491,99 @@ async def test_only_one_simulation_runs_per_question(fake_rag, catalog):
     assert tool_results[0].startswith("SIMULATED CONVERSATION")
     assert "already run a simulation" in tool_results[1]
     assert status.events.count("simulating") == 1
+
+
+class MalformedOnce(FakeProxy):
+    """The backend rejects the model's tool call as unparseable N times."""
+
+    def __init__(self, turns, failures=1):
+        super().__init__(turns)
+        self.failures = failures
+        self.requests: list[list[dict]] = []
+
+    async def chat_with_tools(self, model, messages, tools, temperature, max_tokens=None):
+        from proxy_client import ProxyError
+        self.requests.append(list(messages))
+        if self.failures:
+            self.failures -= 1
+            raise ProxyError(
+                'Proxy returned error 500: {"error":{"code":500,"message":"Failed to parse '
+                'tool call arguments as JSON: parse error"}}', status_code=500,
+            )
+        return await super().chat_with_tools(model, messages, tools, temperature, max_tokens)
+
+
+async def test_a_malformed_tool_call_is_a_failed_round_not_a_failed_run(fake_rag):
+    proxy = MalformedOnce([final("recovered")])
+    result = await run_agent_loop(
+        user_question="q", proxy_client=proxy, rag_client=fake_rag,
+        status=RecordingStatus(), channel_names=[], max_rounds=3,
+    )
+    assert result.ok and result.answer == "recovered"
+    # The retry is told what happened, appended so the cached prefix holds.
+    note = proxy.requests[1][-1]
+    assert note["role"] == NUDGE_ROLE and "malformed" in note["content"]
+    assert proxy.requests[1][:-1] == proxy.requests[0]
+
+
+async def test_three_malformed_tool_calls_stop_the_search(fake_rag):
+    proxy = MalformedOnce([], failures=3)
+    result = await run_agent_loop(
+        user_question="q", proxy_client=proxy, rag_client=fake_rag,
+        status=RecordingStatus(), channel_names=[], max_rounds=10,
+    )
+    assert result.ok  # answered from what it had, not a backend error
+    assert len(proxy.requests) == 3
+
+
+class Scripted(FakeProxy):
+    """Plays a script where "bad" is a malformed tool call and anything else a turn."""
+
+    def __init__(self, script):
+        super().__init__([t for t in script if t != "bad"])
+        self.script = list(script)
+        self.requests: list[list[dict]] = []
+
+    async def chat_with_tools(self, model, messages, tools, temperature, max_tokens=None):
+        from proxy_client import ProxyError
+        self.requests.append(list(messages))
+        if self.script.pop(0) == "bad":
+            raise ProxyError("Failed to parse tool call arguments as JSON", status_code=500)
+        return await super().chat_with_tools(model, messages, tools, temperature, max_tokens)
+
+
+def good_rounds(n, tag):
+    return [tool_call(args=json.dumps({"query": f"{tag}{i}"})) for i in range(n)]
+
+
+async def run_script(script, fake_rag):
+    fake_rag.retrieve_result = ("[@5/10] a: pigs", 1)
+    proxy = Scripted(script)
+    result = await run_agent_loop(
+        user_question="q", proxy_client=proxy, rag_client=fake_rag,
+        status=RecordingStatus(), channel_names=[], max_rounds=len(script),
+    )
+    return proxy, result
+
+
+async def test_five_good_rounds_earn_a_strike_back(fake_rag):
+    # 3 -> 1, five good rounds -> 2, then one more failure leaves 1: still going.
+    script = ["bad", "bad", *good_rounds(5, "a"), "bad", final("made it")]
+    proxy, result = await run_script(script, fake_rag)
+    assert result.answer == "made it"
+    assert len(proxy.requests) == len(script)
+
+
+async def test_good_rounds_at_a_full_budget_are_not_banked(fake_rag):
+    script = [*good_rounds(5, "a"), "bad", "bad", "bad", final("never reached")]
+    proxy, result = await run_script(script, fake_rag)
+    assert len(proxy.requests) == 8  # the third failure stopped the search
+    assert result.answer != "never reached"
+
+
+async def test_the_model_never_hears_about_strikes(fake_rag):
+    script = ["bad", "bad", *good_rounds(5, "a"), final("done")]
+    proxy, _ = await run_script(script, fake_rag)
+    seen = " ".join(str(m.get("content")) for m in proxy.requests[-1]).lower()
+    assert "malformed" in seen
+    assert "strike" not in seen

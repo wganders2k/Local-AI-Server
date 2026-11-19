@@ -18,6 +18,38 @@ logger = logging.getLogger("mimic-bot.io")
 # channel.send, thread.send.
 Sender = Callable[[str], Awaitable[object]]
 
+# Lore answers are model output as plain message text, which can ping: an
+# "@everyone" in an answer would fire. Embeds never pinged, so neither does this.
+NO_PINGS = discord.AllowedMentions.none()
+
+
+async def post_plain_answer(
+    channel: discord.abc.Messageable,
+    text: str,
+    reply_to: Optional[discord.Message] = None,
+    fallback: Optional[Sender] = None,
+) -> None:
+    """
+    Post an answer as plain messages, split at paragraph boundaries. Only the
+    first is a reply (to ``reply_to``); the rest follow as ordinary messages.
+
+    Args:
+        fallback: Used for any chunk the channel refuses (no send permission,
+            or a DM the bot cannot open) — an interaction's followup.send,
+            which works wherever the command was allowed.
+    """
+    for i, chunk in enumerate(split_message(text) or ["(No results)"]):
+        try:
+            if i == 0 and reply_to is not None:
+                await reply_to.reply(chunk, mention_author=False, allowed_mentions=NO_PINGS)
+            else:
+                await channel.send(chunk, allowed_mentions=NO_PINGS)
+        except discord.HTTPException:
+            if fallback is None:
+                raise
+            logger.warning("Channel refused an answer chunk — sending it as a followup", exc_info=True)
+            await fallback(chunk)
+
 
 async def stream_and_send(
     send: Sender,
@@ -80,9 +112,9 @@ async def post_lore_answer(
 
     for i, chunk in enumerate(chunks):
         if i == 0 and edit_first is not None:
-            await edit_first.edit(content=chunk)
+            await edit_first.edit(content=chunk, allowed_mentions=NO_PINGS)
         else:
-            await thread.send(chunk)
+            await thread.send(chunk, allowed_mentions=NO_PINGS)
 
     if not footer_attached:
         await thread.send(footer)

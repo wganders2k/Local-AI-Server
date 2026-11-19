@@ -18,7 +18,7 @@
 
 - **One physical GPU, one tenant at a time.** CUDA has no memory preemption, so occupancy is arbitrated centrally rather than negotiated between peers. See §4b.
 - **A job never states its own importance.** Callers send a name; priority and VRAM requirements are operator policy in [`arbiter/jobs.yaml`](arbiter/jobs.yaml). A job that could declare its own priority is grading its own homework.
-- **Two distinct model personalities.** Mimic personas use an uncensored base with no content refusals. The lore assistant uses a sterile, instruction-following base. Neither bleeds into the other.
+- **Two distinct model personalities.** Mimic personas use a conversational base that stays in character. The lore assistant uses a sterile, instruction-following base. Neither bleeds into the other.
 - **Nothing starts work on its own.** The arbiter grants occupancy but starts no containers; a training run begins because a human ran `make train-submit`. An earlier design started one whenever free VRAM appeared, which meant runs began because the LLM went quiet rather than because anyone decided to train.
 - **The proxy is content-blind.** It routes by model alias and serialises access. It does not inspect, rewrite, or inject into request bodies — prompt construction belongs to the client that owns the conversation.
 - **Open WebUI is a first-class consumer.** It routes through the same proxy as Discord and VS Code, competing for the swappable slot under the same lock. When using Claude via API key it bypasses the proxy entirely — zero VRAM impact.
@@ -55,16 +55,16 @@ This is Qwen3.5-35B-A3B with refusals removed and no other changes to datasets o
 
 It may still occasionally append a short disclaimer ("This is general information…") baked into base training. That is not a refusal — the content is generated in full — and it is handled two ways: a system prompt instruction, and regex post-processing in the bot (`DISCLAIMER_PATTERNS` in [`discord-bot/config.py`](discord-bot/config.py)).
 
-**Current status:** the `mimic_user1`–`mimic_user6` presets are commented out in [`models.ini`](models.ini). The base GGUF is still used by the `bomb-you` alias. `/mimic` therefore has no backing preset and will fail at llama-server until those sections are re-enabled.
+**Current status:** the `mimic_user1`–`mimic_user6` presets are commented out in [`models.ini`](models.ini). `/mimic` therefore has no backing preset and will fail at llama-server until those sections are re-enabled.
 
-### 3.2 Lore: instruction-tuned, not uncensored
+### 3.2 Lore: instruction-tuned
 
 The lore assistant needs to be reliable, structured, and citation-aware — the opposite of the mimic's job. Keeping it on a standard instruction-tuned base means it won't inject personality where none belongs or hallucinate lore to fill gaps.
 
 Two models serve this area, and the split is deliberate:
 
-- **`lore`** (gemma-4-26B-A4B-it) — the direct alias, for plain retrieval-augmented answering.
-- **`qwen3.6-27b-u`** (Qwen3.6-27B Heretic) — what the `/lore` *agent* actually runs on, set as `AGENT_MODEL`. The agentic loop (§9.2) needs reliable tool-calling, and it reads raw Discord history as tool output — content a censored model will refuse to process even when the question about it is innocuous.
+- **`gemma4-26b-a4b`** (gemma-4-26B-A4B-it) — the direct alias, for plain retrieval-augmented answering.
+- **`qwen3.6-35b-a3b-u`** (Qwen3.6 35B-A3B MoE) and **`qwen3.8-27b-u`** (Qwen3.8 27B dense, built-in MTP head) — what the `/lore` *agent* researches on, for `speed:fast` and `speed:slow` (`LORE_RESEARCH_MODELS`). The research model writes the answer too unless `/lore writer:` names another model (`LORE_WRITERS`: either Qwen, or **`gemma4-31b-u`** / **`gemma4-26b-a4b-u`**, Gemma 4 31B dense and 26B-A4B MoE with MTP), which is then handed the research. The agentic loop (§9.2) needs reliable tool-calling, and it reads raw Discord history as tool output — content a censored model will refuse to process even when the question about it is innocuous.
 
 ### 3.3 Why llama.cpp, not vLLM or Ollama
 
@@ -164,7 +164,11 @@ All swappable models are defined in [`models.ini`](models.ini). The proxy refere
 |---|---|---|
 | `qwen3.6-35b-a3b` | Qwen3.6-35B-A3B UD-IQ4_NL | Coding assistant, 128k ctx |
 | `qwen3.6-27b` | Qwen3.6-27B Q4_K_M | Coding assistant, 96k ctx |
-| `qwen3.6-27b-u` | Qwen3.6-27B Heretic Q4_K_M | `/lore` agent orchestrator |
+| `qwen3.6-27b-u` | Qwen3.6-27B Heretic Q4_K_M | dataset labelling (`qwen3.6-27b-judge-u`), 96k ctx |
+| `qwen3.6-35b-a3b-u` | Qwen3.6 35B-A3B IQ4_XS | `/lore speed:fast` research model, 128k ctx |
+| `qwen3.8-27b-u` | Qwen3.8 27B Q4_K_P + MTP | `/lore speed:slow` research model, 96k ctx |
+| `gemma4-26b-a4b-u` | Gemma 4 26B-A4B QAT Q4_K_M + MTP | `/lore writer:gemma-26b-moe`, 196k ctx |
+| `gemma4-31b-u` | Gemma 4 31B QAT Q4_K_M + MTP | `/lore writer:gemma-31b`, 56k ctx |
 | `gemma4-31b` | gemma-4-31B-it Q4_K_M | Coding assistant, 64k ctx |
 | `gemma4-26b-a4b` | gemma-4-26B-A4B-it UD-Q4_K_XL | Direct lore routing |
 | `gemma4-26b-a4b-chat` | gemma-4-26B-A4B-it UD-Q4_K_XL | Open WebUI |
@@ -181,7 +185,7 @@ from `models.ini` directly, so adding or removing a local model is a `models.ini
 nothing else. The proxy does not parse any model list of its own — it forwards any
 model name to the swappable slot and lets llama-server decide.
 
-Everywhere else that names an alias (`discord-bot/config.py`'s `AGENT_MODEL`,
+Everywhere else that names an alias (`discord-bot/config.py`'s `LORE_RESEARCH_MODELS`,
 `history-service`'s `IMAGE_CAPTION_MODEL`) is a client's own choice of which alias to call,
 not a second copy of model identity — see `CONVENTIONS.md` §2.
 
@@ -294,20 +298,26 @@ Thread bindings persist to `discord-bot/data/threads.json` and are restored on s
 
 This is the reason the bot needs the `MESSAGE_CONTENT` privileged intent — slash commands alone would not.
 
-### 8.3 `/lore question [rounds]` — agentic RAG
+### 8.3 `/lore question [rounds] [speed] [writer]` — agentic RAG
 
-Not a single retrieval. The agent (`AGENT_MODEL` = `qwen3.6-27b-u`) runs a tool-calling loop against the RAG service, deciding for itself what to search and when it has enough:
+Not a single retrieval. The agent (the research model `speed` picks: `qwen3.6-35b-a3b-u` fast, `qwen3.8-27b-u` slow) runs a tool-calling loop against the RAG service, deciding for itself what to search and when it has enough:
 
 ```
 question
   → agent receives TOOLS + server-specific background (lore_context.md)
-  → loop, up to `rounds` iterations (default 10, hard cap 25):
-      search_discord_history(query, start_date?, end_date?, top_k=10)
-      search_channel_history(query, channel_name, …)
+  → loop, up to `rounds` iterations (default 20, hard cap 50):
+      search_discord_history(query, start_date?, end_date?, top_k=10, page=1)
+      search_channel_history(query, channel_name, …, page=1)
       summarize_channel(channel_name, …, top_k=20)
     each call → rag-service /retrieve → ChromaDB → chunks returned as tool output
-  → synthesis prompt → final answer → Discord embeds
+  → synthesis prompt → final answer → plain Discord messages
 ```
+
+Semantic results are the top of an exact ranking over every chunk, so `page` (on `search_discord_history`, `search_channel_history` and `search_images`) reads further down the same ranking: page 2 is the next `top_k`, through `/retrieve`'s `offset`. Each result closes with a search note giving its place in the ranking and the next page, so the model can ask for more of a good search instead of rewording it; notes are never deduplicated as excerpts or handed to a writer as research.
+
+Context is budgeted per request, against the window of the model that request goes to (`context_window.window`). Research rounds are measured against the research model's window (128k fast, 96k slow). When `writer` names a different model, the research is condensed again until it fits that model's window (`gemma4-31b-u` takes 56k) before the writer gets it, and a thread with its own writer runs its follow-up turns entirely on that writer (one model per turn, so the cache survives between turns), compacted first if the seeded research does not fit. Compaction is summarised by whichever model is loaded, so it never costs a swap of its own. Between turns a thread's transcript is held to the smaller window of its research model and writer (`context_window.limit`).
+
+A tool call the backend cannot parse (the model looped inside its arguments until the round cap cut it off) costs the run a strike rather than ending it. A run has three; five good rounds in a row earn one back, up to three, and searching stops at zero. The model is only told its last call was discarded.
 
 Queue depth is checked before starting; per-user rate limiting is deliberately *not* applied, because a lore query is long-running and multi-round, and the rate limiter's assumptions do not fit it.
 
@@ -406,7 +416,7 @@ Every caption carries `caption_excluded_from_training: true`. The distinction it
 
 **Live captions in the bot** (`discord-bot/vision.py`) are made by whichever model the feature already has loaded, so describing an image never costs a swap:
 
-- **`/lore` threads:** the agent model (`qwen3.6-27b-u`, which now carries a projector). The caption is appended to the question.
+- **`/lore` threads:** the thread's research model (both Qwen lore presets carry a projector; the Gemma 31B writer does not, so a writer thread swaps once for an image). The caption is appended to the question.
 - **`/mimic-chat`:** `[gemma4-12b-mimic-u]` with no adapter applied, read by the controller only. Persona prompts keep `[attachment]`, as trained. This is off (`VISION_MIMIC_ENABLED`) until llama.cpp is new enough for the 12B base's `gemma4uv` projector.
 
 Image generation was spiked on 2026-11-12; see [`docs/plans/image-gen.md`](../plans/image-gen.md).
@@ -470,19 +480,19 @@ Everything else — the proxy, arbiter, history-service, ChromaDB — is unauthe
 
 Set per-alias in [`models.ini`](models.ini). Representative values:
 
-| Parameter | `qwen3.6-35b-a3b` | `qwen3.6-27b` | `lore` / `gemma4-26b-a4b-chat` | `qwen3.6-35b-a3b-chat` | `bomb-you` |
-|---|---|---|---|---|---|
-| temperature | 0.65 | 0.65 | 1.0 | 1.0 | 0.6 |
-| top-k | 20 | 20 | 64 | 40 | 40 |
-| top-p | 0.95 | 0.95 | 0.95 | 0.95 | 0.9 |
-| repeat-penalty | 1.05 | 1.05 | 1.0 | 1.0 | 1.15 |
-| ctx-size | 131072 | 96000 | 65536 | 131072 | 32768 |
-| n-predict | −1 | −1 | −1 | −1 | −1 |
-| cache-type-k/v | q8_0 | q8_0 | q8_0 | q8_0 | q8_0 |
+| Parameter | `qwen3.6-35b-a3b` | `qwen3.6-27b` | `gemma4-26b-a4b` / `gemma4-26b-a4b-chat` | `qwen3.6-35b-a3b-chat` |
+|---|---|---|---|---|
+| temperature | 0.65 | 0.65 | 1.0 | 1.0 |
+| top-k | 20 | 20 | 64 | 40 |
+| top-p | 0.95 | 0.95 | 0.95 | 0.95 |
+| repeat-penalty | 1.05 | 1.05 | 1.0 | 1.0 |
+| ctx-size | 131072 | 96000 | 65536 | 131072 |
+| n-predict | −1 | −1 | −1 | −1 |
+| cache-type-k/v | q8_0 | q8_0 | q8_0 | q8_0 |
 
 Global flags on the swappable server: `-fa on --parallel 1 --jinja --models-max 1`.
 
-The Qwen3.6 presets set `chat-template-kwargs = {"preserve_thinking": true}` rather than suppressing reasoning — a reversal from v3.0, which disabled chain-of-thought everywhere via `reasoning-format = none`. That flag survives only on `bomb-you`, where snappy replies matter more than reasoning quality.
+The Qwen3.6 presets set `chat-template-kwargs = {"preserve_thinking": true}` rather than suppressing reasoning — a reversal from v3.0, which disabled chain-of-thought everywhere via `reasoning-format = none`. No current preset sets it.
 
 Note that the parameters in this file are the *server's* defaults for an alias; a client may override sampling per request. The `/lore` agent does exactly that, forcing `temperature=0.1` for deterministic tool-calling.
 
