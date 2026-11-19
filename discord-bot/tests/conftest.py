@@ -49,7 +49,7 @@ def training(tmp_path):
 
 @pytest.fixture
 def catalog(training):
-    """The fixture roster, served by [mimic-multi] adapters in key order — discovery already done."""
+    """The fixture roster, served by [gemma4-12b-mimic-u] adapters in key order — discovery already done."""
     from personas import PersonaCatalog
 
     return PersonaCatalog(training_dir=str(training), adapters=list(PERSONA_KEYS))

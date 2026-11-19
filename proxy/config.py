@@ -21,9 +21,9 @@ ARBITER_JOB_NAME = os.environ.get("ARBITER_JOB_NAME", "llm")
 # BATCH_YIELD_SECONDS. So a person on /mimic waits for at most the one batch call
 # already running, and the slot is not swapped back and forth between the two
 # models on every message of a busy chat.
-# `caption` is history-service's archive backfill: ~43k images at a few seconds
+# `qwen3.6-27b-caption-u` is history-service's archive backfill: ~43k images at a few seconds
 # each, i.e. a day or more of GPU time that nobody is waiting on.
-BATCH_MODELS: set[str] = {m.strip() for m in os.environ.get("BATCH_MODELS", "judge,caption").split(",") if m.strip()}
+BATCH_MODELS: set[str] = {m.strip() for m in os.environ.get("BATCH_MODELS", "qwen3.6-27b-judge-u,qwen3.6-27b-caption-u").split(",") if m.strip()}
 ARBITER_BATCH_JOB_NAME = os.environ.get("ARBITER_BATCH_JOB_NAME", "llm-batch")
 BATCH_YIELD_SECONDS = float(os.environ.get("BATCH_YIELD_SECONDS", "30"))
 # How long a batch request refused by the arbiter waits before asking again. It
@@ -94,6 +94,6 @@ IMAGEGEN_CFG_RANGE: tuple[float, float] = (1.0, 7.0)
 # before any other model loads.
 IMAGEGEN_COEXIST_MODELS: set[str] = {
     m.strip()
-    for m in os.environ.get("IMAGEGEN_COEXIST_MODELS", "mimic-multi,mimic-base,mimic-candidate").split(",")
+    for m in os.environ.get("IMAGEGEN_COEXIST_MODELS", "gemma4-12b-mimic-u,gemma4-12b-u,gemma4-12b-mimic-candidate-u").split(",")
     if m.strip()
 }

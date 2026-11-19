@@ -197,17 +197,16 @@ Currently enabled aliases in `models.ini`:
 
 | Alias | Base | Used by |
 |---|---|---|
-| `brain` | Qwen3.6-35B-A3B UD-IQ4_NL | coding assistant |
-| `brain-dense` | Qwen3.6-27B Q4_K_M | coding assistant |
-| `brain-dense-heretic` | Qwen3.6-27B Heretic (uncensored) | `/lore` agent (`AGENT_MODEL`) |
-| `gemma-brain-dense` | gemma-4-31B-it Q4_K_M | coding assistant |
-| `lore` | gemma-4-26B-A4B-it UD-Q4_K_XL | direct lore routing (not `/lore`) |
-| `chat-liberal` | gemma-4-26B-A4B-it UD-Q4_K_XL | Open WebUI |
-| `chat-chinese` | Qwen3.6-35B-A3B UD-IQ4_NL | Open WebUI |
-| `bomb-you` | Qwen3.5-35B-A3B-Uncensored IQ4_XS | Open WebUI |
-| `caption` | Qwen3.6-27B heretic Q4_K_M + vision projector | archive image captioning (proxy batch work) |
+| `qwen3.6-35b-a3b` | Qwen3.6-35B-A3B UD-IQ4_NL | coding assistant |
+| `qwen3.6-27b` | Qwen3.6-27B Q4_K_M | coding assistant |
+| `qwen3.6-27b-u` | Qwen3.6-27B Heretic (uncensored) | `/lore` agent (`AGENT_MODEL`) |
+| `gemma4-31b` | gemma-4-31B-it Q4_K_M | coding assistant |
+| `gemma4-26b-a4b` | gemma-4-26B-A4B-it UD-Q4_K_XL | direct lore routing (not `/lore`) |
+| `gemma4-26b-a4b-chat` | gemma-4-26B-A4B-it UD-Q4_K_XL | Open WebUI |
+| `qwen3.6-35b-a3b-chat` | Qwen3.6-35B-A3B UD-IQ4_NL | Open WebUI |
+| `qwen3.6-27b-caption-u` | Qwen3.6-27B heretic Q4_K_M + vision projector | archive image captioning (proxy batch work) |
 
-**Commented out and therefore unavailable:** `mimic_user1` (a template awaiting its trained adapter). `/mimic` still offers `mimic_user1`–`mimic_user6` via autocomplete, but a request reaches llama-server and finds no such preset. `mimic-base` is the bare persona base, used as the control in `make train-sample`.
+**Commented out and therefore unavailable:** `mimic_user1` (a template awaiting its trained adapter). `/mimic` still offers `mimic_user1`–`mimic_user6` via autocomplete, but a request reaches llama-server and finds no such preset. `gemma4-12b-u` is the bare persona base, used as the control in `make train-sample`.
 
 The proxy does not gate on a model list of its own: it forwards *any* model name to the swappable slot and lets llama-server decide. `models.ini` is the single source of truth for what's actually available.
 
@@ -273,7 +272,7 @@ make train-export-latest [PERSONA=mimic_user1]
 
 The container is PID-1 `supervisor.py` holding the arbiter lease, with `train_worker.py` as a child holding the CUDA context. Preemption SIGKILLs the worker; the container survives and resumes from the last checkpoint carrying a `COMPLETE` marker. Being killed is the normal path — see [`lora-training/README.md`](lora-training/README.md) for why the split is forced and why the cadence is wall-clock rather than step-based.
 
-Seven personas are trained and live. `configs/mimic_gemma4_12b.yaml` is the QLoRA recipe on an abliterated Gemma 4 12B, which each `configs/mimic_userN.yaml` extends with one member's data; `export_latest.py` turns a finished run into a GGUF LoRA that `[mimic-multi]` serves over the shared base. Who each persona is lives in the roster beside the training data, and the bot reads the same roster. `configs/smoke.yaml` (Qwen3-0.6B) still exists to validate the handover in minutes. Re-run it after any change to the pinned stack.
+Seven personas are trained and live. `configs/mimic_gemma4_12b.yaml` is the QLoRA recipe on an abliterated Gemma 4 12B, which each `configs/mimic_userN.yaml` extends with one member's data; `export_latest.py` turns a finished run into a GGUF LoRA that `[gemma4-12b-mimic-u]` serves over the shared base. Who each persona is lives in the roster beside the training data, and the bot reads the same roster. `configs/smoke.yaml` (Qwen3-0.6B) still exists to validate the handover in minutes. Re-run it after any change to the pinned stack.
 
 ## Monitoring
 

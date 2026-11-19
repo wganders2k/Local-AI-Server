@@ -21,7 +21,7 @@ persona's dataset leaves it alone, so every adapter is judged on the same
 probes; --force replaces it, after which earlier results no longer compare.
 
 run generates each model's replies through the proxy as train-sample does (same
-model resolution, same per-adapter prompt shape), then the [judge] preset labels
+model resolution, same per-adapter prompt shape), then the [qwen3.6-27b-judge-u] preset labels
 each reply against a fixed schema. Replies, verdicts and the judge's one-line
 reason go to lora-outputs/topic_eval/<persona>-<tag>.jsonl for reading back.
 """
@@ -46,7 +46,7 @@ from persona_roster import load_aliases
 
 PROBE_DIR = os.environ.get("TOPIC_EVAL_DIR", "/archive/training/topic_eval")
 RESULTS_DIR = os.environ.get("TOPIC_EVAL_RESULTS", "/home/peacow/lora-outputs/topic_eval")
-JUDGE_MODEL = "judge"
+JUDGE_MODEL = "qwen3.6-27b-judge-u"
 # What serving sends at most (the persona's context_n); a probe never exceeds it.
 MAX_TURNS = 24
 # A probe needs an existing conversation to move away from.

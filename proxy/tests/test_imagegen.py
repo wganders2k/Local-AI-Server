@@ -240,28 +240,28 @@ async def test_image_inputs_are_refused(client, setup, path):
 
 async def test_a_small_model_stays_a_big_one_is_unloaded(client, setup):
     _, _, router, _ = setup
-    router.resident = ["mimic-multi"]
+    router.resident = ["gemma4-12b-mimic-u"]
     await client.post("/v1/images/generations", json={"prompt": "goose"})
     assert router.unloaded == []
-    router.resident = ["brain-dense-heretic"]
+    router.resident = ["qwen3.6-27b-u"]
     await client.post("/v1/images/generations", json={"prompt": "goose"})
-    assert router.unloaded == [["brain-dense-heretic"]]
+    assert router.unloaded == [["qwen3.6-27b-u"]]
 
 
 async def test_a_big_chat_model_stops_the_image_server_first(client, setup):
     _, server, _, backend = setup
     server.running = True
-    await client.post("/v1/chat/completions", json={"model": "mimic-multi"})
+    await client.post("/v1/chat/completions", json={"model": "gemma4-12b-mimic-u"})
     assert server.events == [] and server.running
-    await client.post("/v1/chat/completions", json={"model": "brain-dense-heretic"})
-    assert server.events == ["stop"] and backend.calls == ["mimic-multi", "brain-dense-heretic"]
+    await client.post("/v1/chat/completions", json={"model": "qwen3.6-27b-u"})
+    assert server.events == ["stop"] and backend.calls == ["gemma4-12b-mimic-u", "qwen3.6-27b-u"]
 
 
 async def test_a_failed_stop_never_loads_the_big_model(client, setup):
     _, server, _, backend = setup
     server.running, server.stop_ok = True, False
     with pytest.raises(RuntimeError):
-        await client.post("/v1/chat/completions", json={"model": "brain-dense-heretic"})
+        await client.post("/v1/chat/completions", json={"model": "qwen3.6-27b-u"})
     assert backend.calls == [] and main.dispatcher.running is None
 
 

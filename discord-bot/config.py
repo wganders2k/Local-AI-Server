@@ -75,7 +75,7 @@ RAG_ENABLED: bool = os.environ.get("RAG_ENABLED", "true").lower() == "true"
 # Agent (Agentic RAG) Configuration
 # ──────────────────────────────────────────────────────────────
 
-AGENT_MODEL: str = "brain-dense-heretic"  # Qwen3.6-27B — tool-calling capable model
+AGENT_MODEL: str = "qwen3.6-27b-u"  # Qwen3.6-27B — tool-calling capable model
 AGENT_MAX_ROUNDS: int = 10        # Default max tool-call rounds before forcing a final answer
 AGENT_MAX_ROUNDS_HARD_CAP: int = 25  # Hard cap for user-specified rounds in /lore
 # Identical tool calls are refused rather than re-run; after this many refusals
@@ -97,7 +97,7 @@ AGENT_TOP_K: int = 10             # Default chunks per tool call (higher than lo
 # This is only the fallback for a bot that cannot reach the proxy, and it is
 # also the value discovery is checked against: a mismatch is logged as a stale
 # constant. Keep it equal to `ctx-size` for the AGENT_MODEL entry in models.ini
-# (currently the [brain-dense-heretic] section).
+# (currently the [qwen3.6-27b-u] section).
 #
 # The number matters. A heavy /lore run has been observed holding 65,530 of
 # these 96,000 tokens at round 10, before any thread follow-up accumulates.
@@ -174,13 +174,13 @@ LORE_EMBED_TITLE: str = os.environ.get("LORE_EMBED_TITLE", "\U0001f4da Lore")
 # ──────────────────────────────────────────────────────────────
 
 # Who the personas are is not configured here: the roster (personas.json, on
-# the archive disk) names them, and [mimic-multi]'s lora list in models.ini
+# the archive disk) names them, and [gemma4-12b-mimic-u]'s lora list in models.ini
 # gives each its adapter id, read from the proxy at startup. See personas.py.
 
 # Every persona is served from one loaded base with its adapter picked per
-# request — see [mimic-multi] in models.ini — so a change of speaker never
+# request — see [gemma4-12b-mimic-u] in models.ini — so a change of speaker never
 # reloads the model.
-MIMIC_MODEL: str = "mimic-multi"
+MIMIC_MODEL: str = "gemma4-12b-mimic-u"
 
 # How strongly a persona's adapter is applied — see DEFAULT_ADAPTER_SCALE in
 # shared/persona_roster.py, which training's sampler uses too.
@@ -277,7 +277,7 @@ VISION_CACHE_SIZE: int = 512
 VISION_MAX_NEW_PER_BURST: int = 4
 # Ceiling on one caption: 1-3 sentences plus any transcribed text.
 VISION_MAX_TOKENS: int = 200
-# Live captions for the mimic chat controller. Off until [mimic-multi] has a
+# Live captions for the mimic chat controller. Off until [gemma4-12b-mimic-u] has a
 # working vision projector: the 12B base's needs a newer llama.cpp than the
 # image we run (see models.ini), and an image request to a preset without one
 # fails. Lore captions need no switch — the agent model has its projector.

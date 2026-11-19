@@ -64,7 +64,7 @@ The lore assistant needs to be reliable, structured, and citation-aware — the 
 Two models serve this area, and the split is deliberate:
 
 - **`lore`** (gemma-4-26B-A4B-it) — the direct alias, for plain retrieval-augmented answering.
-- **`brain-dense-heretic`** (Qwen3.6-27B Heretic) — what the `/lore` *agent* actually runs on, set as `AGENT_MODEL`. The agentic loop (§9.2) needs reliable tool-calling, and it reads raw Discord history as tool output — content a censored model will refuse to process even when the question about it is innocuous.
+- **`qwen3.6-27b-u`** (Qwen3.6-27B Heretic) — what the `/lore` *agent* actually runs on, set as `AGENT_MODEL`. The agentic loop (§9.2) needs reliable tool-calling, and it reads raw Discord history as tool output — content a censored model will refuse to process even when the question about it is innocuous.
 
 ### 3.3 Why llama.cpp, not vLLM or Ollama
 
@@ -162,14 +162,13 @@ All swappable models are defined in [`models.ini`](models.ini). The proxy refere
 
 | Alias | GGUF | Purpose |
 |---|---|---|
-| `brain` | Qwen3.6-35B-A3B UD-IQ4_NL | Coding assistant, 128k ctx |
-| `brain-dense` | Qwen3.6-27B Q4_K_M | Coding assistant, 96k ctx |
-| `brain-dense-heretic` | Qwen3.6-27B Heretic Q4_K_M | `/lore` agent orchestrator |
-| `gemma-brain-dense` | gemma-4-31B-it Q4_K_M | Coding assistant, 64k ctx |
-| `lore` | gemma-4-26B-A4B-it UD-Q4_K_XL | Direct lore routing |
-| `chat-liberal` | gemma-4-26B-A4B-it UD-Q4_K_XL | Open WebUI |
-| `chat-chinese` | Qwen3.6-35B-A3B UD-IQ4_NL | Open WebUI |
-| `bomb-you` | Qwen3.5-35B-A3B-Uncensored IQ4_XS | Open WebUI, uncensored |
+| `qwen3.6-35b-a3b` | Qwen3.6-35B-A3B UD-IQ4_NL | Coding assistant, 128k ctx |
+| `qwen3.6-27b` | Qwen3.6-27B Q4_K_M | Coding assistant, 96k ctx |
+| `qwen3.6-27b-u` | Qwen3.6-27B Heretic Q4_K_M | `/lore` agent orchestrator |
+| `gemma4-31b` | gemma-4-31B-it Q4_K_M | Coding assistant, 64k ctx |
+| `gemma4-26b-a4b` | gemma-4-26B-A4B-it UD-Q4_K_XL | Direct lore routing |
+| `gemma4-26b-a4b-chat` | gemma-4-26B-A4B-it UD-Q4_K_XL | Open WebUI |
+| `qwen3.6-35b-a3b-chat` | Qwen3.6-35B-A3B UD-IQ4_NL | Open WebUI |
 
 **Commented out:** `mimic_user1`–`mimic_user6`. They are still referenced by the bot's `/mimic` autocomplete, so those paths reach llama-server and find nothing. Re-enable the sections before using `/mimic` or image captioning.
 
@@ -297,7 +296,7 @@ This is the reason the bot needs the `MESSAGE_CONTENT` privileged intent — sla
 
 ### 8.3 `/lore question [rounds]` — agentic RAG
 
-Not a single retrieval. The agent (`AGENT_MODEL` = `brain-dense-heretic`) runs a tool-calling loop against the RAG service, deciding for itself what to search and when it has enough:
+Not a single retrieval. The agent (`AGENT_MODEL` = `qwen3.6-27b-u`) runs a tool-calling loop against the RAG service, deciding for itself what to search and when it has enough:
 
 ```
 question
@@ -399,16 +398,16 @@ Discord messages are full of memes and screenshots. Without captions that conten
 Two history-service jobs (details in [`history-service/README.md`](../../history-service/README.md#image-captioning)):
 
 - `media_store.py` keeps a local copy of every image attachment under `/archive/media`. Before downloading, it re-signs expired CDN links through Discord's `attachments/refresh-urls`.
-- `image_captioner.py` sends each stored image to the proxy's `caption` preset (Qwen3.6-27B heretic plus vision projector).
+- `image_captioner.py` sends each stored image to the proxy's `qwen3.6-27b-caption-u` preset (Qwen3.6-27B heretic plus vision projector).
 
-`caption` is in the proxy's `BATCH_MODELS`, so the backfill runs as arbiter job `llm-batch`: below any person and the profiler, above video, and also above the LoRA trainer. `llm-batch` is cooperative, so the profiler gets a card the proxy has really freed.
+`qwen3.6-27b-caption-u` is in the proxy's `BATCH_MODELS`, so the backfill runs as arbiter job `llm-batch`: below any person and the profiler, above video, and also above the LoRA trainer. `llm-batch` is cooperative, so the profiler gets a card the proxy has really freed.
 
 Every caption carries `caption_excluded_from_training: true`. The distinction it encodes: a caption is **read-only context**. RAG ingestion appends it to the message's effective text so image content is searchable; a future training exporter must never treat it as training data, because a synthetic description is not the user's voice.
 
 **Live captions in the bot** (`discord-bot/vision.py`) are made by whichever model the feature already has loaded, so describing an image never costs a swap:
 
-- **`/lore` threads:** the agent model (`brain-dense-heretic`, which now carries a projector). The caption is appended to the question.
-- **`/mimic-chat`:** `[mimic-multi]` with no adapter applied, read by the controller only. Persona prompts keep `[attachment]`, as trained. This is off (`VISION_MIMIC_ENABLED`) until llama.cpp is new enough for the 12B base's `gemma4uv` projector.
+- **`/lore` threads:** the agent model (`qwen3.6-27b-u`, which now carries a projector). The caption is appended to the question.
+- **`/mimic-chat`:** `[gemma4-12b-mimic-u]` with no adapter applied, read by the controller only. Persona prompts keep `[attachment]`, as trained. This is off (`VISION_MIMIC_ENABLED`) until llama.cpp is new enough for the 12B base's `gemma4uv` projector.
 
 Image generation was spiked on 2026-11-12; see [`docs/plans/image-gen.md`](../plans/image-gen.md).
 
@@ -471,7 +470,7 @@ Everything else — the proxy, arbiter, history-service, ChromaDB — is unauthe
 
 Set per-alias in [`models.ini`](models.ini). Representative values:
 
-| Parameter | `brain` | `brain-dense` | `lore` / `chat-liberal` | `chat-chinese` | `bomb-you` |
+| Parameter | `qwen3.6-35b-a3b` | `qwen3.6-27b` | `lore` / `gemma4-26b-a4b-chat` | `qwen3.6-35b-a3b-chat` | `bomb-you` |
 |---|---|---|---|---|---|
 | temperature | 0.65 | 0.65 | 1.0 | 1.0 | 0.6 |
 | top-k | 20 | 20 | 64 | 40 | 40 |

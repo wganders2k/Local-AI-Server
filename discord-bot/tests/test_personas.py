@@ -14,7 +14,7 @@ from tests.conftest import PERSONA_KEYS, write_roster
 from personas import PersonaCatalog, member_name
 
 MULTI = {
-    "id": "mimic-multi",
+    "id": "gemma4-12b-mimic-u",
     "status": {"args": ["--lora", "/srv/models/lora/mimic_user2-lora.gguf,/srv/models/lora/mimic_user1-lora.gguf"]},
 }
 

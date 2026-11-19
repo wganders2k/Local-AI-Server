@@ -13,13 +13,13 @@ Two facts, each with exactly one source:
   mimic and what their system prompt calls them.
 
 * The adapter order — a persona's adapter id is its position in the `lora`
-  list of [mimic-multi] in models.ini. Nobody copies that list: callers read it
+  list of [gemma4-12b-mimic-u] in models.ini. Nobody copies that list: callers read it
   from the proxy's /v1/models, whose entries carry the argv llama-server
   launches each model with (adapter_order, below). A copy that drifted would
   serve one member's voice under another's name.
 
 So adding a persona is a roster entry, its configs/<persona>.yaml, and its GGUF
-on the [mimic-multi] list.
+on the [gemma4-12b-mimic-u] list.
 
 A third fact rides with each adapter: how its training prompts were shaped
 (system prompt or not, context turns, silence gap, merge window). It is the
@@ -43,8 +43,8 @@ from mimic_format import aliases_from
 
 ROSTER_PATH = os.environ.get("PERSONA_ROSTER", "/archive/training/personas.json")
 
-# The [mimic-multi] section in models.ini, and how its adapter files are named.
-MULTI_MODEL = "mimic-multi"
+# The [gemma4-12b-mimic-u] section in models.ini, and how its adapter files are named.
+MULTI_MODEL = "gemma4-12b-mimic-u"
 ADAPTER_SUFFIX = "-lora.gguf"
 # Beside each GGUF: which run it came from, and trained_format's record.
 MANIFEST_SUFFIX = "-lora.json"
@@ -53,8 +53,8 @@ LORA_DIR = os.environ.get("LORA_GGUF_DIR", "/srv/models/lora")
 # run's output dir the worker copies the dataset's stats.json to.
 TRAINED_FORMAT_KEY = "dataset"
 RUN_DATASET_STATS = "dataset_stats.json"
-# [mimic-candidate]: one adapter not yet live, for judging against the live one.
-CANDIDATE_MODEL = "mimic-candidate"
+# [gemma4-12b-mimic-candidate-u]: one adapter not yet live, for judging against the live one.
+CANDIDATE_MODEL = "gemma4-12b-mimic-candidate-u"
 
 # How strongly a persona's adapter is applied when served. Below 1 the base
 # model's instruction-following leaks back in, so a steering message lands more

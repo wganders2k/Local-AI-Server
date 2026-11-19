@@ -2,11 +2,11 @@
 Image captioning: archive backfill for Discord image attachments.
 
 Picks images that media_store has a local copy of and that have no caption
-yet, sends each to the proxy's `caption` preset (models.ini), and writes the
+yet, sends each to the proxy's `qwen3.6-27b-caption-u` preset (models.ini), and writes the
 result onto the attachment. rag/ingest.py folds captions into a message's
 text, which is what makes image content searchable.
 
-GPU contention is not this module's problem. `caption` is one of the proxy's
+GPU contention is not this module's problem. `qwen3.6-27b-caption-u` is one of the proxy's
 BATCH_MODELS, so every request is ranked as arbiter job llm-batch (below any
 person, above the video job) and held until interactive traffic has been quiet
 for a while. That replaces the 3–6 AM window and the queue-depth check this

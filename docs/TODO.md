@@ -17,7 +17,7 @@
 * `docker-compose.yml` bind-mounts configs by absolute `/home/peacow/local-ai-server` paths, so the repo only runs from that location.
 
 ### Done
-* ~~Re-enable `/mimic`~~ — all seven personas are trained and served from `[mimic-multi]`, one base with every adapter applied per request.
+* ~~Re-enable `/mimic`~~ — all seven personas are trained and served from `[gemma4-12b-mimic-u]`, one base with every adapter applied per request.
 * ~~Persona autocomplete reads a hardcoded dict~~ — `personas.PersonaCatalog` offers only personas on the roster that also have an adapter id from the proxy's `/v1/models`.
 * ~~First real persona run~~ — done for every persona; `make train-datasets` / `train-queue` / `train-export-latest` retrain the roster.
 * ~~Confirm llama-server loads a Gemma 4 GGUF LoRA via `lora =`~~ — it does; the adapters are live.

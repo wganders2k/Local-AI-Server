@@ -2,7 +2,7 @@
 Describing images posted to the bot, as text the models already handle.
 
 A caption is made by whichever model is already loaded for the feature —
-[mimic-multi] with no adapter applied for mimic chats, the /lore agent model
+[gemma4-12b-mimic-u] with no adapter applied for mimic chats, the /lore agent model
 for lore threads — so describing an image never costs a model swap. Both
 presets carry a vision projector in models.ini.
 

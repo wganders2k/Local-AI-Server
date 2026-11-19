@@ -82,7 +82,7 @@ services:
       # of a multi-GB CUDA image.
       # Absolute for the same reason as the discord-bot binds below.
       - /home/peacow/local-ai-server/lora-training/configs:/app/configs:ro
-      # Read by export_latest.py to warn when [mimic-multi] does not list a
+      # Read by export_latest.py to warn when [gemma4-12b-mimic-u] does not list a
       # persona, or lists an adapter file that does not exist.
       - /home/peacow/local-ai-server/models.ini:/app/models.ini:ro
       # Model downloads survive preemption; without this every restart re-fetches
@@ -262,7 +262,7 @@ services:
       # Chat models that may stay loaded beside the image server (comma-
       # separated). Depends on the image model's footprint: set it empty in
       # .env when that model needs the whole card.
-      - IMAGEGEN_COEXIST_MODELS=${IMAGEGEN_COEXIST_MODELS-mimic-multi,mimic-base,mimic-candidate}
+      - IMAGEGEN_COEXIST_MODELS=${IMAGEGEN_COEXIST_MODELS-gemma4-12b-mimic-u,gemma4-12b-u,gemma4-12b-mimic-candidate-u}
       - DOCKER_URL=http://docker-socket-proxy:2375
     healthcheck:
       test:
@@ -305,7 +305,7 @@ services:
       - LORE_CONTEXT_PATH=${LORE_CONTEXT_PATH:-bot_context/lore/context.md}
       - LORE_EMBED_TITLE=${LORE_EMBED_TITLE:-📚 Lore}
       # Live image captions for the mimic chat controller. Leave off until
-      # [mimic-multi] has a vision projector (needs a newer llama.cpp; see models.ini).
+      # [gemma4-12b-mimic-u] has a vision projector (needs a newer llama.cpp; see models.ini).
       - VISION_MIMIC_ENABLED=${VISION_MIMIC_ENABLED:-false}
       # /imagine. Needs the proxy's IMAGEGEN_ENABLED and the imagegen service.
       - IMAGINE_ENABLED=${IMAGINE_ENABLED:-false}
@@ -504,7 +504,7 @@ services:
       # Caption backfill. Its model must be in the proxy's BATCH_MODELS, which
       # is what keeps it off the GPU while anyone is using it.
       - IMAGE_CAPTION_ENABLED=${IMAGE_CAPTION_ENABLED:-false}
-      - IMAGE_CAPTION_MODEL=${IMAGE_CAPTION_MODEL:-caption}
+      - IMAGE_CAPTION_MODEL=${IMAGE_CAPTION_MODEL:-qwen3.6-27b-caption-u}
       - IMAGE_CAPTION_BATCH_SIZE=${IMAGE_CAPTION_BATCH_SIZE:-20}
       - EXCLUDED_CHANNELS=${EXCLUDED_CHANNELS:-}
     volumes:

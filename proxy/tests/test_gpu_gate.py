@@ -144,29 +144,29 @@ async def test_the_lease_is_kept_while_more_work_is_queued(client, backend, arb)
 # -- batch traffic --
 
 async def test_a_batch_model_asks_under_its_own_lower_ranked_name(client, backend, arb):
-    r = await client.post("/v1/chat/completions", json={"model": "judge"})
+    r = await client.post("/v1/chat/completions", json={"model": "qwen3.6-27b-judge-u"})
 
-    assert r.status_code == 200 and backend.calls == ["judge"]
+    assert r.status_code == 200 and backend.calls == ["qwen3.6-27b-judge-u"]
     assert arb.names("acquire") == ["llm-batch"]
 
 
 async def test_a_batch_request_waits_out_interactive_traffic(client, backend, arb):
     """A person waits for at most the batch call already running, never for a queue of them."""
     main.dispatcher.batch_yield_seconds = 0.3
-    hold = backend.hold_model("mimic-multi")
-    person = chat(client, "mimic-multi")
+    hold = backend.hold_model("gemma4-12b-mimic-u")
+    person = chat(client, "gemma4-12b-mimic-u")
     await asyncio.sleep(0.05)
-    judge = chat(client, "judge")
+    judge = chat(client, "qwen3.6-27b-judge-u")
     await asyncio.sleep(0.1)
-    assert backend.calls == ["mimic-multi"]
+    assert backend.calls == ["gemma4-12b-mimic-u"]
 
     hold.set()
     await person
     await asyncio.sleep(0.1)
-    assert backend.calls == ["mimic-multi"], "the batch request did not wait out the quiet period"
+    assert backend.calls == ["gemma4-12b-mimic-u"], "the batch request did not wait out the quiet period"
 
     await judge
-    assert backend.calls == ["mimic-multi", "judge"]
+    assert backend.calls == ["gemma4-12b-mimic-u", "qwen3.6-27b-judge-u"]
 
 
 async def test_a_person_goes_ahead_of_every_queued_batch_request(client, backend, arb):
@@ -175,31 +175,31 @@ async def test_a_person_goes_ahead_of_every_queued_batch_request(client, backend
     request passed the gate at once and queued on a FIFO lock, so the next
     person waited behind all of them.
     """
-    hold = backend.hold_model("judge")
-    batch = [chat(client, "judge") for _ in range(4)]
+    hold = backend.hold_model("qwen3.6-27b-judge-u")
+    batch = [chat(client, "qwen3.6-27b-judge-u") for _ in range(4)]
     await asyncio.sleep(0.1)
-    assert backend.calls == ["judge"], "only one batch request may be on the backend"
+    assert backend.calls == ["qwen3.6-27b-judge-u"], "only one batch request may be on the backend"
     assert main.dispatcher.batch_waiting == 3
 
-    person = chat(client, "mimic-multi")
+    person = chat(client, "gemma4-12b-mimic-u")
     await asyncio.sleep(0.05)
     hold.set()
     await person
-    assert backend.calls == ["judge", "mimic-multi"], "the person queued behind batch work"
+    assert backend.calls == ["qwen3.6-27b-judge-u", "gemma4-12b-mimic-u"], "the person queued behind batch work"
     await asyncio.gather(*batch)
 
 
 async def test_a_refused_batch_request_waits_and_retries_rather_than_failing(client, backend, arb):
     """Its client is a background job: a refusal is the proxy's to wait out, not a 503 to count as a failure."""
     arb.holder = "profile-segment"
-    judge = chat(client, "judge")
+    judge = chat(client, "qwen3.6-27b-judge-u")
     await asyncio.sleep(0.15)
     assert not judge.done() and backend.calls == []
     assert arb.names("acquire").count("llm-batch") >= 2, "should have asked again"
 
     await arb.release("profile-segment")
     r = await judge
-    assert r.status_code == 200 and backend.calls == ["judge"]
+    assert r.status_code == 200 and backend.calls == ["qwen3.6-27b-judge-u"]
 
 
 async def test_moving_up_from_batch_to_llm_hands_over_without_unloading(client, backend, arb):
@@ -211,16 +211,16 @@ async def test_moving_up_from_batch_to_llm_hands_over_without_unloading(client, 
         return True
     main.dispatcher.free_gpu = free_gpu
 
-    hold = backend.hold_model("judge")
-    judge = chat(client, "judge")
+    hold = backend.hold_model("qwen3.6-27b-judge-u")
+    judge = chat(client, "qwen3.6-27b-judge-u")
     await asyncio.sleep(0.05)
     assert arb.holder == "llm-batch"
-    person = chat(client, "mimic-multi")
+    person = chat(client, "gemma4-12b-mimic-u")
     await asyncio.sleep(0.05)
     hold.set()
     await asyncio.gather(judge, person)
 
-    assert backend.calls == ["judge", "mimic-multi"]
+    assert backend.calls == ["qwen3.6-27b-judge-u", "gemma4-12b-mimic-u"]
     assert ("release", "llm-batch") in arb.calls
     assert freed == [], "a self-handover must not unload the model"
 
@@ -234,10 +234,10 @@ async def test_a_cooperative_reclaim_finishes_the_batch_call_frees_the_gpu_and_r
         return True
     main.dispatcher.free_gpu = free_gpu
 
-    hold = backend.hold_model("judge")
-    first = chat(client, "judge")
+    hold = backend.hold_model("qwen3.6-27b-judge-u")
+    first = chat(client, "qwen3.6-27b-judge-u")
     await asyncio.sleep(0.05)
-    queued = chat(client, "judge")
+    queued = chat(client, "qwen3.6-27b-judge-u")
     await asyncio.sleep(0.05)
 
     profiler = asyncio.create_task(arb.acquire("profile-segment"))
@@ -247,14 +247,14 @@ async def test_a_cooperative_reclaim_finishes_the_batch_call_frees_the_gpu_and_r
     hold.set()
     granted, _ = await profiler
     assert granted and arb.holder == "profile-segment"
-    assert freed == [["judge"]], "the GPU is freed after the running call, before the release"
+    assert freed == [["qwen3.6-27b-judge-u"]], "the GPU is freed after the running call, before the release"
     await first
     await asyncio.sleep(0.1)
-    assert backend.calls == ["judge"], "batch work resumed while the profiler held the card"
+    assert backend.calls == ["qwen3.6-27b-judge-u"], "batch work resumed while the profiler held the card"
 
     await arb.release("profile-segment")
     await queued
-    assert backend.calls == ["judge", "judge"]
+    assert backend.calls == ["qwen3.6-27b-judge-u", "qwen3.6-27b-judge-u"]
 
 
 # -- clients that went away --
@@ -269,7 +269,7 @@ async def test_a_request_whose_client_left_is_dropped_and_never_runs(monkeypatch
     running = asyncio.create_task(main.dispatcher.turn("interactive", label="a"))
     ticket = await running
     with pytest.raises(main.Abandoned):
-        await main.dispatcher.turn("batch", request=GoneRequest(), label="judge")
+        await main.dispatcher.turn("batch", request=GoneRequest(), label="qwen3.6-27b-judge-u")
     assert main.dispatcher.batch_waiting == 0
     main.dispatcher.finish(ticket)
     hold.set()

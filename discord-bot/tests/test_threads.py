@@ -18,7 +18,7 @@ def live_thread(archived=False):
 
 
 MIMIC_ENTRY = {
-    "model": "mimic-multi", "name": "mimic-chat: A", "created_at": "2026-01-01T00:00:00+00:00",
+    "model": "gemma4-12b-mimic-u", "name": "mimic-chat: A", "created_at": "2026-01-01T00:00:00+00:00",
     "status": "active", "kind": "mimic_chat", "personas": ["mimic_user1"], "premise": "pizza?",
     "starter_id": "22", "starter_label": "erin", "started_at": "2026-01-01T00:00:00+00:00", "length": None,
 }
@@ -34,9 +34,9 @@ async def test_an_existing_registry_restores_every_kind(tmp_path):
     path = write_registry(tmp_path, {
         # Written before `kind` existed: a chat thread.
         "1": {"model": "brain", "name": "chat-brain", "created_at": "x", "status": "active"},
-        "2": {"model": "brain-dense-heretic", "name": "lore-x", "created_at": "x", "status": "archived",
+        "2": {"model": "qwen3.6-27b-u", "name": "lore-x", "created_at": "x", "status": "archived",
               "kind": "lore"},
-        "3": {"model": "brain-dense-heretic", "name": "lore-y", "created_at": "x", "status": "active",
+        "3": {"model": "qwen3.6-27b-u", "name": "lore-y", "created_at": "x", "status": "active",
               "kind": "lore"},
         "4": MIMIC_ENTRY,
         "5": {"model": "brain", "name": "gone", "created_at": "x", "status": "active", "kind": "chat"},
@@ -62,10 +62,10 @@ def test_open_and_close_keep_file_and_routing_in_step(tmp_path):
     path = str(tmp_path / "ctx" / "threads.json")
     threads = ThreadDirectory(path)
 
-    threads.open(10, LORE, "brain-dense-heretic", "lore-q")
+    threads.open(10, LORE, "qwen3.6-27b-u", "lore-q")
     assert threads.kind_of(10) == LORE
     assert json.loads(open(path).read())["10"]["kind"] == "lore"
-    assert ThreadDirectory(path)._data["10"]["model"] == "brain-dense-heretic"
+    assert ThreadDirectory(path)._data["10"]["model"] == "qwen3.6-27b-u"
 
     threads.lock_for(10)
     assert threads.close(10)

@@ -130,7 +130,7 @@ help:
 	@echo "                        Usage: make train-sample PERSONA=mimic_user1 MODELS=\"base mimic_user1\""
 	@echo "  train-topic-probes  Build a persona's topic-switch / chaos probe set (once)"
 	@echo "  train-topic-eval  Judge adapters on those probes: PERSONA= MODELS= TAG= [ARGS=]"
-	@echo "  train-cut         Cut a persona's contexts with [judge] -> <persona>-cut/ (background, systemd)"
+	@echo "  train-cut         Cut a persona's contexts with [qwen3.6-27b-judge-u] -> <persona>-cut/ (background, systemd)"
 	@echo "  train-cut-queue   Cut all, train on the cuts, topic-eval each vs live — nothing exported [PERSONAS=] [JOB=]"
 	@echo ""
 	@echo "  ── GPU ────────────────────────────────────────────────"
@@ -400,7 +400,7 @@ TRAIN_EXCLUDED_DATES ?= 2026-04-01
 # lives in the roster, /mnt/storage_cold/array/DiscordArchive/training/personas.json
 # (real names, so beside names.json and out of the repo). A new persona is a
 # roster entry, a configs/<persona>.yaml extending mimic_gemma4_12b.yaml, and
-# — once its GGUF exists — its entry in [mimic-multi]'s lora list in models.ini.
+# — once its GGUF exists — its entry in [gemma4-12b-mimic-u]'s lora list in models.ini.
 
 ## Rebuild training sets from the archive (Tier 3): every persona, or one.
 ## Usage: make train-datasets [PERSONA=mimic_user3] [REFRESH=1] [ARGS="--context-n 24"]
@@ -460,7 +460,7 @@ train-queue-stop:
 ##        make train-export-latest PERSONA=mimic_user3 CANDIDATE=1 [RUN=...]
 ## Skips personas already serving their newest run. RUN= picks a specific run
 ## for PERSONA — that is also how to roll back. CANDIDATE=1 exports to the
-## [mimic-candidate] slot instead of going live, for a blind A/B first.
+## [gemma4-12b-mimic-candidate-u] slot instead of going live, for a blind A/B first.
 train-export-latest:
 	$(TRAINER_RUN) python export_latest.py --personas "$(PERSONA)" \
 		$(if $(RUN),--run "$(RUN)",) $(if $(FORCE),--force,) $(if $(DRY_RUN),--dry-run,) \
@@ -488,7 +488,7 @@ train-topic-eval:
 		echo "Usage: make train-topic-eval PERSONA=mimic_user2 MODELS=\"mimic_user2 candidate\" TAG=<name>"; exit 1; }
 	$(TRAINER_RUN) python topic_eval.py run --persona "$(PERSONA)" --models $(MODELS) --tag "$(TAG)" $(ARGS)
 
-## Cut each example's context to what its reply responds to, with [judge]
+## Cut each example's context to what its reply responds to, with [qwen3.6-27b-judge-u]
 ## (lora-training/cut_context.py). Hours for a big persona, so it runs as the
 ## systemd user unit train-cut; log in ~/.local/share/train-queue/cut-<persona>.log.
 ## Usage: make train-cut PERSONA=mimic_user2 [ARGS="--uncut-share 0.2"]
@@ -501,7 +501,7 @@ train-cut:
 		bash -c '$(TRAINER_RUN_BG) python cut_context.py --persona "$(PERSONA)" $(ARGS) > $$HOME/.local/share/train-queue/cut-$(PERSONA).log 2>&1' >/dev/null
 	@echo "✓ Cutting $(PERSONA) (systemd user unit train-cut). Log: ~/.local/share/train-queue/cut-$(PERSONA).log"
 
-## The whole cut pipeline, unattended: cut every persona with [judge], then
+## The whole cut pipeline, unattended: cut every persona with [qwen3.6-27b-judge-u], then
 ## train-queue on the cut datasets, then topic-eval each new adapter (as the
 ## candidate) against the live one. Nothing goes live. Runs as the systemd user
 ## unit train-queue, so train-queue-status / train-queue-stop work on it.

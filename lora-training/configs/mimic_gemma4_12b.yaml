@@ -19,7 +19,7 @@ load_in_4bit: true
 gradient_checkpointing: true
 
 # Rendered into the training prompts, so it must match how the persona is
-# served: [mimic-multi] in models.ini sets the same kwargs. Thinking
+# served: [gemma4-12b-mimic-u] in models.ini sets the same kwargs. Thinking
 # off — a persona reply is one short line and has nothing to reason about.
 chat_template_kwargs:
   enable_thinking: false

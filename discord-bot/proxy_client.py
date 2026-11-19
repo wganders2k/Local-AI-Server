@@ -106,7 +106,7 @@ class ProxyClient:
         Send a chat completion request to the proxy.
 
         Args:
-            model: Model alias (e.g. "mimic-multi", "lore").
+            model: Model alias (e.g. "gemma4-12b-mimic-u", "gemma4-26b-a4b").
             messages: List of message dicts with "role" and "content".
             lora: Per-request adapter scales, [{"id": i, "scale": s}, ...], for
                 a model that preloads several (personas.PersonaCatalog.lora).
@@ -147,7 +147,7 @@ class ProxyClient:
         `content` (text response) or `tool_calls` (function invocation requests).
 
         Args:
-            model: Model alias (e.g. "brain-dense").
+            model: Model alias (e.g. "qwen3.6-27b").
             messages: Conversation history including system, user, assistant, and tool messages.
             tools: List of tool schema dicts (OpenAI function-calling format).
             temperature: Sampling temperature (low for deterministic tool calling).
@@ -185,7 +185,7 @@ class ProxyClient:
         Stream a chat completion from the proxy using Server-Sent Events.
 
         Args:
-            model: Model alias (e.g. "mimic_user3", "lore").
+            model: Model alias (e.g. "mimic_user3", "gemma4-26b-a4b").
             messages: List of message dicts with "role" and "content".
             usage_sink: Optional dict updated in place with the token counts
                 from the final SSE chunk (prompt_tokens, completion_tokens,

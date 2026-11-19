@@ -22,7 +22,7 @@ Three slash commands:
 |---|---|---|
 | `/mimic persona message` | the persona alias itself (`mimic_user*`) | Impersonate a member's Discord personality |
 | `/chat model` | any alias llama-server knows | Create a thread bound to a model; chat in it without further commands |
-| `/lore question [rounds]` | `brain-dense-heretic` (`AGENT_MODEL`) | Agentic search over server history |
+| `/lore question [rounds]` | `qwen3.6-27b-u` (`AGENT_MODEL`) | Agentic search over server history |
 
 ### 1.1 Slash commands over mention routing
 
@@ -77,7 +77,7 @@ python-dotenv>=1.0.0
 
 `CHROMA_HOST` / `CHROMA_PORT` are **not** used by the bot — it never talks to ChromaDB directly.
 
-Non-environment constants in [`config.py`](discord-bot/config.py): `AGENT_MODEL` (`brain-dense-heretic`), `AGENT_MAX_ROUNDS` (10), `AGENT_MAX_ROUNDS_HARD_CAP` (25), `AGENT_TEMPERATURE` (0.1), `AGENT_TOP_K` (10), `HISTORY_MAX_TURNS` (20), and the proxy timeouts in §10.3.
+Non-environment constants in [`config.py`](discord-bot/config.py): `AGENT_MODEL` (`qwen3.6-27b-u`), `AGENT_MAX_ROUNDS` (10), `AGENT_MAX_ROUNDS_HARD_CAP` (25), `AGENT_TEMPERATURE` (0.1), `AGENT_TOP_K` (10), `HISTORY_MAX_TURNS` (20), and the proxy timeouts in §10.3.
 
 ---
 

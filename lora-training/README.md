@@ -171,7 +171,7 @@ can only be as honest as that number.
 ```bash
 # with a run holding the card
 time curl -s localhost:11436/v1/chat/completions \
-  -d '{"model":"brain-dense","messages":[{"role":"user","content":"hi"}]}'
+  -d '{"model":"qwen3.6-27b","messages":[{"role":"user","content":"hi"}]}'
 
 docker inspect lora-trainer --format '{{.State.Status}}'  # still "running"
 docker logs lora-trainer | grep -i 'preempted\|resum'     # killed, then not step 0
@@ -253,7 +253,7 @@ projections outside the text decoder.
 
 `export_adapter.py` runs llama.cpp's `convert_lora_to_gguf.py` (tag pinned in the
 Dockerfile) and writes `/srv/models/lora/<persona>-lora.gguf` — tens of MB. Every persona's
-adapter is listed in `[mimic-multi]` in `models.ini`, loaded together over one
+adapter is listed in `[gemma4-12b-mimic-u]` in `models.ini`, loaded together over one
 base and picked per request, so seven personas cost one base on disk and in VRAM,
 and a change of speaker never reloads the model.
 
@@ -264,7 +264,7 @@ Eval loss falls for a model that learns to hedge, so it is not the verdict.
 conversations in shuffled order and logs your pick to
 `/home/peacow/lora-outputs/experiments.jsonl`. A model is `base`, a persona key
 (its live adapter, served as `/mimic` serves it), or `candidate` — a run exported
-with `make train-export-latest PERSONA=… CANDIDATE=1` into `[mimic-candidate]`,
+with `make train-export-latest PERSONA=… CANDIDATE=1` into `[gemma4-12b-mimic-candidate-u]`,
 which nothing live uses. Change one variable per run
 against the baseline — data shape (context length, merge window, min length,
 system prompt or not), then learning rate/epochs, rank and target modules,
@@ -309,9 +309,9 @@ make train-export-latest [PERSONA=mimic_user3]          # 3. put the newest runs
 
 A new persona needs a roster entry, a `configs/<persona>.yaml` (copy one: it is
 five lines extending the recipe) and — once its GGUF exists — its path appended to
-`[mimic-multi]`'s `lora` list in `models.ini`. Nothing else: the bot reads the
+`[gemma4-12b-mimic-u]`'s `lora` list in `models.ini`. Nothing else: the bot reads the
 roster for who it is and the proxy for its adapter id. Export warns if
-`[mimic-multi]` does not list it. Append it only after the GGUF exists:
+`[gemma4-12b-mimic-u]` does not list it. Append it only after the GGUF exists:
 llama-swappable waits forever on a missing adapter, and the adapters load
 together, so one missing file hangs `/mimic` for every persona (export warns
 about that too).

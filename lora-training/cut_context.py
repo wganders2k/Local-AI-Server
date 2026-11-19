@@ -3,7 +3,7 @@ Cut each training example's context to what its reply actually responds to.
 
 A persona's examples carry up to 24 turns of context, cut only at a 2-hour
 silence, so most of them hold earlier topics the reply has nothing to do with.
-Here the [judge] preset reads each example — context and the member's real
+Here the [qwen3.6-27b-judge-u] preset reads each example — context and the member's real
 reply — and picks how many of the most recent turns the reply needs; the
 example is rewritten with only those. Because the judge sees the reply, a reply
 that deliberately returns to an earlier topic keeps that topic in its context.
@@ -63,7 +63,7 @@ from persona_roster import load_aliases
 
 PROXY_URL = os.environ.get("PROXY_URL", "http://proxy:11436")
 TRAINING_DIR = os.environ.get("TRAINING_DIR", "/archive/training")
-JUDGE_MODEL = "judge"
+JUDGE_MODEL = "qwen3.6-27b-judge-u"
 # Bump when the prompt or schema changes: every cached label then misses.
 PROMPT_VERSION = 2
 # No cut leaves fewer turns than this (or than the example has). The bot serves

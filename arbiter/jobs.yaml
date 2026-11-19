@@ -24,7 +24,7 @@ jobs:
     priority: 100
 
   # The same proxy as `llm`, while it has only batch work: requests for the
-  # models in its BATCH_MODELS (the [judge] preset, which labels persona
+  # models in its BATCH_MODELS (the [qwen3.6-27b-judge-u] preset, which labels persona
   # datasets for hours at a time, and the archive captioner). The proxy holds
   # one lease at a time, named for the most important work it has
   # (proxy/dispatcher.py). Nobody is waiting on any one of these answers, so

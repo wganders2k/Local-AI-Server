@@ -2,7 +2,7 @@
 Who speaks next.
 
 The controller is the mimic base with no adapter applied, on the same loaded
-model as the personas ([mimic-multi]), so deciding costs no model swap. Its
+model as the personas ([gemma4-12b-mimic-u]), so deciding costs no model swap. Its
 output is constrained to a JSON schema; anything unusable falls back to a
 plain rule so a bad decision never stalls the chat.
 """
@@ -220,7 +220,7 @@ async def decide(
     """
     The next action, from `actions`. `labels` maps each persona to the name its
     lines carry in the transcript, so the controller can tell who said what.
-    `lora` is [mimic-multi]'s scales with no adapter applied (catalog.lora(None)).
+    `lora` is [gemma4-12b-mimic-u]'s scales with no adapter applied (catalog.lora(None)).
     """
     msgs = build_messages(personas, labels, premise, lines, humans, actions, status, length, shown_as)
     choices = speaker_choices(personas, labels)

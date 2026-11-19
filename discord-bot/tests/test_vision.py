@@ -69,8 +69,8 @@ async def test_caption_is_cached_and_sent_without_thinking():
     proxy = CaptionProxy(["  a green\n square "])
     cap = vision.Captioner(proxy)
     att = FakeAttachment(7)
-    assert await cap.caption(att, "mimic-multi", lora=[{"id": 0, "scale": 0.0}]) == "a green square"
-    assert await cap.caption(att, "mimic-multi") == "a green square"
+    assert await cap.caption(att, "gemma4-12b-mimic-u", lora=[{"id": 0, "scale": 0.0}]) == "a green square"
+    assert await cap.caption(att, "gemma4-12b-mimic-u") == "a green square"
     assert len(proxy.calls) == 1 and att.reads == 1
     call = proxy.calls[0]
     assert call["chat_template_kwargs"] == {"enable_thinking": False}
@@ -111,9 +111,9 @@ async def test_annotate_newest_first_within_budget():
     cap = vision.Captioner(proxy)
     old, new = FakeAttachment(1), FakeAttachment(2)
     lines = [img_line("", old), Line(Msg("22", "erin", T0, "hm")), img_line("", new)]
-    out = await vision.annotate(cap, lines, "mimic-multi", max_new=1)
+    out = await vision.annotate(cap, lines, "gemma4-12b-mimic-u", max_new=1)
     assert out[2].captions == ("caption 1",) and out[0].captions == ()
-    out = await vision.annotate(cap, out, "mimic-multi", max_new=1)
+    out = await vision.annotate(cap, out, "gemma4-12b-mimic-u", max_new=1)
     assert out[0].captions == ("caption 2",) and out[2].captions == ("caption 1",)
     assert await vision.annotate(None, lines, "m") is lines
 

@@ -48,10 +48,10 @@ def test_a_typo_lists_the_real_names():
         personas.select({"mimic_user1": {}}, "mimic_usr1")
 
 
-# The shape the proxy's /v1/models really returns for [mimic-multi], captured
+# The shape the proxy's /v1/models really returns for [gemma4-12b-mimic-u], captured
 # from the live router: one --lora flag, comma-joined paths, then more flags.
 _MULTI = {
-    "id": "mimic-multi",
+    "id": "gemma4-12b-mimic-u",
     "status": {"args": [
         "--model", "/srv/models/base.gguf",
         "--lora", "/srv/models/lora/mimic_user2-lora.gguf,/srv/models/lora/mimic_user1-lora.gguf",
@@ -67,12 +67,12 @@ def test_adapter_order_is_the_lora_list_order():
 
 def test_adapter_order_is_empty_when_undiscoverable():
     assert personas.adapter_order([]) == []
-    assert personas.adapter_order([{"id": "mimic-multi"}]) == []
-    assert personas.adapter_order([{"id": "mimic-multi", "status": {"args": ["--model", "x"]}}]) == []
+    assert personas.adapter_order([{"id": "gemma4-12b-mimic-u"}]) == []
+    assert personas.adapter_order([{"id": "gemma4-12b-mimic-u", "status": {"args": ["--model", "x"]}}]) == []
 
 
 def test_repeated_lora_flags_append():
-    entry = {"id": "mimic-multi", "status": {"args": ["--lora", "/a/x-lora.gguf", "--lora", "/a/y-lora.gguf"]}}
+    entry = {"id": "gemma4-12b-mimic-u", "status": {"args": ["--lora", "/a/x-lora.gguf", "--lora", "/a/y-lora.gguf"]}}
     assert personas.adapter_order([entry]) == ["x", "y"]
 
 

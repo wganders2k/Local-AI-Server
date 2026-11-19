@@ -22,7 +22,7 @@ history, disclaimer stripping, and the agentic RAG loop behind `/lore`.
 
 ## How `/lore` works
 
-1. The agent model (`AGENT_MODEL`, currently `brain-dense-heretic`) is given the
+1. The agent model (`AGENT_MODEL`, currently `qwen3.6-27b-u`) is given the
    tools in [`lore/tools.py`](lore/tools.py) and loops: call a tool, read the
    result, decide whether to search again — up to `rounds` times.
 2. If it answers before the budget runs out, that is the answer. If it doesn't,
@@ -85,8 +85,8 @@ The prefix is stripped before anything reads the message, and the latest one win
 
 `vision.py` describes images posted to the bot, so the models can react to what an image shows rather than to a bare `[attachment]`. A caption is made by the model the feature already has loaded, so it never costs a model swap. Captions are cached by attachment id.
 
-- **Lore threads.** An image posted with or as a follow-up is described by the agent model (`brain-dense-heretic`, which has a vision projector in `models.ini`). The description is appended to the question as `[image: …]`, so sessions stay plain text.
-- **Mimic chats.** Images are described by `[mimic-multi]` with no adapter applied, newest first, at most `VISION_MAX_NEW_PER_BURST` new ones per burst. They are captioned only when the controller is about to be asked. The controller sees `[image: …]`. **Persona prompts still show `[attachment]`**, because that is what the adapters were trained on (`shared/mimic_format.context_line`); captions live on `mimic.transcript.Line`, never on the shared `Msg`. Off by default (`VISION_MIMIC_ENABLED`): the 12B base's projector needs a newer llama.cpp than the stack runs; see `[mimic-multi]` in `models.ini`.
+- **Lore threads.** An image posted with or as a follow-up is described by the agent model (`qwen3.6-27b-u`, which has a vision projector in `models.ini`). The description is appended to the question as `[image: …]`, so sessions stay plain text.
+- **Mimic chats.** Images are described by `[gemma4-12b-mimic-u]` with no adapter applied, newest first, at most `VISION_MAX_NEW_PER_BURST` new ones per burst. They are captioned only when the controller is about to be asked. The controller sees `[image: …]`. **Persona prompts still show `[attachment]`**, because that is what the adapters were trained on (`shared/mimic_format.context_line`); captions live on `mimic.transcript.Line`, never on the shared `Msg`. Off by default (`VISION_MIMIC_ENABLED`): the 12B base's projector needs a newer llama.cpp than the stack runs; see `[gemma4-12b-mimic-u]` in `models.ini`.
 
 The caption prompt is `prompts/caption.md`, identical to history-service's, so a live caption reads like an archived one.
 
@@ -97,13 +97,13 @@ Nothing in this directory lists the personas. `personas.PersonaCatalog` assemble
 | Fact | Source |
 |---|---|
 | who exists, display name, Discord accounts | the roster, `personas.json` beside the training data (real names, so never committed) |
-| adapter id | position in `[mimic-multi]`'s `lora` list in `models.ini`, read from the proxy's `/v1/models` at startup |
+| adapter id | position in `[gemma4-12b-mimic-u]`'s `lora` list in `models.ini`, read from the proxy's `/v1/models` at startup |
 | how context was cut | each persona's `stats.json`, written by `build_dataset.py` |
 | system prompt | `shared/mimic_persona.md`, rendered by the same function training used |
 
 A persona is offered only when it is on the roster **and** has an adapter. The adapter order is never guessed: until the proxy has answered, persona commands say the personas are unavailable and retry discovery on the next command, because a wrong id serves one member's voice under another's name. The roster and stats are re-read when they change, so neither needs a restart. Adding a persona is a training-side job — see `lora-training/README.md`.
 
-All personas are served from `[mimic-multi]`: one loaded base with every adapter, picked per request, so changing speaker never reloads the model.
+All personas are served from `[gemma4-12b-mimic-u]`: one loaded base with every adapter, picked per request, so changing speaker never reloads the model.
 
 ## File structure
 
@@ -112,7 +112,7 @@ discord-bot/
 ├── bot.py               # Entry point: client, setup_hook, thread restore/delete
 ├── services.py          # Shared state, built once
 ├── config.py            # Environment reads and tuning constants — nothing else
-├── personas.py          # PersonaCatalog: roster ∩ [mimic-multi] adapters
+├── personas.py          # PersonaCatalog: roster ∩ [gemma4-12b-mimic-u] adapters
 ├── threads.py           # ThreadDirectory: which threads the bot answers, persisted
 ├── persona_posting.py   # Discord side of personas: webhooks, reading posts back
 ├── prompt_loader.py     # Loads and renders prompts/*.md
@@ -198,7 +198,7 @@ warning and answers without the alias index.
 | `RAG_SERVICE_URL` | ❌ | `http://rag-service:8001` | RAG service base URL |
 | `RAG_ENABLED` | ❌ | `true` | Set false to run without `/lore` retrieval |
 | `LORE_ARCHIVE_GUILD_ID` | ❌ | `DISCORD_GUILD_ID` | Guild citation links point into; unset = no links |
-| `VISION_MIMIC_ENABLED` | ❌ | `false` | Live image captions for the mimic chat controller. Needs a vision projector on `[mimic-multi]` first |
+| `VISION_MIMIC_ENABLED` | ❌ | `false` | Live image captions for the mimic chat controller. Needs a vision projector on `[gemma4-12b-mimic-u]` first |
 | `IMAGINE_ENABLED` | ❌ | `false` | Registers `/imagine`. Needs the proxy's `IMAGEGEN_ENABLED` |
 | `IMAGINE_MODEL_LABEL` | ❌ | `Z-Image-Turbo` | Model name in each image's footer; set it to match the proxy's `IMAGEGEN_*` model |
 | `THREAD_REGISTRY_PATH` | ❌ | `bot_context/threads.json` | Which threads the bot answers in, and how |

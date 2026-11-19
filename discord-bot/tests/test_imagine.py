@@ -48,7 +48,7 @@ class FakeProxy:
     async def chat(self, model, messages, **kw):
         self.chats.append((model, messages, kw))
         if self.rewrite is None:
-            raise ProxyError("mimic-multi returned error 503: busy")
+            raise ProxyError("gemma4-12b-mimic-u returned error 503: busy")
         return self.rewrite
 
     async def generate_image(self, prompt, size, n=1, model="default", steps=None, image=None, strength=None,
@@ -259,7 +259,7 @@ async def test_the_rewrite_is_drawn_and_shown_under_the_original():
 
     assert proxy.calls == [("A goose in a top hat, oil painting, warm light.", "1024x1024")]
     model, messages, kw = proxy.chats[0]
-    assert model == "mimic-multi" and kw["lora"] == BASE
+    assert model == "gemma4-12b-mimic-u" and kw["lora"] == BASE
     assert "text-to-image model" in messages[0]["content"] and messages[1] == {"role": "user", "content": "a goose"}
     (_, sent), = i.followup.sent
     assert sent["embed"].description == "a goose"

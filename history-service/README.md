@@ -104,7 +104,7 @@ Bound to `127.0.0.1:11437`. No authentication.
 | `MEDIA_FETCH_MAX_FILE_SIZE_MB` | ❌ | `50` | Larger images are marked `too_large` |
 | `MEDIA_FETCH_MAX_ATTEMPTS` | ❌ | `3` | Transient failures retried this many runs |
 | `IMAGE_CAPTION_ENABLED` | ❌ | `false` | Enables the captioning job (every 60s) |
-| `IMAGE_CAPTION_MODEL` | ❌ | `caption` | Must be an alias in `models.ini` **and** in the proxy's `BATCH_MODELS` |
+| `IMAGE_CAPTION_MODEL` | ❌ | `qwen3.6-27b-caption-u` | Must be an alias in `models.ini` **and** in the proxy's `BATCH_MODELS` |
 | `IMAGE_CAPTION_BATCH_SIZE` | ❌ | `20` | Images per run; results written once per user file per run |
 | `IMAGE_CAPTION_MAX_ATTEMPTS` | ❌ | `3` | Proxy failures retried this many runs, then `error` |
 | `IMAGE_CAPTION_MAX_SIDE` | ❌ | `1536` | Longest side sent to the model |
@@ -186,9 +186,9 @@ Two jobs, both off by default, both running inside this service:
 
 **1. Media fetch (`media_store.py`, `MEDIA_FETCH_ENABLED`).** The archive holds signed Discord CDN links that expire about a day after export. This job keeps a copy of every image attachment at `/archive/media/<channel_id>/<attachment_id><ext>`. Before downloading, it re-signs links in batches of 50 through Discord's `POST /attachments/refresh-urls` using the bot token. An attachment that gets no fresh link was deleted on Discord and is marked `gone`; that image cannot be recovered. If the refresh service fails as a whole (bad token, Discord 5xx, rate limited out, network down), the run records nothing and later runs back off, 2 min doubling to an hour. If Discord rejects a call because of one link, the batch is halved until that link is alone, and only it counts toward `MEDIA_FETCH_MAX_ATTEMPTS`. Network and disk only. Measured 2026-11-12: 41.8k images, ~24 GiB, ~200 images per 30 s run.
 
-**2. Captioning (`image_captioner.py`, `IMAGE_CAPTION_ENABLED`).** Sends each stored, uncaptioned image to the proxy's `caption` preset (models.ini: the Qwen3.6-27B heretic finetune plus its vision projector, thinking off). Every image is re-encoded as JPEG with a longest side of 1536, because llama.cpp's loader reads no WebP and a GIF is captioned by its first frame. The prompt is `prompts/caption.md`; the bot's live captions use an identical copy. Measured: 2–4 s per image warm. A request waits as long as the proxy holds it (`IMAGE_CAPTION_TIMEOUT_S`, default 6 h): a client timeout would only abandon a request the GPU still runs later. Only an image's own failures (an empty answer, a 4xx) count toward `IMAGE_CAPTION_MAX_ATTEMPTS`; when the proxy is unreachable, refusing or failing, the batch stops there with no attempt recorded and the next run carries on.
+**2. Captioning (`image_captioner.py`, `IMAGE_CAPTION_ENABLED`).** Sends each stored, uncaptioned image to the proxy's `qwen3.6-27b-caption-u` preset (models.ini: the Qwen3.6-27B heretic finetune plus its vision projector, thinking off). Every image is re-encoded as JPEG with a longest side of 1536, because llama.cpp's loader reads no WebP and a GIF is captioned by its first frame. The prompt is `prompts/caption.md`; the bot's live captions use an identical copy. Measured: 2–4 s per image warm. A request waits as long as the proxy holds it (`IMAGE_CAPTION_TIMEOUT_S`, default 6 h): a client timeout would only abandon a request the GPU still runs later. Only an image's own failures (an empty answer, a 4xx) count toward `IMAGE_CAPTION_MAX_ATTEMPTS`; when the proxy is unreachable, refusing or failing, the batch stops there with no attempt recorded and the next run carries on.
 
-**GPU scheduling is the proxy's job, not this service's.** `caption` is in the proxy's `BATCH_MODELS`, so the proxy queues every request behind interactive traffic and runs it, one at a time, once people have been quiet for `BATCH_YIELD_SECONDS`, under arbiter job `llm-batch` (priority 25: below any person and the profiler, above the video job). A request the arbiter refuses stays queued in the proxy rather than failing. That replaced the old 3–6 AM window and queue-depth check. Note that 25 also **outranks the LoRA trainer** (-10), so a running backfill keeps training off the card. Don't enable captioning while a training queue needs to finish.
+**GPU scheduling is the proxy's job, not this service's.** `qwen3.6-27b-caption-u` is in the proxy's `BATCH_MODELS`, so the proxy queues every request behind interactive traffic and runs it, one at a time, once people have been quiet for `BATCH_YIELD_SECONDS`, under arbiter job `llm-batch` (priority 25: below any person and the profiler, above the video job). A request the arbiter refuses stays queued in the proxy rather than failing. That replaced the old 3–6 AM window and queue-depth check. Note that 25 also **outranks the LoRA trainer** (-10), so a running backfill keeps training off the card. Don't enable captioning while a training queue needs to finish.
 
 **Attachment fields:**
 
@@ -216,7 +216,7 @@ Two jobs, both off by default, both running inside this service:
       "media_path": "media/488918223203336204/653318014426546186.png",
       "caption": "A meme of Master Oogway in a forest. Top text: \"THIS WILL BE GRAPHICS\", bottom: \"IN 2013\".",
       "caption_status": "done",
-      "caption_model": "caption",
+      "caption_model": "qwen3.6-27b-caption-u",
       "caption_prompt_version": "3f1c9a0b2d4e",
       "caption_excluded_from_training": true
     }

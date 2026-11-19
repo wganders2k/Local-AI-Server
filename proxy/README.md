@@ -72,7 +72,7 @@ GPU metrics are the arbiter's — it is the only component that reads the card.
 | `IDLE_EVICT_SECONDS` | `600` | Idle time before unloading |
 | `IDLE_EVICT_POLL_SECONDS` | `30` | How often the evictor checks |
 | `IDLE_EVICT_UNLOAD_TIMEOUT` | `60` | How long to wait for an unload to take effect |
-| `BATCH_MODELS` | `judge,caption` | Models ranked as batch work (`llm-batch`) |
+| `BATCH_MODELS` | `qwen3.6-27b-judge-u,qwen3.6-27b-caption-u` | Models ranked as batch work (`llm-batch`) |
 | `BATCH_YIELD_SECONDS` | `30` | Quiet time after the last interactive request before batch work runs |
 | `BATCH_RETRY_SECONDS` | `5` | How long a refused batch request waits before asking again |
 | `IMAGEGEN_ENABLED` | `false` | Serve `/v1/images/generations` |

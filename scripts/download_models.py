@@ -124,7 +124,6 @@ def imagegen_models(env: dict[str, str]) -> list[dict]:
 # Cases where a GGUF's on-disk <publisher>/<repo> path (as used in models.ini
 # and MODELS_DIR) doesn't match its actual HuggingFace repo id.
 HF_REPO_OVERRIDES: dict[str, str] = {
-    "HauhauCS/Qwen3.5-35B-A3B-Uncensored": "HauhauCS/Qwen3.5-35B-A3B-Uncensored-HauhauCS-Aggressive",
 }
 
 
@@ -133,7 +132,7 @@ def load_swappable_models(models_ini_path: Path) -> list[dict]:
     Derive the swappable-slot download list from models.ini's active sections.
     Commented-out (`;`-prefixed) sections are invisible to configparser and are
     correctly skipped. Includes vision projectors (`mmproj =`). De-duplicates by resolved GGUF path — several aliases
-    share a file (e.g. brain/chat-chinese, lore/chat-liberal).
+    share a file (e.g. brain/qwen3.6-35b-a3b-chat, lore/gemma4-26b-a4b-chat).
     """
     parser = configparser.ConfigParser(interpolation=None)
     parser.read(models_ini_path)

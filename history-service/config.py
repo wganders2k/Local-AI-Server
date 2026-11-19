@@ -68,7 +68,7 @@ MEDIA_FETCH_MAX_ATTEMPTS: int = int(os.environ.get("MEDIA_FETCH_MAX_ATTEMPTS", "
 IMAGE_CAPTION_ENABLED: bool = os.environ.get("IMAGE_CAPTION_ENABLED", "false").lower() == "true"
 # Must be an alias in models.ini AND listed in the proxy's BATCH_MODELS, so the
 # backfill ranks as llm-batch and always yields to a person.
-IMAGE_CAPTION_MODEL: str = os.environ.get("IMAGE_CAPTION_MODEL", "caption")
+IMAGE_CAPTION_MODEL: str = os.environ.get("IMAGE_CAPTION_MODEL", "qwen3.6-27b-caption-u")
 # Results are written once per batch, per user file. The proxy may hold each
 # batch request until interactive traffic has been quiet for 30s, so a batch
 # can take minutes; 20 keeps one batch's unwritten work small.

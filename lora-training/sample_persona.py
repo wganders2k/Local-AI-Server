@@ -16,9 +16,9 @@ So the deciding signal is a person reading outputs, and this makes that cheap:
     python sample_persona.py --persona mimic_user1 --models mimic_user1 candidate --blind --no-system candidate
 
 A model is one of:
-    base        the bare base: [mimic-multi] with every adapter at 0
-    <persona>   that persona's live adapter on [mimic-multi], exactly as /mimic serves it
-    candidate   [mimic-candidate], the one adapter export_latest --candidate wrote
+    base        the bare base: [gemma4-12b-mimic-u] with every adapter at 0
+    <persona>   that persona's live adapter on [gemma4-12b-mimic-u], exactly as /mimic serves it
+    candidate   [gemma4-12b-mimic-candidate-u], the one adapter export_latest --candidate wrote
     anything else is sent as a models.ini preset name, unchanged
 
 Prompts come from the persona's eval.jsonl — the newest slice, held out by time
@@ -61,7 +61,7 @@ def resolve(spec: str, adapters: list[str], scale: float = SCALE) -> tuple[str, 
 
 
 def live_adapters(client: httpx.Client) -> list[str]:
-    """[mimic-multi]'s adapter order, from the proxy — never a copy that could drift."""
+    """[gemma4-12b-mimic-u]'s adapter order, from the proxy — never a copy that could drift."""
     resp = client.get(f"{PROXY_URL}/v1/models")
     resp.raise_for_status()
     return persona_roster.adapter_order(resp.json().get("data") or [])
@@ -141,7 +141,7 @@ def main() -> int:
 
     # One model at a time over every prompt, not alternating per prompt: the
     # swappable slot holds one preset, and alternating base/persona against a
-    # candidate would reload it 2k times. (base and personas share [mimic-multi].)
+    # candidate would reload it 2k times. (base and personas share [gemma4-12b-mimic-u].)
     outputs: dict[str, list[str]] = {}
     with httpx.Client(timeout=300.0) as client:
         adapters = live_adapters(client) if any(m != "candidate" for m in args.models) else []

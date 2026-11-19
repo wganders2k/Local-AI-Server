@@ -62,11 +62,11 @@ def test_eval_loss_is_the_last_evaluation(tmp_path):
 def test_preset_check_reads_the_multi_adapter_list(tmp_path):
     ini = tmp_path / "models.ini"
     ini.write_text(
-        "[mimic-multi]\nlora = /srv/models/lora/mimic_user3-lora.gguf,/srv/models/lora/mimic_user4-lora.gguf\n"
+        "[gemma4-12b-mimic-u]\nlora = /srv/models/lora/mimic_user3-lora.gguf,/srv/models/lora/mimic_user4-lora.gguf\n"
         "[mimic_user5]\nlora = /srv/models/lora/mimic_user5-lora.gguf\n"
     )
     assert el.preset_problem(str(ini), "mimic_user3") is None
-    # A section of its own is not enough: /mimic is served from [mimic-multi].
+    # A section of its own is not enough: /mimic is served from [gemma4-12b-mimic-u].
     assert "does not list mimic_user5-lora.gguf" in el.preset_problem(str(ini), "mimic_user5")
     assert el.preset_problem(str(tmp_path / "unmounted.ini"), "mimic_user5") is None
 
@@ -77,7 +77,7 @@ def test_a_missing_adapter_file_is_reported(tmp_path, monkeypatch):
     (lora / "mimic_user3-lora.gguf").write_text("x")
     monkeypatch.setattr(el, "LORA_DIR", str(lora))
     ini = tmp_path / "models.ini"
-    ini.write_text("[mimic-multi]\nlora = /srv/models/lora/mimic_user3-lora.gguf,/srv/models/lora/mimic_user4-lora.gguf\n")
+    ini.write_text("[gemma4-12b-mimic-u]\nlora = /srv/models/lora/mimic_user3-lora.gguf,/srv/models/lora/mimic_user4-lora.gguf\n")
     assert el.missing_adapters(str(ini)) == ["/srv/models/lora/mimic_user4-lora.gguf"]
 
 

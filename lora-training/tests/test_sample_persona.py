@@ -7,18 +7,18 @@ ADAPTERS = ["mimic_user2", "mimic_user1"]
 
 def test_a_persona_is_its_live_adapter_on_the_multi_model():
     model, lora = sp.resolve("mimic_user1", ADAPTERS, 0.85)
-    assert model == "mimic-multi"
+    assert model == "gemma4-12b-mimic-u"
     assert lora == [{"id": 0, "scale": 0.0}, {"id": 1, "scale": 0.85}]
 
 
 def test_base_is_the_multi_model_with_nothing_applied():
     model, lora = sp.resolve("base", ADAPTERS, 0.85)
-    assert model == "mimic-multi" and all(s["scale"] == 0.0 for s in lora)
+    assert model == "gemma4-12b-mimic-u" and all(s["scale"] == 0.0 for s in lora)
 
 
 def test_candidate_and_other_presets():
-    assert sp.resolve("candidate", ADAPTERS, 0.85) == ("mimic-candidate", [{"id": 0, "scale": 0.85}])
-    assert sp.resolve("chat-liberal", ADAPTERS, 0.85) == ("chat-liberal", None)
+    assert sp.resolve("candidate", ADAPTERS, 0.85) == ("gemma4-12b-mimic-candidate-u", [{"id": 0, "scale": 0.85}])
+    assert sp.resolve("gemma4-26b-a4b-chat", ADAPTERS, 0.85) == ("gemma4-26b-a4b-chat", None)
 
 
 def test_each_model_gets_the_prompt_shape_it_was_trained_on():
@@ -34,4 +34,4 @@ def test_whose_manifest_describes_a_model():
     assert sp.manifest_name("mimic_user1", ADAPTERS) == "mimic_user1"
     assert sp.manifest_name("candidate", ADAPTERS) == "candidate"
     assert sp.manifest_name("base", ADAPTERS) is None
-    assert sp.manifest_name("chat-liberal", ADAPTERS) is None
+    assert sp.manifest_name("gemma4-26b-a4b-chat", ADAPTERS) is None

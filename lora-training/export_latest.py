@@ -7,7 +7,7 @@ Put each persona's newest finished run live on /mimic.
 For every persona in the roster (shared/persona_roster.py), finds the newest complete
 `final` adapter among lora-outputs/<persona> and lora-outputs/<persona>-*,
 newest by when its COMPLETE marker was written, and converts it to
-/srv/models/lora/<persona>-lora.gguf — its entry in [mimic-multi]'s lora list,
+/srv/models/lora/<persona>-lora.gguf — its entry in [gemma4-12b-mimic-u]'s lora list,
 which is what serves /mimic.
 
 A <persona>-lora.json beside each GGUF records which run it came from, so a
@@ -17,7 +17,7 @@ the build arguments of the dataset the run trained on (persona_roster's
 trained_format), which the bot serves the adapter by.
 
 --candidate exports one persona's run to candidate-lora.gguf instead, served by
-[mimic-candidate] and by nothing live, so it can be judged against the live
+[gemma4-12b-mimic-candidate-u] and by nothing live, so it can be judged against the live
 adapter (make train-sample MODELS="<persona> candidate") before it replaces it.
 
 Nothing here trains or touches the GPU: train_queue.sh deliberately leaves the
@@ -102,7 +102,7 @@ CANDIDATE = "candidate"
 
 
 def multi_adapters(models_ini: str) -> list[str] | None:
-    """[mimic-multi]'s lora paths in models.ini, in adapter-id order; None if it cannot be read."""
+    """[gemma4-12b-mimic-u]'s lora paths in models.ini, in adapter-id order; None if it cannot be read."""
     if not os.path.isfile(models_ini):
         return None  # not mounted; nothing to check against
     ini = configparser.ConfigParser(interpolation=None, strict=False)
@@ -113,7 +113,7 @@ def multi_adapters(models_ini: str) -> list[str] | None:
 
 
 def preset_problem(models_ini: str, persona: str) -> str | None:
-    """Why /mimic would not serve this persona's GGUF, or None if [mimic-multi] lists it."""
+    """Why /mimic would not serve this persona's GGUF, or None if [gemma4-12b-mimic-u] lists it."""
     paths = multi_adapters(models_ini)
     if paths is None:
         return None
@@ -124,7 +124,7 @@ def preset_problem(models_ini: str, persona: str) -> str | None:
 
 def missing_adapters(models_ini: str) -> list[str]:
     """
-    [mimic-multi] adapter files that do not exist. llama-server waits forever
+    [gemma4-12b-mimic-u] adapter files that do not exist. llama-server waits forever
     on a missing adapter, and they all load together — so one missing file
     hangs /mimic for every persona, not just its own.
     """
@@ -163,7 +163,7 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true", help="Show what would be exported and stop")
     ap.add_argument(
         "--candidate", action="store_true",
-        help="Export one persona's run as candidate-lora.gguf ([mimic-candidate]) instead of putting it live",
+        help="Export one persona's run as candidate-lora.gguf ([gemma4-12b-mimic-candidate-u]) instead of putting it live",
     )
     ap.add_argument("--roster", default=persona_roster.ROSTER_PATH)
     ap.add_argument("--models-ini", default="/app/models.ini")

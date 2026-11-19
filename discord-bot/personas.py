@@ -5,7 +5,7 @@ Every fact here has one source, and none of them is a constant in this repo:
 
     who exists, display name, accounts   the roster, personas.json
                                          (shared/persona_roster.py)
-    adapter id                           the persona's position in [mimic-multi]'s
+    adapter id                           the persona's position in [gemma4-12b-mimic-u]'s
                                          lora list, read from the proxy's
                                          /v1/models at startup
     how its prompts are shaped (system   the live adapter's <persona>-lora.json
@@ -69,7 +69,7 @@ def member_name(user_id: int | str, handle: str, aliases: dict[str, str]) -> str
 
 class PersonaCatalog:
     """
-    The personas available right now: on the roster AND among [mimic-multi]'s
+    The personas available right now: on the roster AND among [gemma4-12b-mimic-u]'s
     adapters. Either alone is not enough — a roster entry with no adapter has
     nothing to serve it, and an adapter with no roster entry has no name.
     """
@@ -90,7 +90,7 @@ class PersonaCatalog:
         )
         self.model = model
         self.scale = scale
-        # [mimic-multi]'s adapters in id order, or None until discovered.
+        # [gemma4-12b-mimic-u]'s adapters in id order, or None until discovered.
         self._adapters: Optional[list[str]] = adapters
         self._roster: dict[str, dict] = {}
         self._roster_mtime: Optional[float] = None
@@ -103,7 +103,7 @@ class PersonaCatalog:
         return bool(self._adapters)
 
     async def discover(self, proxy) -> bool:
-        """Read [mimic-multi]'s adapter order from the proxy. Never raises; False leaves personas unavailable."""
+        """Read [gemma4-12b-mimic-u]'s adapter order from the proxy. Never raises; False leaves personas unavailable."""
         order = persona_roster.adapter_order(await proxy.models_payload(), self.model)
         if not order:
             logger.warning(
@@ -191,7 +191,7 @@ class PersonaCatalog:
 
     def lora(self, key: Optional[str]) -> list[dict]:
         """
-        [mimic-multi]'s per-request adapter scales: `key`'s at the configured
+        [gemma4-12b-mimic-u]'s per-request adapter scales: `key`'s at the configured
         scale, every other at 0. None = the bare base (the chat controller).
         """
         if not self._adapters:

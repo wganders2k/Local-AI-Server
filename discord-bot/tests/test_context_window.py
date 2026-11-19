@@ -149,10 +149,10 @@ async def sizes_from(entries):
 
 async def test_ctx_size_is_read_from_the_argv():
     # The real shape: llama-server reports the full command line it would run.
-    entries = [make_entry("brain-dense-heretic",
-                          ["--alias", "brain-dense-heretic", "--ctx-size", "96000",
+    entries = [make_entry("qwen3.6-27b-u",
+                          ["--alias", "qwen3.6-27b-u", "--ctx-size", "96000",
                            "--flash-attn", "on", "--n-gpu-layers", "-1"])]
-    assert await sizes_from(entries) == {"brain-dense-heretic": 96000}
+    assert await sizes_from(entries) == {"qwen3.6-27b-u": 96000}
 
 
 async def test_short_form_flag_is_accepted():

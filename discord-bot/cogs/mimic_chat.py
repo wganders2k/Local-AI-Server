@@ -169,7 +169,7 @@ class MimicChatCog(commands.Cog):
                     return  # nothing anyone said survived the filters (a command, a bare ">>>>")
                 # `length` paces the first burst only: the one before any persona has spoken.
                 length = state.length if all(line.persona is None for line in lines) else None
-                # A persona since dropped from the roster or [mimic-multi] sits this chat out.
+                # A persona since dropped from the roster or [gemma4-12b-mimic-u] sits this chat out.
                 personas = [p for p in state.personas if p in reader.cast.personas]
                 if not personas:
                     await thread.send("⚠️ None of this chat's personas are available any more.")
