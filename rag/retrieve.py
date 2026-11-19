@@ -290,8 +290,13 @@ class _ExactIndex:
         channel_name: Optional[str] = None,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
+        offset: int = 0,
     ) -> List[str]:
-        """Ids of the k most similar vectors that pass the filters, best first."""
+        """
+        Ids of the k most similar vectors that pass the filters, best first,
+        after skipping the ``offset`` best — so offset=10 is the next page of
+        ten. Empty once the ranking is exhausted.
+        """
         import numpy as np
 
         if not self.count:
@@ -311,9 +316,11 @@ class _ExactIndex:
         # allowed rows first copies it, which cost ~90 ms a query.
         scores = self.vectors @ np.asarray(query_vec, dtype=np.float32)
         scores[~mask] = -np.inf
-        k = min(k, allowed)
-        top = np.argpartition(-scores, k - 1)[:k]
-        top = top[np.argsort(-scores[top])]
+        n = min(offset + k, allowed)
+        if n <= offset:
+            return []
+        top = np.argpartition(-scores, n - 1)[:n]
+        top = top[np.argsort(-scores[top])][offset:]
         return [self.ids[i] for i in top]
 
 
@@ -358,6 +365,7 @@ def build_lore_context(
     channel_name: Optional[str] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
+    offset: int = 0,
 ) -> Tuple[str, int]:
     """
     Retrieve relevant lore chunks for a query and format them into a
@@ -375,6 +383,8 @@ def build_lore_context(
         channel_name: Optional — only search within this channel.
         start_date: Optional ISO 8601 date — only include results after this date.
         end_date: Optional ISO 8601 date — only include results before this date.
+        offset: Skip this many of the best matches — the agent pages through
+            lower-ranked results of the same query this way.
 
     Returns:
         Tuple of (context_string, chunk_count).
@@ -396,7 +406,9 @@ def build_lore_context(
         return "", 0
 
     try:
-        ids = exact_index(collection).nearest(query_embedding, top_k, channel_name, start_date, end_date)
+        ids = exact_index(collection).nearest(
+            query_embedding, top_k, channel_name, start_date, end_date, offset=offset,
+        )
         documents, metadatas = _get_in_order(collection, ids)
     except Exception:
         logger.exception("Semantic search failed")
@@ -417,6 +429,7 @@ def search_images(
     channel_name: Optional[str] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
+    offset: int = 0,
 ) -> Tuple[str, int]:
     """
     Semantic search over image captions, kept apart from conversation search
@@ -424,7 +437,8 @@ def search_images(
 
     Each hit is returned as the conversation the image was posted in, led by
     the matching image, so the agent sees why it was posted and how people
-    reacted. Several hits in one conversation share one block.
+    reacted. Several hits in one conversation share one block. ``offset``
+    skips that many of the best-matching conversations, for paging.
 
     Returns:
         (context, number of conversations returned)
@@ -435,7 +449,7 @@ def search_images(
         chunks = client.get_or_create_collection(name=collection_name)
         q = get_embedding_model().encode([query], normalize_embeddings=True)[0]
         # Over-fetch: several images often come from one conversation.
-        image_ids = exact_index(images).nearest(q, top_k * 3, channel_name, start_date, end_date)
+        image_ids = exact_index(images).nearest(q, (offset + top_k) * 3, channel_name, start_date, end_date)
         _, image_metas = _get_in_order(images, image_ids)
     except Exception:
         logger.exception("Image search failed")
@@ -446,9 +460,11 @@ def search_images(
         cid = (meta or {}).get("chunk_id")
         if not cid:
             continue
-        if cid not in hits and len(hits) >= top_k:
+        if cid not in hits and len(hits) >= offset + top_k:
             continue
         hits.setdefault(cid, []).append(meta)
+    # Conversations rank by their best image; dicts keep that order.
+    hits = dict(list(hits.items())[offset:])
     if not hits:
         return "", 0
 
@@ -651,16 +667,48 @@ def format_context_block(
 # metadata answers a different class of question, over the whole collection.
 #
 # ChromaDB applies `limit` before any ordering we do here, so selection has to
-# pull the full matching set and sort it in-process. _MAX_SCAN caps that.
+# pull the full matching set and sort it in-process. It is read in pages of
+# _MAX_SCAN until exhausted. A single capped read used to stop at the first
+# 5,000 chunks, so an unfiltered count — the busiest channel or month, every
+# author — saw a quarter of the archive and silently left members out.
 
 _MAX_SCAN = 5000
+
+
+def _get_all(collection, **kwargs) -> dict:
+    """collection.get() over every matching chunk, a page of _MAX_SCAN at a time."""
+    documents: list = []
+    metadatas: list = []
+    offset = 0
+    while True:
+        page = collection.get(**kwargs, limit=_MAX_SCAN, offset=offset)
+        docs = page.get("documents") or []
+        documents.extend(docs)
+        metadatas.extend(page.get("metadatas") or [None] * len(docs))
+        if len(docs) < _MAX_SCAN:
+            return {"documents": documents, "metadatas": metadatas}
+        offset += _MAX_SCAN
 
 # Chunk documents are rendered by ingest.format_chunk_text() as a header line
 # followed by one "username: message" line per message, so a speaker is matched
 # by anchoring to the start of a line in multiline mode.
+def _authors(author: str) -> List[str]:
+    """
+    The handles in an author filter. Several, comma-separated, match any of
+    them — one person's current and old accounts. Discord handles cannot
+    contain commas.
+    """
+    return [a.strip().lstrip("@") for a in author.split(",") if a.strip().lstrip("@")]
+
+
 def _author_regex(author: str) -> str:
-    """Regex matching any chunk in which `author` spoke."""
-    return f"(?im)^{re.escape(author.lstrip('@'))}:"
+    """Regex matching any chunk in which any of the filter's authors spoke."""
+    return f"(?im)^(?:{'|'.join(re.escape(a) for a in _authors(author))}):"
+
+
+def _author_set(author: Optional[str]) -> Optional[set]:
+    """The filter's handles, casefolded, for checking each message's speaker."""
+    return {a.casefold() for a in _authors(author)} if author else None
 
 
 def _term_regex(term: str, whole_word: bool = False) -> str:
@@ -772,7 +820,8 @@ def search_literal(
 
     Args:
         term: Literal text to match, case-insensitively. Optional if author set.
-        author: Username whose messages to match. Optional if term set.
+        author: Username whose messages to match, or several comma-separated
+            (one person's accounts). Optional if term set.
         channel_name: Restrict to one channel.
         start_date / end_date: ISO 8601 bounds.
         order: "earliest" (oldest first) or "latest" (newest first).
@@ -798,7 +847,6 @@ def search_literal(
     try:
         kwargs = {
             "include": ["documents", "metadatas"],
-            "limit": _MAX_SCAN,
             "where_document": where_document,
         }
         if where:
@@ -807,7 +855,7 @@ def search_literal(
             "Literal search: term=%r author=%r order=%s filters=%s",
             term, author, order, where,
         )
-        results = collection.get(**kwargs)
+        results = _get_all(collection, **kwargs)
     except Exception:
         logger.exception("ChromaDB literal query failed")
         return "", 0
@@ -823,7 +871,7 @@ def search_literal(
     # not "this person said it". Re-check per message so an author+term search
     # means what the caller thinks it means.
     term_re = re.compile(_term_regex(term, whole_word)) if term else None
-    want_author = author.lstrip("@").casefold() if author else None
+    want_author = _author_set(author)
 
     kept = []
     for doc, meta in zip(documents, metadatas):
@@ -832,7 +880,7 @@ def search_literal(
         if term_re or want_author:
             captions = _captions_of(meta)
             for msg in _messages_for_matching(doc, meta):
-                if want_author and msg["user"].casefold() != want_author:
+                if want_author and msg["user"].casefold() not in want_author:
                     continue
                 if term_re and not term_re.search(msg["text"]):
                     continue
@@ -901,7 +949,8 @@ def aggregate_stats(
 
     Args:
         term: Literal text to count, case-insensitively.
-        author: Restrict counting to one speaker.
+        author: Restrict counting to one speaker, or several comma-separated
+            (one person's accounts).
         channel_name / start_date / end_date: Scope filters.
         group_by: "author", "channel", or "month".
         top_n: Number of groups to report.
@@ -927,12 +976,11 @@ def aggregate_stats(
     try:
         kwargs = {
             "include": ["documents", "metadatas"],
-            "limit": _MAX_SCAN,
             "where_document": where_document,
         }
         if where:
             kwargs["where"] = where
-        results = collection.get(**kwargs)
+        results = _get_all(collection, **kwargs)
     except Exception:
         logger.exception("ChromaDB aggregate query failed")
         return "", 0
@@ -943,7 +991,7 @@ def aggregate_stats(
         return "", 0
 
     term_re = re.compile(_term_regex(term, whole_word)) if term else None
-    want_author = author.lstrip("@").casefold() if author else None
+    want_author = _author_set(author)
 
     counts: Dict[str, int] = {}
     total = 0
@@ -951,7 +999,7 @@ def aggregate_stats(
         meta = meta or {}
         for msg in _messages_for_matching(doc, meta):
             speaker, text = msg["user"], msg["text"]
-            if want_author and speaker.casefold() != want_author:
+            if want_author and speaker.casefold() not in want_author:
                 continue
             if term_re and not term_re.search(text):
                 continue

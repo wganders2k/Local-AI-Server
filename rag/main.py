@@ -11,7 +11,7 @@ import os
 from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ingest import run_ingest
 from retrieve import (
@@ -61,6 +61,7 @@ _ingest_task: Optional[asyncio.Task] = None
 class RetrieveRequest(BaseModel):
     query: str
     top_k: int = 5
+    offset: int = Field(0, ge=0)        # Skip this many best matches (paging)
     channel_name: Optional[str] = None  # Filter to a specific channel
     start_date: Optional[str] = None    # ISO 8601 — only results after this date
     end_date: Optional[str] = None      # ISO 8601 — only results before this date
@@ -74,6 +75,7 @@ class RetrieveResponse(BaseModel):
 class ImageSearchRequest(BaseModel):
     query: str
     top_k: int = 5
+    offset: int = Field(0, ge=0)        # Skip this many best conversations (paging)
     channel_name: Optional[str] = None
     start_date: Optional[str] = None
     end_date: Optional[str] = None
@@ -178,6 +180,7 @@ async def retrieve(req: RetrieveRequest):
         channel_name=req.channel_name,
         start_date=req.start_date,
         end_date=req.end_date,
+        offset=req.offset,
     )
 
     return RetrieveResponse(context=context, chunk_count=chunk_count)
@@ -198,6 +201,7 @@ async def search_images_endpoint(req: ImageSearchRequest):
         channel_name=req.channel_name,
         start_date=req.start_date,
         end_date=req.end_date,
+        offset=req.offset,
     )
     return RetrieveResponse(context=context, chunk_count=count)
 
