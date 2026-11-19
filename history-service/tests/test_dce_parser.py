@@ -193,10 +193,18 @@ class TestParseDCEMessage:
             {"id": "43", "name": "erin_h", "nickname": None},  # reply ping, not in the text
         ]
         record = parse_dce_message(raw, channel_id="111", channel_name="general")
-        assert record["mentions"] == [
-            {"user_id": "42", "username": "bobby_tables", "display": 'Bobby "Little Tables" Droptables'},
+        # The transient nickname is replaced by the account handle, and not kept.
+        assert record["content"] == "@bobby_tables you coming?"
+        assert record["mentions"] == [{"user_id": "42", "username": "bobby_tables"}]
+
+    def test_a_nickname_inside_a_longer_one_is_not_split(self):
+        raw = _build_message(content="@Al and @Al Smith")
+        raw["mentions"] = [
+            {"id": "1", "name": "al_one", "nickname": "Al"},
+            {"id": "2", "name": "al_smith", "nickname": "Al Smith"},
         ]
-        assert record["content"] == raw["content"]
+        record = parse_dce_message(raw, channel_id="111", channel_name="general")
+        assert record["content"] == "@al_one and @al_smith"
 
     def test_no_mentions_no_field(self):
         record = parse_dce_message(_build_message(), channel_id="111", channel_name="general")

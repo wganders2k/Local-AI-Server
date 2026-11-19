@@ -361,6 +361,18 @@ def test_aliases_rename_speakers_and_mentions_alike():
     assert examples[0]["completion"][0]["content"] == "@robert is, he said so"
 
 
+def test_mentions_archived_as_handles_render_the_same():
+    # history-service now stores "@bob" with no nickname; the alias still applies,
+    # and a longer handle sharing the prefix is left alone.
+    examples, _ = build([
+        msg(1, OTHER, 0, "who is bringing the speaker"),
+        msg(2, TARGET, 1, "@bob is, ask @bobcat too",
+            mentions=[{"user_id": OTHER, "username": "bob"}]),
+    ], aliases={OTHER: "robert"})
+
+    assert examples[0]["completion"][0]["content"] == "@robert is, ask @bobcat too"
+
+
 def test_every_account_of_the_member_supplies_targets():
     old_account = "999"
     examples, _ = build([

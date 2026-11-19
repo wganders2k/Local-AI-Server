@@ -138,7 +138,8 @@ def parse_dce_message(
 
     mentions = parse_mentions(raw.get("mentions"), content)
     if mentions:
-        record["mentions"] = mentions
+        record["content"] = content_with_handles(content, mentions)
+        record["mentions"] = [{"user_id": m["user_id"], "username": m["username"]} for m in mentions]
 
     return record
 
@@ -146,7 +147,9 @@ def parse_dce_message(
 # What the parser owns on a record beyond its identity. POST /reparse refreshes
 # these on messages already archived, so a parser change reaches old records;
 # everything else (attachments, and the captions on them) is left alone.
-PARSER_OWNED_FIELDS = ("type", "reference", "is_pinned", "mentions")
+# content is here because the parser rewrites the mentions in it (see
+# content_with_handles); a reparse is how old records get the handles.
+PARSER_OWNED_FIELDS = ("content", "type", "reference", "is_pinned", "mentions")
 
 
 def parse_reference(raw_reference: Optional[dict]) -> Optional[dict]:
@@ -164,6 +167,24 @@ def parse_reference(raw_reference: Optional[dict]) -> Optional[dict]:
     }
     ref = {k: str(v) for k, v in ref.items() if v}
     return ref if ("message_id" in ref or "channel_id" in ref) else None
+
+
+def content_with_handles(content: str, mentions: List[dict]) -> str:
+    """
+    `content` with each "@display name" replaced by "@username".
+
+    DCE writes a mention as the server nickname the person had at export time.
+    Nicknames are transient — the same person appears under a different one in
+    every export, and a joke nickname ("@Some Oinking Name") pollutes term
+    searches with words nobody typed — so the archive keeps the stable account
+    handle, the same one it uses for authors. Longest names first, so a
+    nickname that is a prefix of another is not replaced inside it.
+    """
+    for m in sorted(mentions, key=lambda m: len(m["display"]), reverse=True):
+        handle = m["username"] or m["user_id"]
+        if handle:
+            content = content.replace(f"@{m['display']}", f"@{handle}")
+    return content
 
 
 def parse_mentions(raw_mentions: Optional[list], content: str) -> List[dict]:

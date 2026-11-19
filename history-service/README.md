@@ -126,25 +126,29 @@ If you are working from an older `.env`, note that `RETRAIN_THRESHOLD`, `TRAININ
   "channel_id": "111222333444555666",
   "channel_name": "general",
   "timestamp": "2025-03-15T14:23:01Z",
-  "content": "@Sir Lags-a-Lot (AFK) lmao those aren't strats, that's just dying slower",
+  "content": "@user1 lmao those aren't strats, that's just dying slower",
   "is_bot": false,
   "type": "Reply",
   "reference": {"message_id": "123456789012345600", "channel_id": "111222333444555666", "type": "Default"},
   "is_pinned": true,
-  "mentions": [{"user_id": "222333444555666777", "username": "user1", "display": "Sir Lags-a-Lot (AFK)"}],
+  "mentions": [{"user_id": "222333444555666777", "username": "user1"}],
   "attachments": []
 }
 ```
 
-`content` is DCE's text as exported, unaltered — mentions included, rendered as
-"@" + nickname. The optional fields appear only when they say something:
+`content` is DCE's text as exported, except for mentions. DCE writes a mention as
+"@" + the nickname the person had at export time — transient, so the same person
+reads differently in every export, and a joke nickname pollutes term searches
+with words nobody typed. The parser writes "@" + the account handle instead, the
+same stable name it uses for authors, and keeps no nickname. The optional fields
+appear only when they say something:
 
 | field | meaning |
 |---|---|
 | `type` | DCE's message type: a name where DCE has one (`Default`, `Reply`, `ChannelPinnedMessage`, `ThreadCreated`), else Discord's number as a string (`"46"`). Always present |
 | `reference` | the message this one points at: what a reply answers, a forward's source (`type: "Forward"`), what a pin event pinned |
 | `is_pinned` | the message is pinned in its channel |
-| `mentions` | who each "@Name" in `content` is. `display` is the exact text after the "@". Nicknames hold spaces and punctuation, so this is the only reliable way to resolve one |
+| `mentions` | who each "@handle" in `content` is: `user_id` and `username`. Only mentions written in the text are listed; a reply's implicit ping is not |
 | `attachments` | see Image Captioning |
 
 The archive is **unfiltered**: every human message is retained regardless of
@@ -154,8 +158,8 @@ Consumers filter by `type`. The one exception is bot-authored messages, which
 the parser drops.
 
 After a parser change, `POST /reparse` brings existing records up to date: it
-appends what is new and refreshes `type`, `reference`, `is_pinned` and
-`mentions` on what is already archived. Attachments get their parser-owned
+appends what is new and refreshes `content`, `type`, `reference`, `is_pinned`
+and `mentions` on what is already archived. Attachments get their parser-owned
 fields (`attachment_id`, `url`, `content_type`, `filename`, `file_size_bytes`)
 refreshed the same way, and an image the parser now recognises moves from
 `skipped` to `pending`. Captions and media fields are never touched.

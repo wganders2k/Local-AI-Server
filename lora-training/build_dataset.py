@@ -49,6 +49,7 @@ import glob
 import json
 import logging
 import os
+import re
 import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
@@ -90,16 +91,25 @@ logger = logging.getLogger("build-dataset")
 
 def resolve_mentions(record: dict) -> str:
     """
-    `content` with each "@Nickname" history-service could identify turned back
-    into Discord's "<@id>", so normalise renders it as "@username" — the same
-    name the speaker labels use, which lets the model connect a mention to a
-    speaker. A nickname never could: "@Sir Lags-a-Lot (AFK)" and "[erin_h]"
-    are one person. Records archived before history-service kept `mentions`
-    pass through unchanged.
+    `content` with each mention history-service identified turned back into
+    Discord's "<@id>", so normalise renders it as "@username" — the same name
+    the speaker labels use, which lets the model connect a mention to a
+    speaker.
+
+    history-service now writes mentions as "@username" itself; records archived
+    before that still say "@Nickname" and carry the nickname as `display`.
+    Both are handled. Records archived before `mentions` existed pass through
+    unchanged.
     """
     text = record.get("content") or ""
-    for m in sorted(record.get("mentions") or [], key=lambda m: len(m["display"]), reverse=True):
-        text = text.replace("@" + m["display"], f"<@{m['user_id']}>")
+    mentions = record.get("mentions") or []
+    for m in sorted(mentions, key=lambda m: len(m.get("display") or m.get("username") or ""), reverse=True):
+        name = m.get("display") or m.get("username")
+        if not name:
+            continue
+        # A handle must not match the start of a longer one ("@al" in "@al_b").
+        tail = "" if m.get("display") else r"(?![\w.])"
+        text = re.sub(re.escape("@" + name) + tail, f"<@{m['user_id']}>", text)
     return text
 
 
